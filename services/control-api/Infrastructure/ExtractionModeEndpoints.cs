@@ -1,0 +1,872 @@
+using System.Security.Cryptography;
+using System.Text;
+using PalControl.ControlApi.Domain;
+using PalControl.ControlApi.Extraction;
+
+namespace PalControl.ControlApi.Infrastructure;
+
+public static class ExtractionModeEndpoints
+{
+    public static RouteGroupBuilder MapExtractionModeEndpoints(this RouteGroupBuilder api)
+    {
+        var group = api.MapGroup("/extraction");
+
+        group.MapGet("/overview", async (
+            string userId,
+            ExtractionModeCoordinator coordinator,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var context = await coordinator.GetAccountContextAsync(
+                    userId,
+                    requireOnline: false,
+                    cancellationToken);
+                var runs = await settlement.ListAsync(
+                    context.Account.AccountId,
+                    context.Season.SeasonId,
+                    1000,
+                    cancellationToken);
+                return Results.Ok(new
+                {
+                    userId = context.Account.ExternalUserId,
+                    displayName = context.Account.DisplayName,
+                    season = SeasonDto(context.Season, coordinator.GetNextDailyRefresh(DateTimeOffset.UtcNow)),
+                    balances = new
+                    {
+                        merchantCoin = context.Wallet.MarketCoin.Balance,
+                        weeklyTicket = context.Wallet.SeasonVoucher.Balance
+                    },
+                    seasonStats = new
+                    {
+                        successfulRuns = runs.Count(run => run.State == ExtractionSettlementState.Settled),
+                        failedRuns = runs.Count(run => run.State == ExtractionSettlementState.Failed),
+                        uncertainRuns = runs.Count(run => run.State == ExtractionSettlementState.Uncertain),
+                        extractedValue = runs
+                            .Where(run => run.State == ExtractionSettlementState.Settled)
+                            .Sum(run => run.TotalValue)
+                    },
+                    online = context.Online,
+                    persistence = "sqlite-event-store"
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/catalog", async (
+            string? userId,
+            ExtractionModeCoordinator coordinator,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var products = await coordinator.ListProductsAsync(cancellationToken);
+                Dictionary<Guid, int> purchasedByProduct = [];
+                if (!string.IsNullOrWhiteSpace(userId))
+                {
+                    var context = await coordinator.GetAccountContextAsync(
+                        userId,
+                        requireOnline: false,
+                        cancellationToken);
+                    var orders = await coordinator.ListOrdersAsync(
+                        context.Account.AccountId,
+                        context.Season.SeasonId,
+                        1000,
+                        cancellationToken);
+                    foreach (var line in orders
+                                 .Where(order => order.State != ShopOrderState.Refunded)
+                                 .SelectMany(order => order.Lines))
+                    {
+                        purchasedByProduct[line.ProductId] = checked(
+                            purchasedByProduct.GetValueOrDefault(line.ProductId) + line.Quantity);
+                    }
+                }
+                var revisionSource = string.Join('|', products.Select(product =>
+                    $"{product.ProductId:N}:{product.Revision}:{product.Active}"));
+                var revision = Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(revisionSource))).ToLowerInvariant();
+                return Results.Ok(new
+                {
+                    revision,
+                    items = products.Select(product => ProductDto(
+                        product,
+                        purchasedByProduct.GetValueOrDefault(product.ProductId))).ToArray()
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/orders", async (
+            string userId,
+            ExtractionModeCoordinator coordinator,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var context = await coordinator.GetAccountContextAsync(
+                    userId,
+                    requireOnline: false,
+                    cancellationToken);
+                var orders = await coordinator.ListOrdersAsync(
+                    context.Account.AccountId,
+                    context.Season.SeasonId,
+                    100,
+                    cancellationToken);
+                return Results.Ok(new { items = orders.Select(OrderDto).ToArray() });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/ledger", async (
+            string userId,
+            ExtractionModeCoordinator coordinator,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var context = await coordinator.GetAccountContextAsync(
+                    userId,
+                    requireOnline: false,
+                    cancellationToken);
+                var entries = await coordinator.ListLedgerAsync(
+                    context.Account.AccountId,
+                    context.Season.SeasonId,
+                    100,
+                    cancellationToken);
+                return Results.Ok(new
+                {
+                    items = entries.Select(entry => new
+                    {
+                        entryId = entry.EntryId,
+                        currency = ExtractionModeCoordinator.ToClientCurrency(entry.Currency),
+                        amount = entry.Delta,
+                        balanceAfter = entry.BalanceAfter,
+                        reason = entry.Reason,
+                        referenceId = entry.ReferenceId,
+                        createdAt = entry.CreatedAt
+                    }).ToArray()
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/runs", async (
+            string userId,
+            ExtractionModeCoordinator coordinator,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var context = await coordinator.GetAccountContextAsync(
+                    userId,
+                    requireOnline: false,
+                    cancellationToken);
+                var runs = await settlement.ListAsync(
+                    context.Account.AccountId,
+                    context.Season.SeasonId,
+                    100,
+                    cancellationToken);
+                var settlementProbe = await settlement.ProbeSettlementAsync(cancellationToken);
+                return Results.Ok(new
+                {
+                    items = runs.Select(RunDto).ToArray(),
+                    settlementEnabled = settlementProbe.Success,
+                    reason = settlementProbe.Success
+                        ? null
+                        : settlementProbe.ErrorMessage ?? "RCON 扣物适配器当前不可用；未证明物品已移除前绝不入账。"
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/runs/quote", async (
+            CreateExtractionQuoteRequest request,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                var run = await settlement.QuoteAsync(request.UserId, cancellationToken);
+                return Results.Ok(QuoteDto(run));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/runs/{runId:guid}/settle", async (
+            Guid runId,
+            HttpRequest httpRequest,
+            SettleExtractionRunRequest request,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keyValues) ||
+                    keyValues.Count != 1 ||
+                    keyValues[0] is not { Length: >= 8 } idempotencyKey ||
+                    idempotencyKey.Length > 128 ||
+                    idempotencyKey.Any(char.IsControl))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "撤离结算必须提供 8 到 128 个字符的 Idempotency-Key。"));
+                }
+                var run = await settlement.SettleAsync(
+                    runId,
+                    request.UserId,
+                    idempotencyKey,
+                    cancellationToken);
+                return Results.Ok(RunDto(run));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/orders", async (
+            HttpRequest httpRequest,
+            CreateExtractionOrderRequest request,
+            ExtractionModeCoordinator coordinator,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keyValues) ||
+                    keyValues.Count != 1 ||
+                    keyValues[0] is not { Length: >= 8 } idempotencyKey ||
+                    idempotencyKey.Length > 128 ||
+                    idempotencyKey.Any(char.IsControl))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "Idempotency-Key 必须是 8 到 128 个非控制字符。"));
+                }
+                if (request.Quantity is < 1 or > 99)
+                {
+                    return Results.BadRequest(new ApiError(
+                        "INVALID_QUANTITY",
+                        "购买数量必须在 1 到 99 之间。"));
+                }
+                var context = await coordinator.GetAccountContextAsync(
+                    request.UserId,
+                    requireOnline: true,
+                    cancellationToken);
+                var product = await coordinator.FindProductAsync(request.ProductId, cancellationToken);
+                var purchase = await coordinator.PurchaseAsync(
+                    context,
+                    product,
+                    request.Quantity,
+                    idempotencyKey,
+                    cancellationToken);
+                if (purchase.ErrorCode is not null || purchase.Order is null)
+                {
+                    return PurchaseError(purchase);
+                }
+                return Results.Ok(OrderDto(purchase.Order));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/admin/wallet-adjustments", async (
+            HttpRequest httpRequest,
+            ExtractionWalletAdjustmentRequest request,
+            ExtractionModeCoordinator coordinator,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keyValues) ||
+                    keyValues.Count != 1 ||
+                    keyValues[0] is not { Length: >= 8 } idempotencyKey)
+                {
+                    return Results.BadRequest(new ApiError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "管理员调账必须提供 Idempotency-Key。"));
+                }
+                if (request.Delta == 0 || string.IsNullOrWhiteSpace(request.Reason))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "INVALID_WALLET_ADJUSTMENT",
+                        "delta 不能为 0，并且必须填写原因。"));
+                }
+                var currency = request.Currency switch
+                {
+                    "merchantCoin" => ExtractionCurrency.MarketCoin,
+                    "weeklyTicket" => ExtractionCurrency.SeasonVoucher,
+                    _ => throw new ExtractionModeException(
+                        "INVALID_CURRENCY",
+                        "currency 只能是 merchantCoin 或 weeklyTicket。",
+                        StatusCodes.Status400BadRequest)
+                };
+                var context = await coordinator.GetAccountContextAsync(
+                    request.UserId,
+                    requireOnline: false,
+                    cancellationToken);
+                var adjustment = await coordinator.AdjustWalletAsync(
+                    context,
+                    currency,
+                    request.Delta,
+                    request.Reason.Trim(),
+                    idempotencyKey,
+                    cancellationToken);
+                if (adjustment.ErrorCode is not null || adjustment.Balance is null)
+                {
+                    return Results.Json(
+                        new ApiError(
+                            adjustment.ErrorCode ?? "WALLET_ADJUSTMENT_FAILED",
+                            adjustment.ErrorMessage ?? "钱包调账失败。"),
+                        statusCode: StatusCodes.Status409Conflict);
+                }
+                return Results.Ok(new
+                {
+                    accountId = context.Account.AccountId,
+                    currency = ExtractionModeCoordinator.ToClientCurrency(currency),
+                    balance = adjustment.Balance.Balance,
+                    ledgerEntry = adjustment.LedgerEntry,
+                    created = adjustment.Created
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/admin/orders/{orderId:guid}/reconcile", async (
+            Guid orderId,
+            HttpRequest httpRequest,
+            ExtractionOrderReconciliationRequest request,
+            ExtractionCommerceService commerce,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                if (!operationGate.Current.Maintenance)
+                {
+                    return Results.Conflict(new ApiError(
+                        "RECONCILIATION_MAINTENANCE_REQUIRED",
+                        "人工终结不确定订单前必须先进入维护状态。"));
+                }
+                if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keyValues) ||
+                    keyValues.Count != 1 ||
+                    keyValues[0] is not { Length: >= 8 } idempotencyKey ||
+                    idempotencyKey.Length > 128 ||
+                    idempotencyKey.Any(char.IsControl))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "人工订单对账必须提供 8 至 128 字符的 Idempotency-Key。"));
+                }
+                ArgumentException.ThrowIfNullOrWhiteSpace(request.Resolution);
+                ArgumentException.ThrowIfNullOrWhiteSpace(request.Confirmation);
+                var resolution = request.Resolution.Trim().ToLowerInvariant();
+                var expectedConfirmation = $"ORDER-{orderId:N}-{resolution.ToUpperInvariant()}";
+                if (!string.Equals(request.Confirmation, expectedConfirmation, StringComparison.Ordinal))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "RECONCILIATION_CONFIRMATION_INVALID",
+                        $"confirmation 必须精确填写 {expectedConfirmation}。"));
+                }
+
+                ShopOrder? order;
+                if (resolution == "delivered")
+                {
+                    var result = await commerce.MarkUncertainOrderDeliveredAsync(
+                        orderId,
+                        "local-console",
+                        request.Reason,
+                        cancellationToken);
+                    if (result.ErrorCode is not null || result.Order is null)
+                    {
+                        return Results.Conflict(new ApiError(
+                            result.ErrorCode ?? "RECONCILIATION_FAILED",
+                            result.ErrorMessage ?? "无法终结不确定订单。"));
+                    }
+                    order = result.Order;
+                }
+                else if (resolution == "refund")
+                {
+                    var result = await commerce.RefundUncertainOrderAsync(
+                        orderId,
+                        idempotencyKey,
+                        "local-console",
+                        request.Reason,
+                        cancellationToken);
+                    if (result.ErrorCode is not null || result.Order is null)
+                    {
+                        return Results.Conflict(new ApiError(
+                            result.ErrorCode ?? "RECONCILIATION_FAILED",
+                            result.ErrorMessage ?? "无法退款并终结不确定订单。"));
+                    }
+                    order = result.Order;
+                }
+                else
+                {
+                    return Results.BadRequest(new ApiError(
+                        "INVALID_RECONCILIATION_RESOLUTION",
+                        "resolution 只能是 delivered 或 refund。"));
+                }
+                return Results.Ok(OrderDto(order));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapPost("/admin/runs/{runId:guid}/reconcile", async (
+            Guid runId,
+            ExtractionRunReconciliationRequest request,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                if (!operationGate.Current.Maintenance)
+                {
+                    return Results.Conflict(new ApiError(
+                        "RECONCILIATION_MAINTENANCE_REQUIRED",
+                        "人工终结不确定撤离前必须先进入维护状态。"));
+                }
+                ArgumentException.ThrowIfNullOrWhiteSpace(request.Resolution);
+                ArgumentException.ThrowIfNullOrWhiteSpace(request.Confirmation);
+                var resolution = request.Resolution.Trim().ToLowerInvariant();
+                var expectedConfirmation = $"RUN-{runId:N}-{resolution.ToUpperInvariant()}";
+                if (!string.Equals(request.Confirmation, expectedConfirmation, StringComparison.Ordinal))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "RECONCILIATION_CONFIRMATION_INVALID",
+                        $"confirmation 必须精确填写 {expectedConfirmation}。"));
+                }
+                var run = await settlement.ReconcileUncertainAsync(
+                    runId,
+                    resolution,
+                    request.Reason,
+                    cancellationToken);
+                return Results.Ok(RunDto(run));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/admin/rcon/status", async (
+            ExtractionSettlementService settlement,
+            CancellationToken cancellationToken) =>
+        {
+            if (!settlement.SettlementEnabled)
+            {
+                return Results.Ok(new
+                {
+                    enabled = false,
+                    connected = false,
+                    outcome = "disabled",
+                    error = new ApiError("RCON_DISABLED", "撤离 RCON 适配器未启用。")
+                });
+            }
+            var result = await settlement.ProbeSettlementAsync(cancellationToken);
+            return Results.Ok(new
+            {
+                enabled = true,
+                connected = result.Success,
+                outcome = result.Outcome.ToString().ToLowerInvariant(),
+                error = result.Success
+                    ? null
+                    : new ApiError(
+                        result.ErrorCode ?? "RCON_PROBE_FAILED",
+                        result.ErrorMessage ?? "RCON 探针失败。")
+            });
+        });
+
+        group.MapPost("/admin/rollover/maintenance", async (
+            RolloverMaintenanceRequest request,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var state = await operationGate.SetAsync(
+                    request.Maintenance,
+                    request.Reason,
+                    "local-console",
+                    cancellationToken);
+                return Results.Ok(state);
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/admin/rollover/preflight", async (
+            ExtractionModeCoordinator coordinator,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await coordinator.GetRolloverPreflightAsync(cancellationToken));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        group.MapGet("/admin/rollover/readiness", async (
+            ExtractionCommerceService commerce,
+            ExtractionRunStore runStore,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            var blockers = await GetRolloverBlockersAsync(
+                commerce,
+                runStore,
+                operationGate,
+                cancellationToken);
+            return Results.Ok(new
+            {
+                maintenance = blockers.GateState,
+                readyForWorldSwitch = blockers.ReadyForWorldSwitch,
+                activeOperations = blockers.ActiveOperations,
+                blockingOrders = blockers.Orders.Select(order => new
+                {
+                    orderId = order.OrderId,
+                    state = order.State.ToString(),
+                    updatedAt = order.UpdatedAt
+                }).ToArray(),
+                blockingRuns = blockers.Runs.Select(run => new
+                {
+                    runId = run.RunId,
+                    state = run.State.ToString(),
+                    updatedAt = run.UpdatedAt
+                }).ToArray()
+            });
+        });
+
+        group.MapPost("/admin/rollover/commit", async (
+            RolloverCommitRequest request,
+            ExtractionModeCoordinator coordinator,
+            ExtractionCommerceService commerce,
+            ExtractionRunStore runStore,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var blockers = await GetRolloverBlockersAsync(
+                    commerce,
+                    runStore,
+                    operationGate,
+                    cancellationToken);
+                if (!blockers.GateState.Maintenance)
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_MAINTENANCE_REQUIRED",
+                        "提交新世界前必须先关闭交易并进入换档维护。"));
+                }
+                if (!blockers.ReadyForWorldSwitch)
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_NOT_READY",
+                        $"仍有 {blockers.ActiveOperations} 个在途写操作、{blockers.Orders.Count} 个订单和 {blockers.Runs.Count} 个撤离记录等待终结。"));
+                }
+                var season = await coordinator.CommitRolloverAsync(
+                    request.WorldId,
+                    cancellationToken);
+                return Results.Ok(new
+                {
+                    seasonId = season.SeasonId,
+                    seasonCode = season.Code,
+                    worldId = season.WorldId,
+                    revision = season.Revision
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
+        return group;
+    }
+
+    private static async Task<RolloverBlockers> GetRolloverBlockersAsync(
+        ExtractionCommerceService commerce,
+        ExtractionRunStore runStore,
+        ExtractionOperationGate operationGate,
+        CancellationToken cancellationToken)
+    {
+        var orders = await commerce.ListBlockingOrdersAsync(cancellationToken);
+        var runs = await runStore.ListRolloverBlockingAsync(cancellationToken);
+        var gateState = operationGate.Current;
+        var activeOperations = operationGate.ActiveOperationCount;
+        return new RolloverBlockers(
+            gateState,
+            orders,
+            runs,
+            activeOperations,
+            gateState.Maintenance && activeOperations == 0 && orders.Count == 0 && runs.Count == 0);
+    }
+
+    internal static object SeasonDto(ExtractionSeason season, DateTimeOffset nextRefreshAt) => new
+    {
+        seasonId = season.SeasonId,
+        name = season.DisplayName,
+        state = season.State switch
+        {
+            ExtractionSeasonState.Scheduled => "scheduled",
+            ExtractionSeasonState.Active => "active",
+            ExtractionSeasonState.Closed => "closed",
+            ExtractionSeasonState.Archived => "closed",
+            _ => "scheduled"
+        },
+        startsAt = season.StartsAt,
+        endsAt = season.EndsAt,
+        nextShopRefreshAt = nextRefreshAt
+    };
+
+    internal static object ProductDto(ShopProduct product, int purchased) => new
+    {
+        productId = product.ProductId,
+        name = product.DisplayName,
+        description = product.Description,
+        category = ProductCategory(product.Sku),
+        tags = ProductTags(product),
+        price = new
+        {
+            currency = ExtractionModeCoordinator.ToClientCurrency(product.PriceCurrency),
+            amount = product.UnitPrice
+        },
+        deliverySummary = string.Join(" · ", product.ItemGrants.Select(grant =>
+            $"{grant.ItemId} × {grant.Quantity}")),
+        stockRemaining = product.PurchaseLimitPerSeason is int limit
+            ? Math.Max(0, limit - purchased)
+            : (int?)null,
+        purchaseLimit = product.PurchaseLimitPerSeason,
+        purchased,
+        enabled = product.Active,
+        featured = product.Sku is "STARTER-CAPTURE" or "STARTER-CROSSBOW"
+    };
+
+    internal static object OrderDto(ShopOrder order)
+    {
+        var line = order.Lines.First();
+        var charge = order.Charges.Single();
+        return new
+        {
+            orderId = order.OrderId,
+            productId = line.ProductId,
+            productName = line.DisplayName,
+            quantity = line.Quantity,
+            currency = ExtractionModeCoordinator.ToClientCurrency(charge.Currency),
+            totalAmount = charge.Amount,
+            state = order.State switch
+            {
+                ShopOrderState.PendingDelivery => "accepted",
+                ShopOrderState.Dispatching => "delivering",
+                ShopOrderState.Delivered => "succeeded",
+                ShopOrderState.DeliveryFailed => "failed",
+                ShopOrderState.DeliveryUncertain => "uncertain",
+                ShopOrderState.Refunded => "cancelled",
+                _ => "pending"
+            },
+            statusMessage = OrderStatusMessage(order.State),
+            createdAt = order.CreatedAt,
+            updatedAt = order.UpdatedAt
+        };
+    }
+
+    internal static object QuoteDto(ExtractionSettlementRun run) => new
+    {
+        runId = run.RunId,
+        state = "quoted",
+        zoneName = run.ZoneName,
+        items = run.Items.Select(item => new
+        {
+            itemId = item.ItemId,
+            name = item.DisplayName,
+            quantity = item.Quantity,
+            unitValue = item.UnitValue,
+            totalValue = item.TotalValue
+        }).ToArray(),
+        itemCount = run.ItemCount,
+        totalValue = run.TotalValue,
+        expiresAt = run.ExpiresAt
+    };
+
+    internal static object RunDto(ExtractionSettlementRun run) => new
+    {
+        runId = run.RunId,
+        state = run.State switch
+        {
+            ExtractionSettlementState.Quoted => "preparing",
+            ExtractionSettlementState.Consuming => "deployed",
+            ExtractionSettlementState.Removed => "deployed",
+            ExtractionSettlementState.Settled => "extracted",
+            ExtractionSettlementState.Uncertain => "uncertain",
+            ExtractionSettlementState.Cancelled => "cancelled",
+            ExtractionSettlementState.Expired => "cancelled",
+            _ => "failed"
+        },
+        extractedItemCount = run.State == ExtractionSettlementState.Settled ? run.ItemCount : 0,
+        extractedValue = run.State == ExtractionSettlementState.Settled ? run.TotalValue : 0,
+        rewardCurrency = "weeklyTicket",
+        rewardAmount = run.State == ExtractionSettlementState.Settled ? run.TotalValue : 0,
+        startedAt = run.QuotedAt,
+        endedAt = run.SettledAt ?? (run.State is
+            ExtractionSettlementState.Failed or
+            ExtractionSettlementState.Uncertain or
+            ExtractionSettlementState.Expired or
+            ExtractionSettlementState.Cancelled
+                ? run.UpdatedAt
+                : (DateTimeOffset?)null),
+        statusMessage = run.ErrorMessage,
+        internalState = run.State.ToString()
+    };
+
+    private static string ProductCategory(string sku) => sku switch
+    {
+        var value when value.Contains("AMMO", StringComparison.OrdinalIgnoreCase) => "弹药",
+        var value when value.Contains("SPHERE", StringComparison.OrdinalIgnoreCase) ||
+                       value.Contains("CAPTURE", StringComparison.OrdinalIgnoreCase) => "捕捉",
+        var value when value.Contains("MEDIC", StringComparison.OrdinalIgnoreCase) => "医疗",
+        var value when value.Contains("CROSSBOW", StringComparison.OrdinalIgnoreCase) => "武器",
+        _ => "补给"
+    };
+
+    private static string[] ProductTags(ShopProduct product) =>
+    [
+        product.PriceCurrency == ExtractionCurrency.MarketCoin ? "永久货币" : "本周货币",
+        product.PurchaseLimitPerSeason is null ? "不限购" : $"周限购 {product.PurchaseLimitPerSeason}",
+        product.UpdatedBy.StartsWith("daily-rotation:", StringComparison.Ordinal)
+            ? "今日轮换价"
+            : "基础价"
+    ];
+
+    private static string? OrderStatusMessage(ShopOrderState state) => state switch
+    {
+        ShopOrderState.PendingDelivery => "订单已扣款，等待 PalDefender 发货。",
+        ShopOrderState.Dispatching => "已提交游戏服，正在等待背包回读确认。",
+        ShopOrderState.Delivered => "背包数量变化已确认。",
+        ShopOrderState.DeliveryFailed => "游戏服明确拒绝发货，系统将按配置退款。",
+        ShopOrderState.DeliveryUncertain => "发货结果不确定，已停止自动重试和退款。",
+        ShopOrderState.Refunded => "订单已退款。",
+        _ => null
+    };
+
+    internal static IResult PurchaseError(ShopPurchaseResult result)
+    {
+        var status = result.ErrorCode switch
+        {
+            "PRODUCT_NOT_FOUND" => StatusCodes.Status404NotFound,
+            "IDEMPOTENCY_CONFLICT" => StatusCodes.Status409Conflict,
+            "INSUFFICIENT_FUNDS" => StatusCodes.Status409Conflict,
+            "PURCHASE_LIMIT_EXCEEDED" => StatusCodes.Status409Conflict,
+            "SEASON_NOT_ACTIVE" => StatusCodes.Status409Conflict,
+            _ => StatusCodes.Status422UnprocessableEntity
+        };
+        return Results.Json(
+            new ApiError(
+                result.ErrorCode ?? "PURCHASE_FAILED",
+                result.ErrorMessage ?? "商城订单创建失败。"),
+            statusCode: status);
+    }
+
+    internal static IResult ToError(Exception exception) => exception switch
+    {
+        ExtractionModeException modeException => Results.Json(
+            new ApiError(modeException.Code, modeException.Message),
+            statusCode: modeException.StatusCode),
+        ArgumentException argumentException => Results.BadRequest(
+            new ApiError("INVALID_EXTRACTION_REQUEST", argumentException.Message)),
+        KeyNotFoundException keyNotFoundException => Results.NotFound(
+            new ApiError("EXTRACTION_RESOURCE_NOT_FOUND", keyNotFoundException.Message)),
+        InvalidOperationException invalidOperationException => Results.Json(
+            new ApiError("EXTRACTION_STATE_CONFLICT", invalidOperationException.Message),
+            statusCode: StatusCodes.Status409Conflict),
+        IOException ioException => Results.Json(
+            new ApiError("EXTRACTION_STORE_UNAVAILABLE", ioException.Message),
+            statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(
+            new ApiError("EXTRACTION_REQUEST_FAILED", "摸金模式请求处理失败。"),
+            statusCode: StatusCodes.Status500InternalServerError)
+    };
+
+    public sealed record CreateExtractionOrderRequest(string UserId, Guid ProductId, int Quantity);
+
+    public sealed record CreateExtractionQuoteRequest(string UserId);
+
+    public sealed record SettleExtractionRunRequest(string UserId);
+
+    public sealed record RolloverMaintenanceRequest(bool Maintenance, string Reason);
+
+    public sealed record RolloverCommitRequest(string WorldId);
+
+    public sealed record ExtractionWalletAdjustmentRequest(
+        string UserId,
+        string Currency,
+        long Delta,
+        string Reason);
+
+    public sealed record ExtractionOrderReconciliationRequest(
+        string Resolution,
+        string Reason,
+        string Confirmation);
+
+    public sealed record ExtractionRunReconciliationRequest(
+        string Resolution,
+        string Reason,
+        string Confirmation);
+
+    private sealed record RolloverBlockers(
+        ExtractionOperationGateState GateState,
+        IReadOnlyList<ShopOrder> Orders,
+        IReadOnlyList<ExtractionSettlementRun> Runs,
+        int ActiveOperations,
+        bool ReadyForWorldSwitch);
+}

@@ -1,0 +1,520 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Options;
+using PalControl.ControlApi.Extraction;
+
+namespace PalControl.ControlApi.Infrastructure;
+
+[JsonConverter(typeof(JsonStringEnumConverter<ExtractionSettlementState>))]
+public enum ExtractionSettlementState
+{
+    Quoted,
+    Consuming,
+    Removed,
+    Settled,
+    Failed,
+    Uncertain,
+    Expired,
+    Cancelled
+}
+
+public sealed record ExtractionLootLine(
+    string ItemId,
+    string DisplayName,
+    int Quantity,
+    long UnitValue,
+    long TotalValue);
+
+public sealed record ExtractionSettlementRun(
+    Guid RunId,
+    Guid AccountId,
+    Guid SeasonId,
+    string UserId,
+    string ZoneId,
+    string ZoneName,
+    ExtractionSettlementState State,
+    IReadOnlyList<ExtractionLootLine> Items,
+    int ItemCount,
+    long TotalValue,
+    string QuoteSnapshotHash,
+    IReadOnlyDictionary<string, long>? PreDeleteTotals,
+    string? SettlementIdempotencyKey,
+    string? ErrorCode,
+    string? ErrorMessage,
+    DateTimeOffset QuotedAt,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset UpdatedAt,
+    DateTimeOffset? SettledAt);
+
+public sealed record ExtractionConsumptionStart(
+    ExtractionSettlementRun Run,
+    bool Started,
+    bool IdempotencyConflict);
+
+public sealed class ExtractionRunStore : IDisposable
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
+
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private Dictionary<Guid, ExtractionSettlementRun> _runs = [];
+    private readonly string _path;
+    private readonly FileStream _instanceLock;
+    private bool _disposed;
+
+    public ExtractionRunStore(
+        IOptions<ExtractionPersistenceOptions> options,
+        IWebHostEnvironment environment)
+    {
+        var configured = options.Value.DataDirectory;
+        var directory = Path.GetFullPath(Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(environment.ContentRootPath, configured));
+        Directory.CreateDirectory(directory);
+        _path = Path.Combine(directory, "extraction-runs.json");
+        _instanceLock = new FileStream(
+            Path.Combine(directory, "extraction-runs.lock"),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            1,
+            FileOptions.WriteThrough);
+        Load();
+    }
+
+    public async Task<ExtractionSettlementRun> CreateQuoteAsync(
+        Guid accountId,
+        Guid seasonId,
+        string userId,
+        string zoneId,
+        string zoneName,
+        IReadOnlyList<ExtractionLootLine> items,
+        string snapshotHash,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            var snapshot = CloneSnapshot();
+            var now = DateTimeOffset.UtcNow;
+            foreach (var expired in snapshot.Values.Where(run =>
+                         run.AccountId == accountId &&
+                         run.State == ExtractionSettlementState.Quoted &&
+                         run.ExpiresAt <= now).ToArray())
+            {
+                snapshot[expired.RunId] = expired with
+                {
+                    State = ExtractionSettlementState.Expired,
+                    UpdatedAt = now,
+                    ErrorCode = "QUOTE_EXPIRED",
+                    ErrorMessage = "撤离报价已过期。"
+                };
+            }
+            var blocking = snapshot.Values.FirstOrDefault(run =>
+                run.AccountId == accountId &&
+                run.State is ExtractionSettlementState.Consuming or
+                    ExtractionSettlementState.Removed or
+                    ExtractionSettlementState.Uncertain);
+            if (blocking is not null)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RECONCILIATION_REQUIRED",
+                    $"已有撤离记录 {blocking.RunId:N} 等待结算或人工对账。",
+                    StatusCodes.Status409Conflict);
+            }
+            foreach (var previous in snapshot.Values.Where(run =>
+                         run.AccountId == accountId &&
+                         run.State == ExtractionSettlementState.Quoted).ToArray())
+            {
+                snapshot[previous.RunId] = previous with
+                {
+                    State = ExtractionSettlementState.Cancelled,
+                    UpdatedAt = now,
+                    ErrorCode = "QUOTE_REPLACED",
+                    ErrorMessage = "已生成新的撤离报价。"
+                };
+            }
+            var totalValue = checked(items.Sum(item => item.TotalValue));
+            var itemCount = checked(items.Sum(item => item.Quantity));
+            var run = new ExtractionSettlementRun(
+                Guid.NewGuid(),
+                accountId,
+                seasonId,
+                userId,
+                zoneId,
+                zoneName,
+                ExtractionSettlementState.Quoted,
+                items.ToArray(),
+                itemCount,
+                totalValue,
+                snapshotHash,
+                null,
+                null,
+                null,
+                null,
+                now,
+                expiresAt,
+                now,
+                null);
+            snapshot[run.RunId] = run;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return Clone(run);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ExtractionSettlementRun?> GetAsync(
+        Guid runId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            return _runs.TryGetValue(runId, out var run) ? Clone(run) : null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<ExtractionSettlementRun>> ListAsync(
+        Guid? accountId,
+        Guid? seasonId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            return _runs.Values
+                .Where(run => (accountId is null || run.AccountId == accountId) &&
+                    (seasonId is null || run.SeasonId == seasonId))
+                .OrderByDescending(run => run.QuotedAt)
+                .Take(Math.Clamp(limit, 1, 1000))
+                .Select(Clone)
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<ExtractionSettlementRun>> ListRolloverBlockingAsync(
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            var now = DateTimeOffset.UtcNow;
+            return _runs.Values
+                .Where(run =>
+                    run.State is ExtractionSettlementState.Consuming or
+                        ExtractionSettlementState.Removed or
+                        ExtractionSettlementState.Uncertain ||
+                    run.State == ExtractionSettlementState.Quoted && run.ExpiresAt > now)
+                .OrderBy(run => run.UpdatedAt)
+                .ThenBy(run => run.RunId)
+                .Select(Clone)
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<ExtractionSettlementRun>> ListRecoverableAsync(
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            return _runs.Values
+                .Where(run => run.State is
+                    ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed)
+                .OrderBy(run => run.UpdatedAt)
+                .Take(Math.Clamp(limit, 1, 100))
+                .Select(Clone)
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ExtractionConsumptionStart> StartConsumptionAsync(
+        Guid runId,
+        string userId,
+        string idempotencyKey,
+        IReadOnlyDictionary<string, long> preDeleteTotals,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RUN_NOT_FOUND",
+                    "撤离报价不存在。",
+                    StatusCodes.Status404NotFound);
+            }
+            if (!string.Equals(run.UserId, userId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RUN_OWNER_MISMATCH",
+                    "撤离报价不属于该玩家。",
+                    StatusCodes.Status403Forbidden);
+            }
+            if (run.SettlementIdempotencyKey is not null)
+            {
+                var conflict = !string.Equals(
+                    run.SettlementIdempotencyKey,
+                    idempotencyKey,
+                    StringComparison.Ordinal);
+                return new ExtractionConsumptionStart(Clone(run), false, conflict);
+            }
+            var now = DateTimeOffset.UtcNow;
+            if (run.State != ExtractionSettlementState.Quoted || now >= run.ExpiresAt)
+            {
+                if (run.State == ExtractionSettlementState.Quoted)
+                {
+                    var snapshot = CloneSnapshot();
+                    var expired = snapshot[runId] with
+                    {
+                        State = ExtractionSettlementState.Expired,
+                        UpdatedAt = now,
+                        ErrorCode = "QUOTE_EXPIRED",
+                        ErrorMessage = "撤离报价已过期。"
+                    };
+                    snapshot[runId] = expired;
+                    await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+                }
+                throw new ExtractionModeException(
+                    "EXTRACTION_QUOTE_NOT_SETTLEABLE",
+                    "撤离报价已过期或不处于可结算状态。",
+                    StatusCodes.Status409Conflict);
+            }
+            var updatedSnapshot = CloneSnapshot();
+            var updated = updatedSnapshot[runId] with
+            {
+                State = ExtractionSettlementState.Consuming,
+                PreDeleteTotals = new Dictionary<string, long>(
+                    preDeleteTotals,
+                    StringComparer.OrdinalIgnoreCase),
+                SettlementIdempotencyKey = idempotencyKey,
+                UpdatedAt = now
+            };
+            updatedSnapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(updatedSnapshot, cancellationToken);
+            return new ExtractionConsumptionStart(Clone(updated), true, false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public Task<ExtractionSettlementRun> MarkRemovedAsync(
+        Guid runId,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            ExtractionSettlementState.Removed,
+            null,
+            null,
+            cancellationToken);
+
+    public Task<ExtractionSettlementRun> MarkFailedAsync(
+        Guid runId,
+        string code,
+        string message,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            ExtractionSettlementState.Failed,
+            code,
+            message,
+            cancellationToken);
+
+    public Task<ExtractionSettlementRun> MarkUncertainAsync(
+        Guid runId,
+        string code,
+        string message,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            ExtractionSettlementState.Uncertain,
+            code,
+            message,
+            cancellationToken);
+
+    public Task<ExtractionSettlementRun> MarkSettledAsync(
+        Guid runId,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            ExtractionSettlementState.Settled,
+            null,
+            null,
+            cancellationToken);
+
+    public Task<ExtractionSettlementRun> MarkManuallySettledAsync(
+        Guid runId,
+        string reason,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            ExtractionSettlementState.Settled,
+            "MANUALLY_RECONCILED_SETTLED",
+            reason,
+            cancellationToken);
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        _instanceLock.Dispose();
+        _gate.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    private async Task<ExtractionSettlementRun> TransitionAsync(
+        Guid runId,
+        ExtractionSettlementState state,
+        string? errorCode,
+        string? errorMessage,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+            if (run.State == state)
+            {
+                return Clone(run);
+            }
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = CloneSnapshot();
+            var updated = snapshot[runId] with
+            {
+                State = state,
+                ErrorCode = errorCode,
+                ErrorMessage = errorMessage,
+                UpdatedAt = now,
+                SettledAt = state == ExtractionSettlementState.Settled ? now : run.SettledAt
+            };
+            snapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return Clone(updated);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private void Load()
+    {
+        if (!File.Exists(_path))
+        {
+            return;
+        }
+        var bytes = File.ReadAllBytes(_path);
+        var runs = JsonSerializer.Deserialize<ExtractionSettlementRun[]>(bytes, JsonOptions)
+            ?? throw new InvalidDataException("The extraction run store is invalid.");
+        foreach (var run in runs)
+        {
+            if (run.RunId == Guid.Empty || !_runs.TryAdd(run.RunId, Clone(run)))
+            {
+                throw new InvalidDataException("The extraction run store contains duplicate or invalid ids.");
+            }
+        }
+    }
+
+    private async Task PersistSnapshotAsync(
+        IReadOnlyDictionary<Guid, ExtractionSettlementRun> snapshot,
+        CancellationToken cancellationToken)
+    {
+        var tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var stream = new FileStream(
+                             tempPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             32 * 1024,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(
+                    stream,
+                    snapshot.Values.OrderBy(run => run.QuotedAt).ToArray(),
+                    JsonOptions,
+                    cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(tempPath, _path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+    }
+
+    private async Task PersistAndSwapSnapshotAsync(
+        Dictionary<Guid, ExtractionSettlementRun> snapshot,
+        CancellationToken cancellationToken)
+    {
+        // The disk replacement is the commit point. No cancellable or fallible work
+        // may be introduced between it and the in-memory reference swap.
+        await PersistSnapshotAsync(snapshot, cancellationToken);
+        _runs = snapshot;
+    }
+
+    private Dictionary<Guid, ExtractionSettlementRun> CloneSnapshot() =>
+        _runs.ToDictionary(
+            pair => pair.Key,
+            pair => Clone(pair.Value));
+
+    private void EnsureReady()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    private static ExtractionSettlementRun Clone(ExtractionSettlementRun run) => run with
+    {
+        Items = run.Items.ToArray(),
+        PreDeleteTotals = run.PreDeleteTotals is null
+            ? null
+            : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase)
+    };
+}

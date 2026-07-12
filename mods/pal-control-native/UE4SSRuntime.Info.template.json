@@ -1,0 +1,28 @@
+{
+  "ModName": "Pal Control UE4SS Runtime",
+  "PackageName": "PalControlUE4SSRuntime",
+  "Thumbnail": "thumbnail.png",
+  "Version": "0.1.0",
+  "MinRevision": 0,
+  "Author": "Pal Control",
+  "Dependencies": null,
+  "Tags": [
+    "UE4SS",
+    "Utilities"
+  ],
+  "InstallRule": [
+    {
+      "Type": "UE4SS",
+      "Targets": [
+        "./UE4SS/"
+      ]
+    },
+    {
+      "Type": "UE4SS",
+      "IsServer": true,
+      "Targets": [
+        "./UE4SS/"
+      ]
+    }
+  ]
+}

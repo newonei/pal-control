@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pal-control.local/contracts/bridge/message.schema.json",
+  "title": "Pal Control Bridge Envelope",
+  "oneOf": [
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/heartbeat" },
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["protocolVersion", "messageType", "messageId", "sentAt"],
+      "properties": {
+        "protocolVersion": { "const": "1.0" },
+        "messageType": { "type": "string" },
+        "messageId": { "type": "string", "format": "uuid" },
+        "sentAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "hello": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["messageType", "gameBuild", "modVersion", "capabilities", "probes"],
+          "properties": {
+            "messageType": { "const": "hello" },
+            "gameBuild": { "type": "string" },
+            "modVersion": { "type": "string" },
+            "capabilities": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            },
+            "probes": {
+              "type": "object",
+              "additionalProperties": { "type": "boolean" }
+            }
+          }
+        }
+      ]
+    },
+    "heartbeat": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["messageType"],
+          "properties": {
+            "messageType": { "const": "heartbeat" }
+          }
+        }
+      ]
+    },
+    "command": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": [
+            "messageType",
+            "commandId",
+            "idempotencyKey",
+            "requestHash",
+            "serverId",
+            "actorId",
+            "operation",
+            "deadline",
+            "expectedRevision",
+            "reason",
+            "payload"
+          ],
+          "properties": {
+            "messageType": { "const": "command" },
+            "commandId": { "type": "string", "format": "uuid" },
+            "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 128 },
+            "requestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "serverId": { "type": "string" },
+            "actorId": { "type": "string" },
+            "operation": { "type": "string" },
+            "deadline": { "type": "string", "format": "date-time" },
+            "expectedRevision": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
+            "payload": { "type": "object" }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operation": { "const": "inventory.consume" } },
+            "required": ["operation"]
+          },
+          "then": {
+            "properties": {
+              "payload": { "$ref": "#/$defs/inventoryConsumePayload" }
+            }
+          }
+        }
+      ]
+    },
+    "inventoryConsumePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerPlayerId", "items", "expectedContainers"],
+      "properties": {
+        "ownerPlayerId": {
+          "anyOf": [
+            { "type": "string", "format": "uuid" },
+            { "type": "string", "pattern": "^[A-Fa-f0-9]{32}$" }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/inventoryConsumeItem" }
+        },
+        "expectedContainers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/inventoryExpectedContainer" }
+        }
+      }
+    },
+    "inventoryConsumeItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["itemId", "quantity"],
+      "properties": {
+        "itemId": {
+          "type": "string",
+          "pattern": "^(?!None$)[A-Za-z0-9_-]{1,128}$"
+        },
+        "quantity": { "type": "integer", "minimum": 1, "maximum": 999999 }
+      }
+    },
+    "inventoryExpectedContainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["containerKind", "containerId", "slots"],
+      "properties": {
+        "containerKind": { "enum": ["common", "dropSlot", "food"] },
+        "containerId": {
+          "anyOf": [
+            { "type": "string", "format": "uuid" },
+            { "type": "string", "pattern": "^[A-Fa-f0-9]{32}$" }
+          ]
+        },
+        "slots": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/inventoryExpectedSlot" }
+        }
+      }
+    },
+    "inventoryExpectedSlot": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slotIndex", "itemId", "quantity"],
+          "properties": {
+            "slotIndex": { "type": "integer", "minimum": 0 },
+            "itemId": { "const": "None" },
+            "quantity": { "const": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slotIndex", "itemId", "quantity"],
+          "properties": {
+            "slotIndex": { "type": "integer", "minimum": 0 },
+            "itemId": {
+              "type": "string",
+              "pattern": "^(?!None$)[A-Za-z0-9_-]{1,128}$"
+            },
+            "quantity": { "type": "integer", "minimum": 1, "maximum": 999999 }
+          }
+        }
+      ]
+    },
+    "result": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["messageType", "commandId", "state", "observedRevision"],
+          "properties": {
+            "messageType": { "const": "result" },
+            "commandId": { "type": "string", "format": "uuid" },
+            "state": { "enum": ["succeeded", "failed", "uncertain"] },
+            "observedRevision": { "type": "integer", "minimum": 0 },
+            "data": { "type": ["object", "null"] },
+            "error": {
+              "type": ["object", "null"],
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" }
+              },
+              "required": ["code", "message"]
+            }
+          }
+        }
+      ]
+    },
+    "event": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["messageType", "sequence", "eventType", "payload"],
+          "properties": {
+            "messageType": { "const": "event" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "eventType": { "type": "string" },
+            "payload": { "type": "object" }
+          }
+        }
+      ]
+    }
+  }
+}

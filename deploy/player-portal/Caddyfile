@@ -1,0 +1,66 @@
+{
+	# Keep Caddy's administration API local to the machine.
+	admin 127.0.0.1:2019
+}
+
+{$PLAYER_PORTAL_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output file {$PLAYER_PORTAL_ACCESS_LOG} {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Resource-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; frame-src 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+	}
+
+	# This is the only public API namespace. The path is preserved upstream.
+	@player_api path /api/v1/player/*
+	@hidden_file path_regexp hidden_file (^|/)\.
+
+	# Explicitly intercept every other /api route before the SPA fallback.
+	@blocked_api path /api /api/*
+
+	# route preserves this security-sensitive order literally.
+	route {
+		root * {$PLAYER_PORTAL_ROOT}
+
+		# Reject dotfiles even if one is accidentally copied into the publish root.
+		respond @hidden_file `{"code":"NOT_FOUND","message":"Not found."}` 404
+
+		# Kestrel enforces the same per-player-path cap. This edge limit also
+		# rejects oversized fixed-length and streamed request bodies before proxying.
+		request_body @player_api {
+			max_size 16384
+		}
+
+		reverse_proxy @player_api 127.0.0.1:5180 {
+			# The Control API remains loopback-only and sees an approved Host.
+			header_up Host 127.0.0.1
+			header_up X-Forwarded-Proto https
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 30s
+			}
+		}
+
+		respond @blocked_api `{"code":"NOT_FOUND","message":"Not found."}` 404
+
+		# Vite/React single-page application fallback. file_server browsing is off.
+		try_files {path} /index.html
+		file_server
+	}
+}

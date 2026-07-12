@@ -1,0 +1,16 @@
+{
+  "name": "pal-control",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "workspaces": [
+    "apps/console-web",
+    "apps/player-web"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @pal-control/console-web",
+    "build:web": "npm run build --workspace @pal-control/console-web",
+    "dev:player": "npm run dev --workspace @pal-control/player-web",
+    "build:player": "npm run build --workspace @pal-control/player-web"
+  }
+}

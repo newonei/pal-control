@@ -1,0 +1,6167 @@
+openapi: 3.1.0
+info:
+  title: Pal Control API
+  version: 0.4.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: >-
+    Browser-facing API for Palworld operations. The official Palworld REST API
+    and native mod bridge are internal adapters and must not be exposed directly.
+    This local profile has no bearer challenge and must remain bound to loopback;
+    non-loopback deployments require an authenticated HTTPS reverse proxy.
+servers:
+  - url: http://127.0.0.1:5180/api/v1
+    description: Local development
+tags:
+  - name: Servers
+    description: Server connectivity, health and effective capabilities.
+  - name: Configuration
+    description: Versioned Palworld server settings with guarded, partial updates.
+  - name: Players
+    description: Player identity, session and summary data.
+  - name: LiveMap
+    description: Ephemeral, read-only online player position snapshots and streams.
+  - name: Inventory
+    description: Versioned inventory reads and guarded transactions.
+  - name: Pals
+    description: Stable Pal instance reads and low-risk mutations.
+  - name: Announcements
+    description: Announcement drafts, schedules and publishing.
+  - name: InGameNotifications
+    description: Fail-closed server-native Palworld notification presets and dispatch commands.
+  - name: Saves
+    description: Active-world save status and explicit official REST save commands.
+  - name: Backups
+    description: Read-only native snapshots and checksum-verified managed backups.
+  - name: PalDefender
+    description: >-
+      Allowlisted access to the loopback-only PalDefender REST API. Reads are
+      synchronous; writes are durably queued and audited before dispatch.
+  - name: Commands
+    description: Asynchronous command status and event streaming.
+  - name: Extraction
+    description: Local extraction-mode economy, shop, delivery, and settlement views.
+  - name: ExtractionAdmin
+    description: Loopback-only extraction economy administration and weekly rollover controls.
+  - name: PlayerPortal
+    description: >-
+      Public player self-service endpoints. Authenticated player identity is
+      derived exclusively from the HttpOnly session cookie; these operations
+      never accept a userId override in the query string or business request body.
+paths:
+  /servers/{serverId}/capabilities:
+    get:
+      tags: [Servers]
+      summary: Get effective server capabilities
+      operationId: getServerCapabilities
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Capability snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerCapabilities"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /servers/{serverId}/game-catalog:
+    get:
+      tags: [Servers]
+      summary: Get the searchable Palworld resource catalog
+      description: >-
+        Returns the bundled, versioned item, Pal, egg and technology reference
+        snapshot together with server-verified PalDefender template metadata.
+        Template JSON bodies are never exposed. Templates that fail parsing or
+        exceed the safety policy remain visible but are marked non-selectable.
+      operationId: getGameResourceCatalog
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: If-None-Match
+          in: header
+          description: Exact ETag returned by a previous catalog read.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current resource and template catalog
+          headers:
+            ETag:
+              required: true
+              description: Revision token for the bundled snapshot and current template set.
+              schema:
+                type: string
+            Cache-Control:
+              required: true
+              description: Private five-minute cache policy.
+              schema:
+                type: string
+                const: "private, max-age=300"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameResourceCatalog"
+        "304":
+          description: The current catalog revision exactly matches If-None-Match.
+          headers:
+            ETag:
+              required: true
+              schema:
+                type: string
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, max-age=300"
+        "404":
+          description: The requested server ID is not configured on this Control API instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: The bundled game resource catalog is missing, empty, or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /servers/{serverId}/configuration:
+    get:
+      tags: [Configuration]
+      summary: Read every setting in PalWorldSettings.ini
+      description: >-
+        Returns the complete ordered setting collection together with inferred
+        input metadata and default values. Password values are never returned;
+        callers only receive whether a sensitive value is currently present.
+      operationId: getServerConfiguration
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Current server configuration snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerConfigurationDocument"
+        "404":
+          description: The requested server ID or configuration file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: PalWorldSettings.ini is present but structurally invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    put:
+      tags: [Configuration]
+      summary: Apply a guarded partial server configuration update
+      description: >-
+        Applies only the named changes, preserving the order and spelling of all
+        other settings. The revision must match the latest read. A successful
+        update is written atomically after creating a timestamped backup.
+      operationId: updateServerConfiguration
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerConfigurationUpdate"
+      responses:
+        "200":
+          description: Updated server configuration snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerConfigurationDocument"
+        "400":
+          description: Unknown setting, invalid value, or malformed update
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ValidationProblemDetails"
+        "404":
+          description: The requested server ID or configuration file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The configuration changed after the supplied revision was read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: PalWorldSettings.ini is present but structurally invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /servers/{serverId}/info:
+    get:
+      tags: [Servers]
+      summary: Get server information through the local official REST adapter
+      operationId: getServerInfo
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Server information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalworldServerInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/metrics:
+    get:
+      tags: [Servers]
+      summary: Get live server metrics through the local official REST adapter
+      operationId: getServerMetrics
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Live server metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalworldMetrics"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/bridge/status:
+    get:
+      tags: [Servers]
+      summary: Get the local Native Mod bridge handshake state
+      operationId: getNativeBridgeStatus
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Native bridge status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativeBridgeStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /servers/{serverId}/players:
+    get:
+      tags: [Players]
+      summary: List players
+      operationId: listPlayers
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: online
+          in: query
+          schema:
+            type: boolean
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Player page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/live-map:
+    get:
+      tags: [LiveMap]
+      summary: Get the most recent online player position snapshot
+      description: >-
+        Returns the shared server-side sample. A failed upstream sample never
+        replaces the last known player positions with an empty list. Position
+        data is ephemeral and is not persisted as player movement history.
+      operationId: getLiveMapSnapshot
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: If-None-Match
+          in: header
+          description: ETag returned by the previous snapshot read.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Latest complete live-map snapshot
+          headers:
+            ETag:
+              description: Stream and sequence token.
+              required: true
+              schema:
+                type: string
+            Cache-Control:
+              description: Snapshot cache policy.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveMapSnapshot"
+        "304":
+          description: The current snapshot matches If-None-Match.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /servers/{serverId}/live-map/events:
+    get:
+      tags: [LiveMap]
+      summary: Subscribe to complete online player position snapshots
+      description: >-
+        Emits a current complete snapshot immediately and then the newest
+        complete snapshot after each upstream sample. Slow consumers may lose
+        intermediate samples but always converge on the newest complete state.
+      operationId: subscribeLiveMap
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: Last-Event-ID
+          in: header
+          description: Accepted for EventSource reconnection; a full current snapshot is always sent first.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >-
+            Server-sent event stream. `snapshot` events contain a
+            LiveMapSnapshot JSON object and `heartbeat` events contain stream
+            liveness metadata.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Accel-Buffering:
+              schema:
+                type: string
+                const: "no"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          description: The live-map subscriber limit has been reached.
+  /servers/{serverId}/players/native-probe:
+    get:
+      tags: [Players]
+      summary: Probe live PalPlayerState objects on the Unreal game thread
+      operationId: probeNativePlayers
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only native player object probe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativePlayerProbe"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/native-schema:
+    get:
+      tags: [Players]
+      summary: Read PalPlayerState reflection metadata on the Unreal game thread
+      operationId: getNativePlayerSchema
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Filtered reflection metadata without pointers or memory offsets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativePlayerSchema"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/progression/native-schema:
+    get:
+      tags: [Players]
+      summary: Inspect player progression reflection mappings and native function signatures
+      operationId: getNativePlayerProgressionSchema
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only progression reflection schema
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/progression/native-probe:
+    get:
+      tags: [Players]
+      summary: Read all loaded native player progression snapshots
+      operationId: probeNativePlayerProgression
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Loaded player progression snapshots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativePlayerProgressionProbe"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}/progression:
+    get:
+      tags: [Players]
+      summary: Read a loaded player's versioned progression snapshot
+      operationId: getPlayerProgression
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+      responses:
+        "200":
+          description: Player progression snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerProgression"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}/progression/mutations:
+    post:
+      tags: [Players]
+      summary: Preview or execute one guarded native player progression operation
+      operationId: mutatePlayerProgression
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerProgressionMutationRequest"
+      responses:
+        "200":
+          description: Mutation preview or verified native result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Invalid or unsupported progression operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}:
+    get:
+      tags: [Players]
+      summary: Get player details
+      operationId: getPlayer
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+      responses:
+        "200":
+          description: Player details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Player"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/players/{playerId}/inventory:
+    get:
+      tags: [Inventory]
+      summary: Read a versioned inventory snapshot
+      operationId: getPlayerInventory
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+      responses:
+        "200":
+          description: Inventory snapshot
+          headers:
+            ETag:
+              description: Revision token for mutation preconditions
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventorySnapshot"
+        "409":
+          $ref: "#/components/responses/PlayerOffline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/inventory/native-schema:
+    get:
+      tags: [Inventory]
+      summary: Read filtered inventory reflection metadata on the Unreal game thread
+      operationId: getNativeInventorySchema
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Inventory candidate types and fields without values or offsets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativeInventorySchema"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/inventory/native-probe:
+    get:
+      tags: [Inventory]
+      summary: Probe player inventory containers and slots on the Unreal game thread
+      operationId: probeNativeInventory
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only inventory container probe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativeInventoryProbe"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}/inventory/transactions:
+    post:
+      tags: [Inventory, Commands]
+      summary: Preview or submit an inventory transaction
+      operationId: createInventoryTransaction
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryTransactionRequest"
+      responses:
+        "200":
+          description: Dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionPreview"
+        "202":
+          $ref: "#/components/responses/AcceptedCommand"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/pals/native-schema:
+    get:
+      tags: [Pals]
+      summary: Read filtered Pal reflection metadata on the Unreal game thread
+      operationId: getNativePalSchema
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Pal candidate types, properties and functions without offsets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativePalSchema"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/pals/native-probe:
+    get:
+      tags: [Pals]
+      summary: Probe loaded Pal instances on the Unreal game thread
+      operationId: probeNativePals
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Loaded Pal instances with web-safe revision strings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativePalProbe"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}/pals:
+    get:
+      tags: [Pals]
+      summary: List stable Pal instances
+      operationId: listPlayerPals
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+        - name: location
+          in: query
+          schema:
+            type: string
+            enum: [party, box, base]
+      responses:
+        "200":
+          description: Pal instance page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor, observedAt]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PalInstance"
+                  nextCursor:
+                    type: [string, "null"]
+                  observedAt:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/players/{playerId}/pals/{instanceId}/mutations:
+    post:
+      tags: [Pals, Commands]
+      summary: Submit a guarded low-risk Pal mutation
+      operationId: mutatePal
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PalMutationRequest"
+      responses:
+        "200":
+          description: Dry-run or applied mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalMutationResult"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Loaded-state, ownership, or supported-field validation failed
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/in-game-notifications/capabilities:
+    get:
+      tags: [InGameNotifications]
+      summary: Probe available server-native in-game notification presets without dispatching
+      operationId: getInGameNotificationCapabilities
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only preset, parameter, position, and duration capability table
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InGameNotificationCapabilities"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/in-game-notifications:
+    get:
+      tags: [InGameNotifications]
+      summary: List server-native in-game notification resources
+      operationId: listInGameNotifications
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: In-game notification list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InGameNotification"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [InGameNotifications]
+      summary: Create an immutable server-native in-game notification resource
+      operationId: createInGameNotification
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InGameNotificationInput"
+      responses:
+        "200":
+          description: Idempotent replay of an existing resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InGameNotification"
+        "201":
+          description: In-game notification resource created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InGameNotification"
+        "400":
+          description: Invalid shape or an unsupported custom presentation override
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Preset, audience, or parameter is unsupported by the live native capability table
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/in-game-notifications/{notificationId}:
+    get:
+      tags: [InGameNotifications]
+      summary: Get one in-game notification resource
+      operationId: getInGameNotification
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/NotificationId"
+      responses:
+        "200":
+          description: In-game notification resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InGameNotification"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/in-game-notifications/{notificationId}/dispatch:
+    post:
+      tags: [InGameNotifications, Commands]
+      summary: Dispatch or schedule a server-native in-game notification
+      operationId: dispatchInGameNotification
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/NotificationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Idempotent replay of a completed command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "202":
+          description: Native notification command durably accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Stored preset no longer matches the live native capability table
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/announcements:
+    get:
+      tags: [Announcements]
+      summary: List announcement drafts and history
+      operationId: listAnnouncements
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Announcement list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Announcement"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Announcements]
+      summary: Create an announcement draft
+      operationId: createAnnouncement
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnnouncementInput"
+      responses:
+        "200":
+          description: Idempotent replay of an existing draft
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Announcement"
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Announcement"
+        "400":
+          description: Invalid or unsupported announcement input
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /servers/{serverId}/announcements/client-overlay/probe:
+    get:
+      tags: [Announcements]
+      summary: Probe the native client-overlay function without sending an announcement
+      operationId: probeClientOverlay
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only native client-overlay compatibility probe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientOverlayProbe"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/announcements/top-banner/probe:
+    get:
+      tags: [Announcements]
+      summary: Probe the native top-banner function without sending an announcement
+      operationId: probeTopBanner
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Read-only native top-banner compatibility probe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopBannerProbe"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/announcements/{announcementId}:
+    get:
+      tags: [Announcements]
+      summary: Get one announcement draft or history item
+      operationId: getAnnouncement
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: announcementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Announcement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Announcement"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/announcements/{announcementId}/publish:
+    post:
+      tags: [Announcements, Commands]
+      summary: Publish or schedule an announcement
+      operationId: publishAnnouncement
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: announcementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Idempotent replay of a completed command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "202":
+          description: Command accepted for asynchronous processing
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "400":
+          description: Unsupported audience/channel or invalid idempotency key
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/saves/status:
+    get:
+      tags: [Saves]
+      summary: Inspect the active world save and backup readiness
+      description: >-
+        Resolves the active PalServer installation and world without exposing
+        filesystem paths. A non-ready response is diagnostic only and does not
+        authorize a write.
+      operationId: getSaveStatus
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Active-world save status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/saves/flush:
+    post:
+      tags: [Saves, Commands]
+      summary: Request an official Palworld world save
+      description: >-
+        Calls the official REST save operation once. A transport timeout after
+        dispatch is reported as uncertain and is never retried blindly.
+      operationId: flushWorldSave
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveFlushRequest"
+      responses:
+        "200":
+          description: Idempotent replay of an existing save command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "202":
+          description: Save command durably accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "400":
+          description: Invalid reason or idempotency key.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/backups:
+    get:
+      tags: [Backups]
+      summary: List native or managed world backups
+      operationId: listBackups
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: kind
+          in: query
+          required: false
+          description: Omit to list both backup kinds.
+          schema:
+            type: string
+            enum: [managed, native]
+      responses:
+        "200":
+          description: Backup summaries ordered newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPage"
+        "400":
+          description: Backup kind must be `managed` or `native`.
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Backups, Commands]
+      summary: Create a checksum-verified managed backup
+      description: >-
+        Saves the world through official REST, waits for a new stable native
+        snapshot, copies it outside the active SaveGames tree, writes a SHA-256
+        manifest, and verifies the copied files before publication.
+      operationId: createManagedBackup
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBackupRequest"
+      responses:
+        "200":
+          description: Idempotent replay of an existing backup command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "202":
+          description: Backup command durably accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "400":
+          description: Invalid label, reason, or idempotency key.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /servers/{serverId}/backups/{backupId}:
+    get:
+      tags: [Backups]
+      summary: Get one native or managed backup summary
+      operationId: getBackup
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/BackupId"
+      responses:
+        "200":
+          description: Backup summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Backup"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/backups/{backupId}/verify:
+    post:
+      tags: [Backups, Commands]
+      summary: Recompute and compare a managed backup manifest
+      description: Native backups do not have a managed manifest and cannot be verified here.
+      operationId: verifyManagedBackup
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/BackupId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyBackupRequest"
+      responses:
+        "200":
+          description: Idempotent replay of an existing verification command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "202":
+          description: Verification command durably accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "400":
+          description: Invalid reason or idempotency key.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Native Palworld backups are read-only and have no managed manifest.
+  /servers/{serverId}/paldefender/catalog:
+    get:
+      tags: [PalDefender]
+      summary: List the 27 allowlisted PalDefender upstream capabilities
+      operationId: getPalDefenderCatalog
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Static allowlist exposed by this Control API build
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalDefenderCatalog"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/paldefender/status:
+    get:
+      tags: [PalDefender]
+      summary: Probe the configured PalDefender adapter and version endpoint
+      description: >-
+        Always returns a status document for a configured server. A disabled or
+        disconnected adapter is represented by connected=false and an error.
+      operationId: getPalDefenderStatus
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: PalDefender adapter status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalDefenderStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /servers/{serverId}/paldefender/players:
+    get:
+      tags: [PalDefender]
+      summary: List all PalDefender players
+      operationId: listPalDefenderPlayers
+      x-paldefender-permission: REST.Players.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/player/{playerIdentifier}:
+    get:
+      tags: [PalDefender]
+      summary: Read one PalDefender player
+      operationId: getPalDefenderPlayer
+      x-paldefender-permission: REST.Player.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/pals/{playerIdentifier}:
+    get:
+      tags: [PalDefender]
+      summary: List a player's Pals through PalDefender
+      operationId: listPalDefenderPals
+      x-paldefender-permission: REST.Pals.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/items/{playerIdentifier}:
+    get:
+      tags: [PalDefender]
+      summary: List a player's items through PalDefender
+      operationId: listPalDefenderItems
+      x-paldefender-permission: REST.Items.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/techs/{playerIdentifier}:
+    get:
+      tags: [PalDefender]
+      summary: List a player's technologies through PalDefender
+      operationId: listPalDefenderTechs
+      x-paldefender-permission: REST.Techs.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/progression/{playerIdentifier}:
+    get:
+      tags: [PalDefender]
+      summary: Read a player's progression through PalDefender
+      operationId: getPalDefenderProgression
+      x-paldefender-permission: REST.Progression.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/guilds:
+    get:
+      tags: [PalDefender]
+      summary: List PalDefender guilds
+      operationId: listPalDefenderGuilds
+      x-paldefender-permission: REST.Guilds.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/guild/{guildId}:
+    get:
+      tags: [PalDefender]
+      summary: Read one PalDefender guild and its bases
+      operationId: getPalDefenderGuild
+      x-paldefender-permission: REST.Guild.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderGuildId"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/banlist:
+    get:
+      tags: [PalDefender]
+      summary: Search PalDefender ban records
+      operationId: searchPalDefenderBanlist
+      x-paldefender-permission: REST.Banlist.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: active
+          in: query
+          schema: { type: boolean }
+        - name: entryType
+          in: query
+          schema: { type: string }
+        - name: userId
+          in: query
+          schema: { type: string }
+        - name: ip
+          in: query
+          schema: { type: string }
+        - name: userIP
+          in: query
+          schema: { type: string }
+        - name: issuerType
+          in: query
+          schema: { type: string }
+        - name: issuerName
+          in: query
+          schema: { type: string }
+        - name: issuerIP
+          in: query
+          schema: { type: string }
+        - name: reason
+          in: query
+          schema: { type: string }
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "400":
+          description: An unsupported query parameter was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/version:
+    get:
+      tags: [PalDefender]
+      summary: Read the PalDefender and game version payload
+      operationId: getPalDefenderVersion
+      x-paldefender-permission: REST.Version.Read
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/PalDefenderUnavailable"
+        default:
+          $ref: "#/components/responses/PalDefenderUpstreamResponse"
+  /servers/{serverId}/paldefender/give/items/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender item grant
+      operationId: givePalDefenderItems
+      x-paldefender-permission: REST.Items.Give
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/give/pals/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender Pal grant
+      operationId: givePalDefenderPals
+      x-paldefender-permission: REST.Pals.Give
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/give/paltemplate/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender template Pal grant
+      operationId: givePalDefenderPalTemplate
+      x-paldefender-permission: REST.PalTemplates.Give
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/give/paleggs/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender Pal egg grant
+      operationId: givePalDefenderPalEggs
+      x-paldefender-permission: REST.PalEggs.Give
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/give/progression/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender progression grant
+      operationId: givePalDefenderProgression
+      x-paldefender-permission: REST.Progression.Give
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/learntech/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue PalDefender technology learning
+      operationId: learnPalDefenderTech
+      x-paldefender-permission: REST.Techs.Learn
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/forgettech/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue PalDefender technology removal
+      operationId: forgetPalDefenderTech
+      x-paldefender-permission: REST.Techs.Forget
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/deletebase/{baseCampId}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue deletion of a PalDefender base or camp
+      description: >-
+        The route is catalogued but the default PalControl token intentionally
+        does not grant REST.Base.Delete. Unless an operator separately approves
+        that permission, the queued command finishes as failed after upstream
+        authorization rejects it.
+      operationId: deletePalDefenderBase
+      x-paldefender-permission: REST.Base.Delete
+      x-palcontrol-default-authorized: false
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderBaseCampId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/ban/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender player ban
+      operationId: banPalDefenderPlayer
+      x-paldefender-permission: REST.Punishments.Ban
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/unban/{userId}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue removal of a PalDefender player ban
+      operationId: unbanPalDefenderPlayer
+      x-paldefender-permission: REST.Punishments.Unban
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderUserId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/banip/{ip}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender IP ban
+      operationId: banPalDefenderIp
+      x-paldefender-permission: REST.Punishments.BanIP
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderIp"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/unbanip/{ip}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue removal of a PalDefender IP ban
+      operationId: unbanPalDefenderIp
+      x-paldefender-permission: REST.Punishments.UnbanIP
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderIp"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/kick/{playerIdentifier}:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender player kick
+      operationId: kickPalDefenderPlayer
+      x-paldefender-permission: REST.Punishments.Kick
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/PalDefenderPlayerIdentifier"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/SendPlayerMessage:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a targeted PalDefender message
+      operationId: sendPalDefenderPlayerMessage
+      x-paldefender-permissions:
+        - REST.Messages.Send.PlayerChat
+        - REST.Messages.Send.GlobalChat
+        - REST.Messages.Send.GuildChat
+        - REST.Messages.Send.Log.Normal
+        - REST.Messages.Send.Log.Important
+        - REST.Messages.Send.Log.VeryImportant
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/Broadcast:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender global chat broadcast
+      operationId: broadcastPalDefenderMessage
+      x-paldefender-permission: REST.Messages.Broadcast
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/Alert:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender alert
+      operationId: sendPalDefenderAlert
+      x-paldefender-permission: REST.Messages.Alert
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /servers/{serverId}/paldefender/ReloadConfig:
+    post:
+      tags: [PalDefender, Commands]
+      summary: Queue a PalDefender configuration reload
+      operationId: reloadPalDefenderConfig
+      x-paldefender-permission: REST.Reload.Config
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/PalDefenderCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/PalDefenderCommandComplete"
+        "202":
+          $ref: "#/components/responses/PalDefenderCommandAccepted"
+        "400":
+          $ref: "#/components/responses/PalDefenderBadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/PalDefenderQueueUnavailable"
+  /paldefender-commands/{commandId}:
+    get:
+      tags: [PalDefender, Commands]
+      summary: Get a durable PalDefender command state
+      operationId: getPalDefenderCommand
+      parameters:
+        - $ref: "#/components/parameters/PalDefenderCommandId"
+      responses:
+        "200":
+          description: Current PalDefender command state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PalDefenderCommand"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /audit/paldefender-commands:
+    get:
+      tags: [PalDefender, Commands]
+      summary: List append-only durable PalDefender command events
+      operationId: listPalDefenderCommandAudit
+      parameters:
+        - name: limit
+          in: query
+          description: Values outside the range are clamped by the service.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Most recent PalDefender command events, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PalDefenderCommandAuditEvent"
+  /save-commands/{commandId}:
+    get:
+      tags: [Saves, Backups, Commands]
+      summary: Get a save or backup command state
+      operationId: getSaveCommand
+      parameters:
+        - $ref: "#/components/parameters/SaveCommandId"
+      responses:
+        "200":
+          description: Current command state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveCommand"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /audit/save-commands:
+    get:
+      tags: [Saves, Backups, Commands]
+      summary: List append-only save and backup command audit events
+      operationId: listSaveCommandAudit
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Newest save command audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SaveCommandAuditEvent"
+        "400":
+          description: Invalid audit page limit.
+  /commands/{commandId}:
+    get:
+      tags: [Commands]
+      summary: Get command state
+      operationId: getCommand
+      parameters:
+        - name: commandId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Command state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /in-game-notification-commands/{commandId}:
+    get:
+      tags: [InGameNotifications, Commands]
+      summary: Get a server-native in-game notification command state
+      operationId: getInGameNotificationCommand
+      parameters:
+        - name: commandId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: In-game notification command state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /audit/commands:
+    get:
+      tags: [Commands]
+      summary: List append-only command audit events
+      operationId: listCommandAudit
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Most recent audit events, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CommandAuditEvent"
+  /audit/in-game-notification-commands:
+    get:
+      tags: [InGameNotifications, Commands]
+      summary: List append-only in-game notification command audit events
+      operationId: listInGameNotificationCommandAudit
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Most recent native notification audit events, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InGameNotificationCommandAuditEvent"
+  /events:
+    get:
+      tags: [Commands]
+      summary: Subscribe to command and server events
+      operationId: subscribeEvents
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /player/auth/request-code:
+    post:
+      tags: [PlayerPortal]
+      summary: Send a one-time login code to an online player in game
+      description: >-
+        Anonymous bootstrap operation. The supplied platform UserId selects the
+        online recipient only for this challenge; it does not establish a player
+        identity until the one-time code is verified. A single explicitly allowed
+        Origin header is required.
+      operationId: requestPlayerLoginCode
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerLoginCodeRequest"
+      responses:
+        "202":
+          description: One-time code was dispatched through the in-game private-message channel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerLoginChallenge"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/auth/verify:
+    post:
+      tags: [PlayerPortal]
+      summary: Verify an in-game one-time code and create a player session
+      description: >-
+        Consumes the challenge after successful verification and sets the opaque
+        player session in an HttpOnly, SameSite=Strict cookie scoped to
+        /api/v1/player. A single explicitly allowed Origin header is required.
+      operationId: verifyPlayerLoginCode
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerLoginCodeVerification"
+      responses:
+        "200":
+          description: Authenticated player session and its double-submit CSRF token
+          headers:
+            Set-Cookie:
+              description: >-
+                Opaque HttpOnly, SameSite=Strict player session cookie. Secure is
+                enabled for the HTTPS deployment profile.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerPortalSession"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/auth/session:
+    get:
+      tags: [PlayerPortal]
+      summary: Read the current authenticated player session
+      description: >-
+        Player identity comes only from the opaque HttpOnly session cookie. The
+        returned CSRF token must be sent in X-CSRF-Token on authenticated writes.
+      operationId: getPlayerPortalSession
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current authenticated player session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerPortalSession"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/auth/logout:
+    post:
+      tags: [PlayerPortal]
+      summary: Revoke the current player session
+      description: >-
+        Requires the HttpOnly player session cookie, an explicitly allowed Origin,
+        and the session CSRF token. The response deletes the session cookie.
+      operationId: logoutPlayerPortalSession
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+      responses:
+        "204":
+          description: Session revoked and cookie deleted
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/overview:
+    get:
+      tags: [PlayerPortal]
+      summary: Get the authenticated player's extraction overview
+      description: >-
+        The account is selected exclusively from the HttpOnly player session;
+        userId query or body overrides are forbidden.
+      operationId: getPlayerPortalOverview
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current season, wallet balances, and extraction statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOverview"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/extraction-zones:
+    get:
+      tags: [PlayerPortal]
+      summary: Get extraction-zone map data for the authenticated player
+      description: >-
+        Returns every configured extraction point and the current player's own
+        PalDefender position/range state when available. Player identity is derived
+        exclusively from the HttpOnly session cookie; userId overrides are forbidden.
+        Other players' positions are never returned. Static zone data remains
+        available while the player is offline or position sampling is unavailable.
+      operationId: getPlayerPortalExtractionZones
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Configured extraction zones and current player's own range state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerExtractionZoneMap"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/catalog:
+    get:
+      tags: [PlayerPortal]
+      summary: List the authenticated player's extraction shop catalog
+      description: >-
+        Returns current deterministic prices and purchase limits calculated for
+        the account identified solely by the HttpOnly player session.
+      operationId: getPlayerPortalCatalog
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current shop catalog and player-specific remaining limits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionCatalog"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/orders:
+    get:
+      tags: [PlayerPortal]
+      summary: List the authenticated player's shop orders
+      description: Player identity is derived exclusively from the HttpOnly session cookie.
+      operationId: listPlayerPortalOrders
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current-season orders belonging to the authenticated player
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOrderList"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+    post:
+      tags: [PlayerPortal]
+      summary: Purchase a shop product for the authenticated player
+      description: >-
+        The server derives player identity only from the HttpOnly session cookie
+        and requires that player to be online. The request also requires an
+        allowed Origin, the session CSRF token, and an Idempotency-Key.
+      operationId: createPlayerPortalOrder
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePlayerPortalOrderRequest"
+      responses:
+        "200":
+          description: Idempotently created or replayed shop order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOrder"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/ledger:
+    get:
+      tags: [PlayerPortal]
+      summary: List the authenticated player's wallet ledger
+      description: Player identity is derived exclusively from the HttpOnly session cookie.
+      operationId: listPlayerPortalLedger
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Permanent-currency and current-season ledger entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionLedgerList"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/runs:
+    get:
+      tags: [PlayerPortal]
+      summary: List the authenticated player's extraction settlement runs
+      description: Player identity is derived exclusively from the HttpOnly session cookie.
+      operationId: listPlayerPortalRuns
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current-season runs and configured settlement capability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRunList"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/runs/quote:
+    post:
+      tags: [PlayerPortal]
+      summary: Create an extraction quote for the authenticated player
+      description: >-
+        Has no request body. Player identity is derived only from the HttpOnly
+        session cookie; the operation requires an allowed Origin and CSRF token.
+      operationId: createPlayerPortalExtractionQuote
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+      responses:
+        "200":
+          description: Time-limited quote for allowlisted sellable inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionQuote"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/runs/{runId}/settle:
+    post:
+      tags: [PlayerPortal]
+      summary: Consume quoted loot and settle the authenticated player's run
+      description: >-
+        Has no request body. Player identity is derived only from the HttpOnly
+        session cookie. The operation requires an allowed Origin, the session
+        CSRF token, and an Idempotency-Key before consuming inventory or crediting
+        the wallet.
+      operationId: settlePlayerPortalExtractionRun
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ExtractionRunId"
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Current terminal or in-progress run projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRun"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /extraction/overview:
+    get:
+      tags: [Extraction]
+      summary: Get the current extraction account overview
+      description: >-
+        Local-console endpoint keyed by the normalized platform UserId. This
+        endpoint is not a public player-authentication boundary.
+      operationId: getExtractionOverview
+      parameters:
+        - $ref: "#/components/parameters/ExtractionUserId"
+      responses:
+        "200":
+          description: Current season, wallet balances, and extraction statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOverview"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/catalog:
+    get:
+      tags: [Extraction]
+      summary: List the current extraction shop catalog
+      operationId: getExtractionCatalog
+      parameters:
+        - name: userId
+          in: query
+          required: false
+          description: >-
+            Normalized platform UserId. When supplied, purchased and remaining
+            weekly-limit values are calculated for that account.
+          schema:
+            $ref: "#/components/schemas/ExtractionUserId"
+      responses:
+        "200":
+          description: Current deterministic daily prices and per-season limits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionCatalog"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/orders:
+    get:
+      tags: [Extraction]
+      summary: List extraction shop orders for an account
+      operationId: listExtractionOrders
+      parameters:
+        - $ref: "#/components/parameters/ExtractionUserId"
+      responses:
+        "200":
+          description: Orders in the current season
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOrderList"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+    post:
+      tags: [Extraction]
+      summary: Purchase one extraction shop product
+      description: >-
+        Requires the player to be online. The server calculates price, limits,
+        debit, and PalDefender delivery from the current product snapshot.
+      operationId: createExtractionOrder
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExtractionOrderRequest"
+      responses:
+        "200":
+          description: Idempotently created or replayed order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOrder"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/ledger:
+    get:
+      tags: [Extraction]
+      summary: List wallet ledger entries for an extraction account
+      operationId: listExtractionLedger
+      parameters:
+        - $ref: "#/components/parameters/ExtractionUserId"
+      responses:
+        "200":
+          description: Permanent-currency and current-season ledger entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionLedgerList"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/runs:
+    get:
+      tags: [Extraction]
+      summary: List extraction settlement runs
+      operationId: listExtractionRuns
+      parameters:
+        - $ref: "#/components/parameters/ExtractionUserId"
+      responses:
+        "200":
+          description: Current-season runs and configured settlement capability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRunList"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/runs/quote:
+    post:
+      tags: [Extraction]
+      summary: Scan eligible inventory and create an extraction quote
+      description: >-
+        Requires an online player who remains inside one configured extraction
+        zone for both position samples. A new quote replaces an older open quote.
+      operationId: createExtractionQuote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExtractionQuoteRequest"
+      responses:
+        "200":
+          description: Time-limited quote for every allowlisted sellable item found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionQuote"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/runs/{runId}/settle:
+    post:
+      tags: [Extraction]
+      summary: Consume quoted loot and settle an extraction run
+      description: >-
+        Dispatches the allowlisted RCON deletion, requires a matching REST
+        inventory readback, and only then credits the current-season voucher.
+      operationId: settleExtractionRun
+      parameters:
+        - $ref: "#/components/parameters/ExtractionRunId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettleExtractionRunRequest"
+      responses:
+        "200":
+          description: Current terminal or in-progress run projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRun"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/wallet-adjustments:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Apply an idempotent extraction-wallet adjustment
+      description: Loopback-only operator endpoint. Delta cannot be zero.
+      operationId: adjustExtractionWallet
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Current implementation requires a single value with at least eight
+            characters on this administrator endpoint.
+          schema:
+            type: string
+            minLength: 8
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractionWalletAdjustmentRequest"
+      responses:
+        "200":
+          description: Created or replayed wallet ledger adjustment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionWalletAdjustmentResponse"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/orders/{orderId}/reconcile:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Manually resolve an uncertain shop delivery during maintenance
+      operationId: reconcileExtractionOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractionOrderReconciliationRequest"
+      responses:
+        "200":
+          description: Reconciled order projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOrder"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/runs/{runId}/reconcile:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Manually resolve an uncertain extraction run during maintenance
+      operationId: reconcileExtractionRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractionRunReconciliationRequest"
+      responses:
+        "200":
+          description: Reconciled extraction-run projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRun"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rcon/status:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Probe extraction RCON configuration and authentication
+      operationId: getExtractionRconStatus
+      responses:
+        "200":
+          description: RCON capability probe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRconStatus"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rollover/maintenance:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Open or close the extraction write gate
+      operationId: setExtractionRolloverMaintenance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractionRolloverMaintenanceRequest"
+      responses:
+        "200":
+          description: Persisted operation-gate state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionOperationGateState"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rollover/preflight:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Verify season timing and current world before any shutdown
+      operationId: getExtractionRolloverPreflight
+      responses:
+        "200":
+          description: Fail-closed timing and world-identity decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRolloverPreflight"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rollover/readiness:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Inspect blockers before switching the active world
+      operationId: getExtractionRolloverReadiness
+      responses:
+        "200":
+          description: Maintenance state and unresolved economy operations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRolloverReadiness"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rollover/commit:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Bind a DedicatedServerName to the current extraction season
+      description: The write gate must already be in maintenance mode.
+      operationId: commitExtractionRollover
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractionRolloverCommitRequest"
+      responses:
+        "200":
+          description: Updated current-season world binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionRolloverCommitResponse"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    playerSessionCookie:
+      type: apiKey
+      in: cookie
+      name: pal_player_session
+      description: >-
+        Opaque player session set only after successful in-game OTP verification.
+        The deployment uses an HttpOnly, SameSite=Strict cookie scoped to
+        /api/v1/player and enables Secure behind HTTPS. Authenticated player
+        identity is derived exclusively from this cookie, never from a userId
+        query parameter or business request body.
+  parameters:
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    PlayerId:
+      name: playerId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    InstanceId:
+      name: instanceId
+      in: path
+      required: true
+      description: Stable Pal instance identifier, never a list index
+      schema:
+        type: string
+        minLength: 1
+    NotificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BackupId:
+      name: backupId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    SaveCommandId:
+      name: commandId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    PlayerPortalOrigin:
+      name: Origin
+      in: header
+      required: true
+      description: >-
+        Every player-portal POST requires exactly one Origin value that exactly
+        matches an explicitly configured PlayerPortal allowed origin.
+      schema:
+        type: string
+        format: uri
+    PlayerPortalCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: >-
+        Per-session token returned by OTP verification or the session read. It is
+        required in addition to the HttpOnly session cookie on authenticated writes.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{43}$"
+    ExtractionUserId:
+      name: userId
+      in: query
+      required: true
+      description: Normalized cross-season platform UserId, never a display name or PlayerUID.
+      schema:
+        $ref: "#/components/schemas/ExtractionUserId"
+    ExtractionRunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PalDefenderPlayerIdentifier:
+      name: playerIdentifier
+      in: path
+      required: true
+      description: PalDefender accepts a supported player name, UserId, or platform identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    PalDefenderGuildId:
+      name: guildId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    PalDefenderBaseCampId:
+      name: baseCampId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PalDefenderUserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    PalDefenderIp:
+      name: ip
+      in: path
+      required: true
+      description: A syntactically valid IPv4 or IPv6 address.
+      schema:
+        type: string
+        minLength: 2
+        maxLength: 45
+    PalDefenderCommandId:
+      name: commandId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: ETag returned by the last read
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: Missing or invalid access token
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    AcceptedCommand:
+      description: Command accepted for asynchronous processing
+      headers:
+        Location:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AcceptedCommand"
+    Conflict:
+      description: Player session, Pal state, or idempotency conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PreconditionFailed:
+      description: Revision mismatch; re-read and review the diff
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PlayerOffline:
+      description: Live editing is restricted to an online player
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Unavailable:
+      description: Required Palworld adapter is unavailable or in safe mode
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PalDefenderUpstreamResponse:
+      description: >-
+        PalDefender upstream status, JSON, or text passed through synchronously.
+        The Control API never exposes the upstream bearer token.
+      content:
+        application/json:
+          schema: {}
+        text/plain:
+          schema:
+            type: string
+    PalDefenderUnavailable:
+      description: PalDefender is disabled, timed out, or unavailable before a read completed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PalDefenderTransportError"
+    PalDefenderCommandAccepted:
+      description: PalDefender command durably accepted or still in progress
+      headers:
+        Location:
+          description: Command status URL.
+          schema: { type: string }
+        Retry-After:
+          description: Suggested status polling delay in seconds.
+          schema: { type: integer, minimum: 0 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PalDefenderCommand"
+    PalDefenderCommandComplete:
+      description: Idempotent replay of a command that already reached a terminal state
+      headers:
+        Location:
+          description: Command status URL.
+          schema: { type: string }
+        Retry-After:
+          description: Suggested status polling delay in seconds.
+          schema: { type: integer, minimum: 0 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PalDefenderCommand"
+    PalDefenderBadRequest:
+      description: >-
+        Invalid path value, Idempotency-Key, reason, command envelope, IP address,
+        base camp ID, or payload larger than 64 KiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PalDefenderQueueUnavailable:
+      description: Durable PalDefender queue or audit persistence is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    ExtractionError:
+      description: Extraction-mode validation, state, persistence, or adapter error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PlayerPortalError:
+      description: >-
+        Player authentication, Origin, CSRF, session, validation, economy state,
+        persistence, delivery, or traffic-boundary error. Authentication failures
+        use HTTP 401, Origin and CSRF failures use HTTP 403, request bodies over
+        16 KiB use HTTP 413, and login or per-IP traffic throttling uses HTTP 429.
+      headers:
+        Retry-After:
+          description: Present on login cooldowns and player-portal traffic throttling.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+  requestBodies:
+    PalDefenderCommand:
+      required: true
+      description: >-
+        Durable command envelope. payload is forwarded to the selected PalDefender
+        endpoint only after the accepted event is flushed to disk. Its compact
+        UTF-8 JSON representation must not exceed 64 KiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PalDefenderCommandRequest"
+  schemas:
+    ServerConfigurationDocument:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - revision
+        - options
+        - filePath
+        - defaultFilePath
+        - lastModifiedAt
+      properties:
+        schemaVersion:
+          type: integer
+          const: 2
+        revision:
+          type: string
+          minLength: 1
+          description: Opaque content revision required by the next update.
+        options:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ServerConfigurationOption"
+        filePath:
+          type: string
+          minLength: 1
+        defaultFilePath:
+          type: string
+          minLength: 1
+        lastModifiedAt:
+          type: string
+          format: date-time
+    ServerConfigurationOption:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - kind
+        - value
+        - defaultValue
+        - sensitive
+        - hasValue
+        - allowedValues
+        - minimum
+        - maximum
+        - step
+        - customized
+      properties:
+        key:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum: [boolean, integer, number, string, enum, string-list]
+          description: Inferred UI value kind.
+        value:
+          $ref: "#/components/schemas/ServerConfigurationValue"
+        defaultValue:
+          $ref: "#/components/schemas/ServerConfigurationValue"
+        sensitive:
+          type: boolean
+        hasValue:
+          type: boolean
+          description: Indicates whether a sensitive setting is configured without exposing it.
+        allowedValues:
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: "null"
+        minimum:
+          oneOf:
+            - type: number
+            - type: "null"
+        maximum:
+          oneOf:
+            - type: number
+            - type: "null"
+        step:
+          oneOf:
+            - type: number
+              exclusiveMinimum: 0
+            - type: "null"
+        customized:
+          type: boolean
+          description: True when the current serialized value differs from the bundled default.
+    ServerConfigurationUpdate:
+      type: object
+      additionalProperties: false
+      required: [revision, changes]
+      properties:
+        revision:
+          type: string
+          minLength: 1
+        changes:
+          type: object
+          maxProperties: 256
+          description: Only settings explicitly changed by the operator.
+          additionalProperties:
+            $ref: "#/components/schemas/ServerConfigurationChangeValue"
+    ServerConfigurationValue:
+      oneOf:
+        - type: boolean
+        - type: number
+        - type: string
+        - type: array
+          items:
+            type: string
+        - type: "null"
+    ServerConfigurationChangeValue:
+      description: >-
+        A string, number, boolean, or string list. Null explicitly clears a
+        sensitive setting and is rejected for non-sensitive settings.
+      oneOf:
+        - type: boolean
+        - type: number
+        - type: string
+        - type: array
+          items:
+            type: string
+        - type: "null"
+    ValidationProblemDetails:
+      type: object
+      required: [title, status, errors]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+          const: 400
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        traceId:
+          type: string
+    GameResourceCatalog:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - revision
+        - generatedAt
+        - source
+        - coverage
+        - items
+        - pals
+        - eggs
+        - technologies
+        - templates
+      properties:
+        schemaVersion:
+          type: string
+          const: "1"
+        revision:
+          type: string
+          minLength: 18
+          description: >-
+            Bundled snapshot revision suffixed with a 16-character SHA-256
+            digest of the current server template filenames and file hashes.
+        generatedAt:
+          type: string
+          format: date-time
+        source:
+          $ref: "#/components/schemas/GameCatalogSource"
+        coverage:
+          $ref: "#/components/schemas/GameCatalogCoverage"
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/GameCatalogEntry"
+        pals:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/GameCatalogEntry"
+        eggs:
+          type: array
+          items:
+            $ref: "#/components/schemas/GameCatalogEntry"
+        technologies:
+          type: array
+          items:
+            $ref: "#/components/schemas/GameCatalogEntry"
+        templates:
+          type: array
+          description: >-
+            Metadata for top-level JSON files in PalDefender/Pals/Templates.
+            The template contents are intentionally omitted.
+          items:
+            $ref: "#/components/schemas/PalTemplateCatalogEntry"
+    GameCatalogSource:
+      type: object
+      additionalProperties: false
+      required: [name, note, itemsUrl, palsUrl, technologiesUrl, palNamesUrl, palNamesLicense]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        note:
+          type: string
+          minLength: 1
+        itemsUrl:
+          type: string
+          format: uri
+        palsUrl:
+          type: string
+          format: uri
+        technologiesUrl:
+          type: string
+          format: uri
+        palNamesUrl:
+          type: string
+          format: uri
+          description: Versioned source of Simplified Chinese Pal display names.
+        palNamesLicense:
+          type: string
+          const: MIT
+    GameCatalogCoverage:
+      type: object
+      additionalProperties: false
+      required: [items, pals, eggs, technologies, templates]
+      properties:
+        items:
+          type: string
+          const: reference
+        pals:
+          type: string
+          const: reference-zh-Hans
+        eggs:
+          type: string
+          const: paldefender-documented
+        technologies:
+          type: string
+          const: reference
+        templates:
+          type: string
+          const: server-verified
+    GameCatalogEntry:
+      type: object
+      additionalProperties: false
+      required: [id, name, category, dex]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        englishName:
+          type: [string, "null"]
+          description: English display name when the primary name is localized; null when unavailable.
+        category:
+          type: string
+          minLength: 1
+        dex:
+          type: [string, "null"]
+          description: Paldeck dex key for Pal entries; null for other resource types.
+    PalTemplateCatalogEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - fileName
+        - palId
+        - nickname
+        - level
+        - shiny
+        - passiveCount
+        - activeSkillCount
+        - sizeBytes
+        - lastModifiedAt
+        - sha256
+        - parseable
+        - selectable
+        - riskLevel
+        - summary
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+          description: Basename only; paths and template JSON are not returned.
+        palId:
+          type: [string, "null"]
+        nickname:
+          type: [string, "null"]
+        level:
+          type: [integer, "null"]
+          format: int32
+        shiny:
+          type: [boolean, "null"]
+        passiveCount:
+          type: integer
+          format: int32
+          minimum: 0
+        activeSkillCount:
+          type: integer
+          format: int32
+          minimum: 0
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        lastModifiedAt:
+          type: string
+          format: date-time
+        sha256:
+          type: string
+          pattern: "^$|^[0-9a-f]{64}$"
+          description: Empty only when the template could not safely be read or hashed.
+        parseable:
+          type: boolean
+        selectable:
+          type: boolean
+        riskLevel:
+          type: string
+          enum: [standard, elevated, high, invalid]
+        summary:
+          type: string
+          minLength: 1
+    PalDefenderCommandRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, payload]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+          description: Human review and audit reason; control characters are rejected.
+        payload:
+          description: >-
+            Exact JSON payload for the selected PalDefender POST endpoint. Use
+            null for an upstream endpoint that takes no body.
+    PalDefenderCatalog:
+      type: object
+      additionalProperties: false
+      required: [basePath, count, items]
+      properties:
+        basePath:
+          type: string
+          pattern: "^/api/v1/servers/[^/]+/paldefender$"
+        count:
+          type: integer
+          const: 27
+        items:
+          type: array
+          minItems: 27
+          maxItems: 27
+          items:
+            $ref: "#/components/schemas/PalDefenderCatalogEntry"
+    PalDefenderCatalogEntry:
+      type: object
+      additionalProperties: false
+      required: [method, path, permission, description]
+      properties:
+        method:
+          type: string
+          enum: [GET, POST]
+        path:
+          type: string
+        permission:
+          type: string
+        description:
+          type: string
+    PalDefenderStatus:
+      type: object
+      additionalProperties: false
+      required: [enabled, connected, baseUrl, version, error]
+      properties:
+        enabled:
+          type: boolean
+        connected:
+          type: boolean
+        baseUrl:
+          type: string
+          format: uri
+          description: Must resolve to a loopback HTTP URL ending in a slash.
+        version:
+          description: Exact JSON returned by PalDefender GET /version, or null.
+        upstreamStatus:
+          type: [integer, "null"]
+          minimum: 100
+          maximum: 599
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    PalDefenderTransportError:
+      type: object
+      additionalProperties: false
+      required: [error, outcomeUncertain]
+      properties:
+        error:
+          $ref: "#/components/schemas/ApiError"
+        outcomeUncertain:
+          type: boolean
+          description: False for synchronous GET operations.
+    PalDefenderCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, state, createdAt, completedAt, result, error, statusUrl]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain]
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/PalDefenderCommandResult"
+            - type: "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+        statusUrl:
+          type: string
+          pattern: "^/api/v1/paldefender-commands/[0-9a-fA-F-]{36}$"
+    PalDefenderCommandResult:
+      type: object
+      additionalProperties: false
+      required: [upstreamPath, httpStatus, body, text]
+      properties:
+        upstreamPath:
+          type: string
+        httpStatus:
+          type: integer
+          minimum: 100
+          maximum: 599
+        body:
+          description: Parsed upstream JSON response, or null.
+        text:
+          type: [string, "null"]
+          description: Upstream text response when the response is not JSON.
+    PalDefenderCommandAuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - commandId
+        - eventType
+        - state
+        - at
+        - serverId
+        - upstreamPath
+        - idempotencyKey
+        - requestHash
+        - reason
+        - actor
+        - httpStatus
+        - errorCode
+        - errorMessage
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        commandId:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain, recovered-uncertain]
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain]
+        at:
+          type: string
+          format: date-time
+        serverId:
+          type: string
+        upstreamPath:
+          type: string
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+        requestHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        actor:
+          type: string
+        httpStatus:
+          type: [integer, "null"]
+          minimum: 100
+          maximum: 599
+        errorCode:
+          type: [string, "null"]
+        errorMessage:
+          type: [string, "null"]
+    PalworldServerInfo:
+      type: object
+      required: [version, serverName, description, worldGuid]
+      properties:
+        version:
+          type: string
+        serverName:
+          type: string
+        description:
+          type: string
+        worldGuid:
+          type: string
+    PalworldMetrics:
+      type: object
+      required:
+        - serverFps
+        - currentPlayerNum
+        - serverFrameTime
+        - maxPlayerNum
+        - uptime
+        - baseCampNum
+        - days
+      properties:
+        serverFps:
+          type: integer
+        currentPlayerNum:
+          type: integer
+        serverFrameTime:
+          type: number
+        maxPlayerNum:
+          type: integer
+        uptime:
+          type: integer
+          format: int64
+        baseCampNum:
+          type: integer
+        days:
+          type: integer
+    NativeBridgeStatus:
+      type: object
+      required: [serverId, connected, capabilities, probes]
+      properties:
+        serverId:
+          type: string
+        connected:
+          type: boolean
+        protocolVersion:
+          type: [string, "null"]
+        gameBuild:
+          type: [string, "null"]
+        modVersion:
+          type: [string, "null"]
+        capabilities:
+          type: array
+          items:
+            type: string
+        probes:
+          type: object
+          additionalProperties:
+            type: boolean
+        lastSeenAt:
+          type: [string, "null"]
+          format: date-time
+        lastError:
+          type: [string, "null"]
+    ServerCapabilities:
+      type: object
+      required:
+        - serverId
+        - officialRestConnected
+        - publishAnnouncements
+        - publishChatAnnouncements
+        - publishClientOverlay
+        - publishTopBanner
+        - sendInGameNotifications
+        - commandQueueReady
+        - auditReady
+        - bridgeConnected
+        - readPlayers
+        - readPlayerProgression
+        - writePlayerProgression
+        - readInventory
+        - writeInventory
+        - readPals
+        - writePals
+        - mode
+        - reasons
+      properties:
+        serverId:
+          type: string
+        officialRestConnected:
+          type: boolean
+        publishAnnouncements:
+          type: boolean
+          description: True when the durable queue and audit storage are ready and at least one announcement transport is available.
+        publishChatAnnouncements:
+          type: boolean
+          description: True when official REST, the durable queue, and audit storage are ready.
+        publishClientOverlay:
+          type: boolean
+          description: True when the Native Bridge advertises announcements.overlay.write and the durable queue and audit storage are ready.
+        publishTopBanner:
+          type: boolean
+          description: True when the Native Bridge advertises announcements.banner.write, its read-only signature probe succeeds, and the durable queue and audit storage are ready.
+        sendInGameNotifications:
+          type: boolean
+          description: True only when the independent native-notification queue and audit are ready and ui.notifications.probe/write expose a valid server-native preset table.
+        commandQueueReady:
+          type: boolean
+        auditReady:
+          type: boolean
+        bridgeConnected:
+          type: boolean
+        readPlayers:
+          type: boolean
+        readPlayerProgression:
+          type: boolean
+        writePlayerProgression:
+          type: boolean
+        readInventory:
+          type: boolean
+        writeInventory:
+          type: boolean
+        readPals:
+          type: boolean
+        writePals:
+          type: boolean
+        mode:
+          type: string
+          enum: [normal, read-only-safe-mode, guarded-native-write, maintenance]
+        reasons:
+          type: array
+          items:
+            type: string
+    ClientOverlayProbe:
+      type: object
+      description: >-
+        Native reflection and compatibility details returned by the loaded mod.
+        This read-only probe does not invoke the client-overlay broadcast function.
+      additionalProperties: true
+    TopBannerProbe:
+      type: object
+      description: >-
+        Native reflection and compatibility details returned by the loaded mod.
+        This read-only probe does not invoke the top-banner function.
+      additionalProperties: true
+    PlayerPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerSummary"
+        nextCursor:
+          type: [string, "null"]
+    PlayerSummary:
+      type: object
+      required: [playerId, name, online]
+      properties:
+        playerId:
+          type: string
+        uid:
+          type: [string, "null"]
+        name:
+          type: string
+        online:
+          type: boolean
+        level:
+          type: [integer, "null"]
+    LiveMapSnapshot:
+      type: object
+      required:
+        - serverId
+        - streamId
+        - sequence
+        - status
+        - source
+        - generatedAt
+        - sampleIntervalMs
+        - staleAfterMs
+        - unavailableAfterMs
+        - coordinateSpace
+        - items
+      properties:
+        serverId:
+          type: string
+        streamId:
+          type: string
+          format: uuid
+          description: Changes whenever the Control API live-map sampler restarts.
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          type: string
+          enum: [live, stale, unavailable]
+        source:
+          type: string
+          const: palworld-official-rest.players
+        observedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Time of the last successful official REST sample.
+        generatedAt:
+          type: string
+          format: date-time
+        sampleIntervalMs:
+          type: integer
+          minimum: 500
+          maximum: 5000
+        staleAfterMs:
+          type: integer
+          minimum: 1
+        unavailableAfterMs:
+          type: integer
+          minimum: 1
+        coordinateSpace:
+          $ref: "#/components/schemas/LiveMapCoordinateSpace"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LiveMapPlayer"
+    LiveMapCoordinateSpace:
+      type: object
+      required: [mapId, units, bounds, projection]
+      properties:
+        mapId:
+          type: string
+        units:
+          type: string
+          const: unreal-centimeters
+        bounds:
+          $ref: "#/components/schemas/LiveMapBounds"
+        projection:
+          $ref: "#/components/schemas/LiveMapProjection"
+        backgroundUrl:
+          type: [string, "null"]
+          description: Optional browser-facing image path calibrated to bounds.
+    LiveMapBounds:
+      type: object
+      required: [minX, maxX, minY, maxY]
+      properties:
+        minX:
+          type: number
+        maxX:
+          type: number
+        minY:
+          type: number
+        maxY:
+          type: number
+    LiveMapProjection:
+      type: object
+      required: [axisSwap, invertX]
+      properties:
+        axisSwap:
+          type: boolean
+          const: true
+        invertX:
+          type: boolean
+          const: true
+    LiveMapPlayer:
+      type: object
+      required: [playerId, name, online, observedAt, position]
+      properties:
+        playerId:
+          type: string
+        uid:
+          type: [string, "null"]
+          description: Palworld user identifier; never contains an IP address or account name.
+        name:
+          type: string
+        level:
+          type: [integer, "null"]
+        online:
+          type: boolean
+          const: true
+        observedAt:
+          type: string
+          format: date-time
+        position:
+          $ref: "#/components/schemas/LiveMapPosition"
+    LiveMapPosition:
+      type: object
+      required: [x, y]
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+    NativePlayerProbe:
+      type: object
+      required:
+        - observedAt
+        - executionThread
+        - targetClass
+        - classFound
+        - identityMapping
+        - objectCount
+        - truncated
+        - objects
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        targetClass:
+          type: string
+        classFound:
+          type: boolean
+        identityMapping:
+          $ref: "#/components/schemas/NativeIdentityMapping"
+        objectCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativePlayerObject"
+    NativePlayerObject:
+      type: object
+      required: [ephemeralObjectId, objectName, fullName, className, identity]
+      properties:
+        ephemeralObjectId:
+          type: integer
+          description: Runtime-only UObject index; never persist or expose as a mutation key.
+        objectName:
+          type: string
+        fullName:
+          type: string
+        className:
+          type: string
+        identity:
+          $ref: "#/components/schemas/NativePlayerIdentity"
+    NativeIdentityMapping:
+      type: object
+      required: [ready, playerUId, playerUIdType, accountName, displayName, playerId, levelSource]
+      properties:
+        ready:
+          type: boolean
+        playerUId:
+          type: string
+        playerUIdType:
+          type: string
+        accountName:
+          type: string
+        displayName:
+          type: string
+        playerId:
+          type: string
+        levelSource:
+          type: string
+          const: official-rest
+    NativePlayerIdentity:
+      type: object
+      required: [playerUId, accountName, displayName, playerId, level, levelSource]
+      properties:
+        playerUId:
+          type: [string, "null"]
+        accountName:
+          type: [string, "null"]
+        displayName:
+          type: [string, "null"]
+        playerId:
+          type: [integer, "null"]
+        level:
+          type: [integer, "null"]
+        levelSource:
+          type: string
+          const: official-rest
+    NativePlayerSchema:
+      type: object
+      required:
+        - observedAt
+        - executionThread
+        - targetClass
+        - classFound
+        - propertyCount
+        - truncated
+        - properties
+        - identityCandidates
+        - candidateFunctions
+        - inheritance
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        targetClass:
+          type: string
+        classFound:
+          type: boolean
+        propertyCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        properties:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativePlayerField"
+        identityCandidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativePlayerField"
+        candidateFunctions:
+          type: array
+          items:
+            type: string
+        inheritance:
+          type: array
+          items:
+            type: string
+    NativePlayerField:
+      type: object
+      required: [name, type, detailType, owner, replicated]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        detailType:
+          type: [string, "null"]
+        owner:
+          type: string
+        replicated:
+          type: boolean
+    NativePlayerProgressionProbe:
+      type: object
+      required:
+        - observedAt
+        - executionThread
+        - mappingReady
+        - parameterObjectCount
+        - technologyObjectCount
+        - playerCount
+        - players
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        mappingReady:
+          type: boolean
+        parameterObjectCount:
+          type: integer
+          minimum: 0
+        technologyObjectCount:
+          type: integer
+          minimum: 0
+        playerCount:
+          type: integer
+          minimum: 0
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerProgression"
+    PlayerProgression:
+      type: object
+      required:
+        - playerUId
+        - instanceId
+        - displayName
+        - accountName
+        - playerId
+        - online
+        - loaded
+        - level
+        - totalExperience
+        - experienceToNextLevel
+        - unusedStatusPoints
+        - statusPoints
+        - technologyPoints
+        - ancientTechnologyPoints
+        - revision
+      properties:
+        playerUId:
+          type: string
+        instanceId:
+          type: [string, "null"]
+        displayName:
+          type: [string, "null"]
+        accountName:
+          type: [string, "null"]
+        playerId:
+          type: [integer, "null"]
+        online:
+          type: boolean
+        loaded:
+          type: boolean
+        level:
+          type: integer
+          minimum: 1
+        totalExperience:
+          type: integer
+          format: int64
+          minimum: 0
+        experienceToNextLevel:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        unusedStatusPoints:
+          type: integer
+          minimum: 0
+        statusPoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerStatusPoint"
+        technologyPoints:
+          type: [integer, "null"]
+        ancientTechnologyPoints:
+          type: [integer, "null"]
+        revision:
+          type: string
+          pattern: "^[0-9]+$"
+    PlayerStatusPoint:
+      type: object
+      required: [id, rank]
+      properties:
+        id:
+          type: string
+        nativeName:
+          type: string
+        rank:
+          type: integer
+          minimum: 0
+    PlayerProgressionMutationRequest:
+      type: object
+      required: [expectedRevision, reason, dryRun, patch]
+      properties:
+        expectedRevision:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 160
+        dryRun:
+          type: boolean
+        patch:
+          $ref: "#/components/schemas/PlayerProgressionPatch"
+    PlayerProgressionPatch:
+      type: object
+      description: Exactly one operation must be provided; allocation requires both allocation fields.
+      properties:
+        addExperience:
+          type: integer
+          minimum: 1
+          maximum: 10000000
+        grantStatusPoints:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        grantTechnologyPoints:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        grantAncientTechnologyPoints:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        allocateStatusId:
+          type: string
+          enum:
+            - StatusName_AddMaxHP
+            - StatusName_AddMaxSP
+            - StatusName_AddPower
+            - StatusName_AddMaxInventoryWeight
+            - StatusName_AddWorkSpeed
+            - StatusName_AddCaptureLevel
+        allocateStatusPoints:
+          type: integer
+          minimum: 1
+          maximum: 100
+    NativeInventorySchema:
+      type: object
+      required: [observedAt, executionThread, typeCount, missingTypes, types]
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        typeCount:
+          type: integer
+          minimum: 0
+        missingTypes:
+          type: array
+          items:
+            type: string
+        types:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativeInventoryType"
+    NativeInventoryType:
+      type: object
+      required: [name, fullName, kind, propertyCount, truncated, properties, candidateFunctions]
+      properties:
+        name:
+          type: string
+        fullName:
+          type: string
+        kind:
+          type: string
+          enum: [class, struct, other]
+        propertyCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        properties:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativePlayerField"
+        candidateFunctions:
+          type: array
+          items:
+            type: string
+    NativeInventoryProbe:
+      type: object
+      required:
+        - observedAt
+        - executionThread
+        - mappingReady
+        - inventoryObjectCount
+        - containerObjectCount
+        - truncated
+        - inventories
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        mappingReady:
+          type: boolean
+        inventoryObjectCount:
+          type: integer
+          minimum: 0
+        containerObjectCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        inventories:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativeInventoryObject"
+    NativeInventoryObject:
+      type: object
+      required: [ownerPlayerUId, objectName, containers]
+      properties:
+        ownerPlayerUId:
+          type: [string, "null"]
+          format: uuid
+        objectName:
+          type: string
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativeInventoryContainer"
+    NativeInventoryContainer:
+      type: object
+      required: [kind, containerId, resolved, slotCount, truncated, slots]
+      properties:
+        kind:
+          type: string
+          enum: [common, dropSlot, essential, weaponLoadout, armor, food]
+        containerId:
+          type: [string, "null"]
+          format: uuid
+        resolved:
+          type: boolean
+        slotCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        slots:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/NativeInventorySlot"
+              - type: "null"
+    NativeInventorySlot:
+      type: object
+      required: [slotIndex, staticItemId, stackCount]
+      properties:
+        slotIndex:
+          type: integer
+          minimum: 0
+        staticItemId:
+          type: string
+        stackCount:
+          type: integer
+          minimum: 0
+    Player:
+      allOf:
+        - $ref: "#/components/schemas/PlayerSummary"
+        - type: object
+          required: [sessionId]
+          properties:
+            sessionId:
+              type: [string, "null"]
+            guildId:
+              type: [string, "null"]
+            lastSeenAt:
+              type: [string, "null"]
+              format: date-time
+    InventorySnapshot:
+      type: object
+      required: [revision, playerSessionId, containers]
+      properties:
+        revision:
+          type: integer
+          format: int64
+        playerSessionId:
+          type: string
+        containers:
+          type: array
+          items:
+            type: object
+            required: [containerId, kind, slots]
+            properties:
+              containerId:
+                type: string
+              kind:
+                type: string
+              slots:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InventorySlot"
+    InventorySlot:
+      type: object
+      required: [slotId, itemId, quantity]
+      properties:
+        slotId:
+          type: string
+        itemId:
+          type: string
+        quantity:
+          type: integer
+          minimum: 0
+        durability:
+          type: [integer, "null"]
+    InventoryTransactionRequest:
+      type: object
+      required: [expectedRevision, reason, dryRun, operations]
+      properties:
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        dryRun:
+          type: boolean
+        operations:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/InventoryOperation"
+    InventoryOperation:
+      type: object
+      required: [type, itemId, quantity]
+      properties:
+        type:
+          type: string
+          enum: [grant, remove, move, setDurability]
+        itemId:
+          type: string
+        quantity:
+          type: integer
+          minimum: 0
+        slotId:
+          type: [string, "null"]
+        durability:
+          type: [integer, "null"]
+          minimum: 0
+    NativePalSchema:
+      type: object
+      required: [observedAt, executionThread, candidateTypeCount, foundTypeCount, types]
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        candidateTypeCount:
+          type: integer
+          minimum: 0
+        foundTypeCount:
+          type: integer
+          minimum: 0
+        types:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    NativePalProbe:
+      type: object
+      required: [observedAt, executionThread, mappingReady, parameterObjectCount, palCount, truncated, pals]
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        executionThread:
+          type: string
+          const: unreal-engine-tick
+        mappingReady:
+          type: boolean
+        parameterObjectCount:
+          type: integer
+          minimum: 0
+        palCount:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        pals:
+          type: array
+          items:
+            $ref: "#/components/schemas/PalInstance"
+    PalInstance:
+      type: object
+      required:
+        - instanceId
+        - ownerPlayerUId
+        - characterId
+        - nickname
+        - level
+        - rank
+        - exp
+        - rare
+        - favorite
+        - talents
+        - passiveSkills
+        - location
+        - revision
+      properties:
+        instanceId:
+          type: string
+          format: uuid
+        ownerPlayerUId:
+          type: string
+          format: uuid
+        characterId:
+          type: string
+        nickname:
+          type: string
+        level:
+          type: integer
+          minimum: 1
+        rank:
+          type: integer
+          minimum: 0
+        exp:
+          type: integer
+          format: int64
+          minimum: 0
+        rare:
+          type: boolean
+        favorite:
+          type: boolean
+        talents:
+          type: object
+          required: [hp, melee, shot, defense]
+          properties:
+            hp:
+              type: integer
+            melee:
+              type: integer
+            shot:
+              type: integer
+            defense:
+              type: integer
+        passiveSkills:
+          type: array
+          items:
+            type: string
+        location:
+          type: object
+          required: [containerId, slotIndex]
+          properties:
+            containerId:
+              type: [string, "null"]
+              format: uuid
+            slotIndex:
+              type: integer
+        revision:
+          type: string
+          pattern: "^[0-9]+$"
+    PalMutationRequest:
+      type: object
+      required: [expectedRevision, reason, requireState, dryRun, patch]
+      properties:
+        expectedRevision:
+          type: string
+          pattern: "^[0-9]+$"
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        requireState:
+          type: string
+          enum: [loaded]
+        dryRun:
+          type: boolean
+        patch:
+          type: object
+          additionalProperties: false
+          properties:
+            nickname:
+              type: [string, "null"]
+              maxLength: 24
+            favorite:
+              type: [boolean, "null"]
+    PalMutationResult:
+      type: object
+      required: [dryRun, applied, pal]
+      properties:
+        dryRun:
+          type: boolean
+        applied:
+          type: boolean
+        pal:
+          $ref: "#/components/schemas/PalInstance"
+    InGameNotificationDisplayPolicy:
+      type: object
+      additionalProperties: false
+      required: [mode, configurable, note]
+      properties:
+        mode:
+          type: string
+          const: game-defined
+        configurable:
+          type: boolean
+          const: false
+        note:
+          type: string
+          minLength: 1
+    InGameNotificationParameterCapability:
+      type: object
+      additionalProperties: false
+      required: [name, type, required]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        type:
+          type: string
+          enum: [string, integer, number, boolean, string-array]
+        description:
+          type: [string, "null"]
+        required:
+          type: boolean
+        minLength:
+          type: [integer, "null"]
+          minimum: 0
+        maxLength:
+          type: [integer, "null"]
+          minimum: 0
+        minimum:
+          type: [number, "null"]
+        maximum:
+          type: [number, "null"]
+        pattern:
+          type: [string, "null"]
+        default: {}
+        enum:
+          oneOf:
+            - type: array
+              items: {}
+            - type: "null"
+    InGameNotificationPresetCapability:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - displayName
+        - description
+        - function
+        - functionFlags
+        - propertiesSize
+        - positionPolicy
+        - durationPolicy
+        - parameters
+      properties:
+        name:
+          type: string
+          minLength: 1
+        displayName:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          minLength: 1
+        function:
+          type: string
+          minLength: 1
+        functionFlags:
+          type: integer
+          minimum: 1
+        propertiesSize:
+          type: integer
+          minimum: 0
+        positionPolicy:
+          $ref: "#/components/schemas/InGameNotificationDisplayPolicy"
+        durationPolicy:
+          $ref: "#/components/schemas/InGameNotificationDisplayPolicy"
+        parameters:
+          type: array
+          items:
+            $ref: "#/components/schemas/InGameNotificationParameterCapability"
+    InGameNotificationCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        - ready
+        - dispatched
+        - mode
+        - schemaVersions
+        - supportedAudiences
+        - supportedPresets
+      properties:
+        ready:
+          type: boolean
+          const: true
+        dispatched:
+          type: boolean
+          const: false
+        mode:
+          type: string
+          const: server-native-presets
+        schemaVersions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+        supportedAudiences:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [global, players]
+        supportedPresets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InGameNotificationPresetCapability"
+    InGameNotificationAudience:
+      type: object
+      additionalProperties: false
+      required: [type, ids]
+      properties:
+        type:
+          type: string
+          enum: [global, players]
+        ids:
+          oneOf:
+            - type: array
+              minItems: 1
+              maxItems: 100
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 1
+                maxLength: 128
+            - type: "null"
+    InGameNotificationTemplate:
+      type: object
+      additionalProperties: false
+      required: [preset, parameters]
+      properties:
+        preset:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Canonical lowercase ID selected from the live supportedPresets table.
+        parameters:
+          type: object
+          maxProperties: 32
+          description: Strictly validated against the selected live preset parameter capabilities.
+          additionalProperties: true
+    InGameNotificationInput:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, template, audience, displayAt, expiresAt, reason]
+      properties:
+        schemaVersion:
+          type: string
+          const: "1"
+        template:
+          $ref: "#/components/schemas/InGameNotificationTemplate"
+        audience:
+          $ref: "#/components/schemas/InGameNotificationAudience"
+        displayAt:
+          type: [string, "null"]
+          format: date-time
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    InGameNotification:
+      type: object
+      additionalProperties: false
+      required:
+        - notificationId
+        - schemaVersion
+        - template
+        - audience
+        - displayAt
+        - expiresAt
+        - reason
+        - state
+        - createdAt
+        - updatedAt
+      properties:
+        notificationId:
+          type: string
+          format: uuid
+        schemaVersion:
+          type: string
+          const: "1"
+        template:
+          $ref: "#/components/schemas/InGameNotificationTemplate"
+        audience:
+          $ref: "#/components/schemas/InGameNotificationAudience"
+        displayAt:
+          type: [string, "null"]
+          format: date-time
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        reason:
+          type: string
+        state:
+          type: string
+          enum: [draft, scheduled, sent, failed, uncertain, expired, cancelled]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    InGameNotificationDispatchResult:
+      type: object
+      required:
+        - notificationId
+        - preset
+        - attemptedRecipients
+        - deliveredRecipients
+        - deliveryAcknowledged
+      properties:
+        notificationId:
+          type: string
+          format: uuid
+        preset:
+          type: string
+        attemptedRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        deliveredRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        deliveryAcknowledged:
+          type: [boolean, "null"]
+          description: False or null is expected for native Client RPCs without an application-level acknowledgement.
+    InGameNotificationCommandAuditEvent:
+      type: object
+      required:
+        - eventId
+        - commandId
+        - notificationId
+        - eventType
+        - state
+        - at
+        - serverId
+        - idempotencyKey
+        - requestHash
+        - reason
+        - actor
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        commandId:
+          type: string
+          format: uuid
+        notificationId:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain, cancelled]
+        at:
+          type: string
+          format: date-time
+        serverId:
+          type: string
+        idempotencyKey:
+          type: string
+        requestHash:
+          type: string
+        reason:
+          type: string
+        actor:
+          type: string
+        scheduledFor:
+          type: [string, "null"]
+          format: date-time
+        errorCode:
+          type: [string, "null"]
+        errorMessage:
+          type: [string, "null"]
+        attemptedRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        deliveredRecipients:
+          type: [integer, "null"]
+          minimum: 0
+    AnnouncementInput:
+      type: object
+      required: [title, body, audience, channels]
+      properties:
+        title:
+          type: string
+          maxLength: 120
+        body:
+          type: string
+          maxLength: 1000
+        audience:
+          type: object
+          description: The first official REST release accepts only type=global.
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [global]
+            ids:
+              type: [array, "null"]
+              items:
+                type: string
+        channels:
+          type: array
+          description: One to three real delivery transports. Chat uses official REST; client-overlay and top-banner use distinct fail-closed Native Bridge operations.
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [chat, client-overlay, top-banner]
+        publishAt:
+          type: [string, "null"]
+          format: date-time
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+    Announcement:
+      allOf:
+        - $ref: "#/components/schemas/AnnouncementInput"
+        - type: object
+          required: [announcementId, state, createdAt, updatedAt]
+          properties:
+            announcementId:
+              type: string
+              format: uuid
+            state:
+              type: string
+              enum: [draft, scheduled, published, expired, cancelled]
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+    TransactionPreview:
+      type: object
+      required: [valid, warnings, before, after]
+      properties:
+        valid:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+        before:
+          type: object
+        after:
+          type: object
+    SaveFlushRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    CreateBackupRequest:
+      type: object
+      additionalProperties: false
+      required: [label, reason]
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    VerifyBackupRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    SaveStatus:
+      type: object
+      required:
+        - serverId
+        - ready
+        - checkedAt
+        - worldGuid
+        - worldName
+        - gameVersion
+        - onlinePlayerCount
+        - save
+        - disk
+        - nativeBackups
+        - managedBackups
+        - validation
+        - error
+      properties:
+        serverId:
+          type: string
+        ready:
+          type: boolean
+        checkedAt:
+          type: string
+          format: date-time
+        worldGuid:
+          type: [string, "null"]
+        worldName:
+          type: [string, "null"]
+        gameVersion:
+          type: [string, "null"]
+        onlinePlayerCount:
+          type: [integer, "null"]
+          minimum: 0
+        save:
+          $ref: "#/components/schemas/ActiveSaveSummary"
+        disk:
+          $ref: "#/components/schemas/SaveDiskSummary"
+        nativeBackups:
+          $ref: "#/components/schemas/NativeBackupSummary"
+        managedBackups:
+          $ref: "#/components/schemas/ManagedBackupSummary"
+        validation:
+          $ref: "#/components/schemas/SaveValidationSummary"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    ActiveSaveSummary:
+      type: object
+      required: [fileCount, playerFileCount, totalBytes, lastModifiedAt]
+      properties:
+        fileCount:
+          type: integer
+          minimum: 0
+        playerFileCount:
+          type: integer
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        lastModifiedAt:
+          type: [string, "null"]
+          format: date-time
+    SaveDiskSummary:
+      type: object
+      required: [availableBytes, totalBytes]
+      properties:
+        availableBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+    NativeBackupSummary:
+      type: object
+      required: [count, totalBytes, latestCreatedAt]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        verifiedCount:
+          type: [integer, "null"]
+          minimum: 0
+        latestCreatedAt:
+          type: [string, "null"]
+          format: date-time
+    ManagedBackupSummary:
+      type: object
+      required: [count, totalBytes, verifiedCount, latestCreatedAt]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        verifiedCount:
+          type: integer
+          minimum: 0
+        latestCreatedAt:
+          type: [string, "null"]
+          format: date-time
+    SaveValidationSummary:
+      type: object
+      required: [processPathMatched, serverNameMatched, worldGuidMatched]
+      properties:
+        processPathMatched:
+          type: boolean
+        serverNameMatched:
+          type: boolean
+        worldGuidMatched:
+          type: boolean
+    BackupPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Backup"
+    Backup:
+      type: object
+      additionalProperties: false
+      required:
+        - backupId
+        - kind
+        - label
+        - worldGuid
+        - gameVersion
+        - createdAt
+        - fileCount
+        - totalBytes
+        - integrity
+        - consistency
+        - actor
+        - reason
+        - manifestSha256
+      properties:
+        backupId:
+          type: string
+        kind:
+          type: string
+          enum: [managed, native]
+        label:
+          type: [string, "null"]
+        worldGuid:
+          type: [string, "null"]
+        gameVersion:
+          type: [string, "null"]
+        createdAt:
+          type: string
+          format: date-time
+        fileCount:
+          type: integer
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        integrity:
+          type: string
+          enum: [unverified, verified, failed]
+        consistency:
+          type: string
+          enum: [native, stable]
+        actor:
+          type: [string, "null"]
+        reason:
+          type: [string, "null"]
+        manifestSha256:
+          type: [string, "null"]
+          pattern: "^[a-fA-F0-9]{64}$"
+    SaveCommand:
+      type: object
+      additionalProperties: false
+      required:
+        - commandId
+        - type
+        - state
+        - stage
+        - createdAt
+        - completedAt
+        - statusUrl
+        - backupId
+        - result
+        - error
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [flush, create-backup, verify-backup]
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain]
+        stage:
+          type: string
+          enum: [queued, saving-world, waiting-snapshot, copying, verifying, completed]
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        statusUrl:
+          type: string
+        backupId:
+          type: [string, "null"]
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/SaveCommandResult"
+            - type: "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    SaveCommandResult:
+      type: object
+      properties:
+        savedAt:
+          type: string
+          format: date-time
+        httpStatus:
+          type: integer
+        backup:
+          $ref: "#/components/schemas/Backup"
+        verifiedAt:
+          type: string
+          format: date-time
+    SaveCommandAuditEvent:
+      type: object
+      required:
+        - eventId
+        - commandId
+        - serverId
+        - type
+        - eventType
+        - state
+        - stage
+        - at
+        - idempotencyKey
+        - requestHash
+        - reason
+        - actor
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        commandId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+        type:
+          type: string
+          enum: [flush, create-backup, verify-backup]
+        eventType:
+          type: string
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain]
+        stage:
+          type: string
+          enum: [queued, saving-world, waiting-snapshot, copying, verifying, completed]
+        at:
+          type: string
+          format: date-time
+        idempotencyKey:
+          type: string
+        requestHash:
+          type: string
+        reason:
+          type: string
+        actor:
+          type: string
+        backupId:
+          type: [string, "null"]
+        label:
+          type: [string, "null"]
+        errorCode:
+          type: [string, "null"]
+        errorMessage:
+          type: [string, "null"]
+    AcceptedCommand:
+      type: object
+      required: [commandId, state, acceptedAt, statusUrl]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          const: accepted
+        acceptedAt:
+          type: string
+          format: date-time
+        statusUrl:
+          type: string
+    Command:
+      type: object
+      required: [commandId, state, createdAt, statusUrl]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain, cancelled]
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/AnnouncementDispatchResult"
+            - $ref: "#/components/schemas/InGameNotificationDispatchResult"
+            - type: "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+        statusUrl:
+          type: string
+    CommandAuditEvent:
+      type: object
+      required:
+        - eventId
+        - commandId
+        - announcementId
+        - eventType
+        - state
+        - at
+        - serverId
+        - idempotencyKey
+        - requestHash
+        - reason
+        - actor
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        commandId:
+          type: string
+          format: uuid
+        announcementId:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain, cancelled]
+        at:
+          type: string
+          format: date-time
+        serverId:
+          type: string
+        idempotencyKey:
+          type: string
+        requestHash:
+          type: string
+        reason:
+          type: string
+        actor:
+          type: string
+        scheduledFor:
+          type: [string, "null"]
+          format: date-time
+        httpStatus:
+          type: [integer, "null"]
+        errorCode:
+          type: [string, "null"]
+        errorMessage:
+          type: [string, "null"]
+        channel:
+          type: [string, "null"]
+          enum: [chat, client-overlay, top-banner, null]
+        transport:
+          type: [string, "null"]
+          enum: [official-rest, native-bridge, null]
+        attemptedRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        deliveredRecipients:
+          type: [integer, "null"]
+          minimum: 0
+    AnnouncementDispatchResult:
+      type: object
+      required: [announcementId, channels]
+      properties:
+        announcementId:
+          type: string
+          format: uuid
+        channels:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AnnouncementChannelResult"
+    AnnouncementChannelResult:
+      type: object
+      required: [channel, state]
+      properties:
+        channel:
+          type: string
+          enum: [chat, client-overlay, top-banner]
+        state:
+          type: string
+          enum: [accepted, dispatched, succeeded, failed, uncertain, cancelled]
+        httpStatus:
+          type: [integer, "null"]
+        attemptedRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        deliveredRecipients:
+          type: [integer, "null"]
+          minimum: 0
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    PlayerPortalUserId:
+      type: string
+      description: Normalized platform identity accepted for in-game OTP delivery.
+      pattern: "^(?:steam|gdk|xbox|xuid|epic)_[a-z0-9]{3,64}$"
+      examples: [steam_76561198000000000]
+    PlayerLoginCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/PlayerPortalUserId"
+    PlayerLoginChallenge:
+      type: object
+      additionalProperties: false
+      required: [challengeId, expiresAt, retryAfterSeconds, delivery]
+      properties:
+        challengeId:
+          type: string
+          description: Opaque identifier for the single-use login challenge.
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        expiresAt:
+          type: string
+          format: date-time
+        retryAfterSeconds:
+          type: integer
+          minimum: 1
+        delivery:
+          type: string
+          const: in-game
+    PlayerLoginCodeVerification:
+      type: object
+      additionalProperties: false
+      required: [challengeId, code]
+      properties:
+        challengeId:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        code:
+          type: string
+          description: Eight-digit one-time code delivered privately in game.
+          pattern: "^[0-9]{8}$"
+    PlayerPortalSession:
+      type: object
+      additionalProperties: false
+      required: [authenticated, userId, displayName, csrfToken, expiresAt]
+      properties:
+        authenticated:
+          type: boolean
+          const: true
+        userId:
+          $ref: "#/components/schemas/PlayerPortalUserId"
+        displayName:
+          type: [string, "null"]
+          description: Reserved for a resolved in-game display name; currently null.
+        csrfToken:
+          type: string
+          description: Send as X-CSRF-Token on authenticated player-portal writes.
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        expiresAt:
+          type: string
+          format: date-time
+    CreatePlayerPortalOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [productId, quantity]
+      description: >-
+        Contains no player identity. The target account is always selected from
+        the authenticated HttpOnly player session cookie.
+      properties:
+        productId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 99
+    PlayerExtractionMapPoint:
+      type: object
+      additionalProperties: false
+      required: [x, y]
+      properties:
+        x:
+          type: number
+          format: double
+        y:
+          type: number
+          format: double
+    PlayerExtractionCoordinateTransform:
+      type: object
+      additionalProperties: false
+      required:
+        - mapUnits
+        - worldUnits
+        - scale
+        - worldXOffset
+        - worldYOffset
+        - formula
+      properties:
+        mapUnits:
+          type: string
+          const: paldefender-map-units
+        worldUnits:
+          type: string
+          const: unreal-centimeters
+        scale:
+          type: number
+          format: double
+          const: 459
+        worldXOffset:
+          type: number
+          format: double
+          const: -123888
+        worldYOffset:
+          type: number
+          format: double
+          const: 158000
+        formula:
+          type: string
+          const: "worldX = mapY * scale + worldXOffset; worldY = mapX * scale + worldYOffset"
+    PlayerExtractionZoneStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - online
+        - positionAvailable
+        - mapPosition
+        - worldPosition
+        - inRange
+        - insideAnyZone
+        - activeZoneId
+        - nearestZoneId
+      properties:
+        online:
+          type: boolean
+        positionAvailable:
+          type: boolean
+        mapPosition:
+          oneOf:
+            - $ref: "#/components/schemas/PlayerExtractionMapPoint"
+            - type: "null"
+        worldPosition:
+          oneOf:
+            - $ref: "#/components/schemas/PlayerExtractionMapPoint"
+            - type: "null"
+        inRange:
+          type: boolean
+          description: False when position is unavailable; inspect positionAvailable first.
+        insideAnyZone:
+          type: [boolean, "null"]
+          description: Null when no current position can be safely sampled.
+        activeZoneId:
+          type: [string, "null"]
+        nearestZoneId:
+          type: [string, "null"]
+    PlayerExtractionZone:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - routeHint
+        - mapPosition
+        - worldPosition
+        - radius
+        - worldRadius
+        - distanceToCenter
+        - worldDistanceToCenter
+        - distanceToBoundary
+        - worldDistanceToBoundary
+        - inside
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        routeHint:
+          type: string
+          minLength: 1
+          maxLength: 512
+        mapPosition:
+          $ref: "#/components/schemas/PlayerExtractionMapPoint"
+        worldPosition:
+          $ref: "#/components/schemas/PlayerExtractionMapPoint"
+        radius:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+          maximum: 10000
+        worldRadius:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+          maximum: 4590000
+        distanceToCenter:
+          type: [number, "null"]
+          format: double
+          minimum: 0
+        worldDistanceToCenter:
+          type: [number, "null"]
+          format: double
+          minimum: 0
+        distanceToBoundary:
+          type: [number, "null"]
+          format: double
+          minimum: 0
+        worldDistanceToBoundary:
+          type: [number, "null"]
+          format: double
+          minimum: 0
+        inside:
+          type: [boolean, "null"]
+    PlayerExtractionZoneMap:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - statusMessage
+        - sampledAt
+        - positionSource
+        - coordinateTransform
+        - player
+        - zones
+      properties:
+        status:
+          type: string
+          enum: [live, offline, position-unavailable, unavailable]
+        statusMessage:
+          type: string
+        sampledAt:
+          type: string
+          format: date-time
+        positionSource:
+          type: string
+          const: paldefender-map-location
+        coordinateTransform:
+          $ref: "#/components/schemas/PlayerExtractionCoordinateTransform"
+        player:
+          $ref: "#/components/schemas/PlayerExtractionZoneStatus"
+        zones:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PlayerExtractionZone"
+    ExtractionUserId:
+      type: string
+      pattern: "^[a-z][a-z0-9]{1,15}_[a-z0-9-]{3,100}$"
+      examples: [steam_76561198000000000]
+    ExtractionCurrency:
+      type: string
+      enum: [merchantCoin, weeklyTicket]
+    ExtractionSeasonSummary:
+      type: object
+      additionalProperties: false
+      required: [seasonId, name, state, startsAt, endsAt, nextShopRefreshAt]
+      properties:
+        seasonId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        state:
+          type: string
+          enum: [scheduled, active, closed]
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        nextShopRefreshAt:
+          type: string
+          format: date-time
+    ExtractionBalances:
+      type: object
+      additionalProperties: false
+      required: [merchantCoin, weeklyTicket]
+      properties:
+        merchantCoin:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        weeklyTicket:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+    ExtractionSeasonStats:
+      type: object
+      additionalProperties: false
+      required: [successfulRuns, failedRuns, uncertainRuns, extractedValue]
+      properties:
+        successfulRuns:
+          type: integer
+          minimum: 0
+        failedRuns:
+          type: integer
+          minimum: 0
+        uncertainRuns:
+          type: integer
+          minimum: 0
+        extractedValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+    ExtractionOverview:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - displayName
+        - season
+        - balances
+        - seasonStats
+        - online
+        - persistence
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+        displayName:
+          type: string
+        season:
+          $ref: "#/components/schemas/ExtractionSeasonSummary"
+        balances:
+          $ref: "#/components/schemas/ExtractionBalances"
+        seasonStats:
+          $ref: "#/components/schemas/ExtractionSeasonStats"
+        online:
+          type: boolean
+        persistence:
+          type: string
+          const: sqlite-event-store
+    ExtractionProductPrice:
+      type: object
+      additionalProperties: false
+      required: [currency, amount]
+      properties:
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+    ExtractionShopProduct:
+      type: object
+      additionalProperties: false
+      required:
+        - productId
+        - name
+        - description
+        - category
+        - tags
+        - price
+        - deliverySummary
+        - stockRemaining
+        - purchaseLimit
+        - purchased
+        - enabled
+        - featured
+      properties:
+        productId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        price:
+          $ref: "#/components/schemas/ExtractionProductPrice"
+        deliverySummary:
+          type: string
+          description: Local-console summary containing the configured Palworld ItemIDs and quantities.
+        stockRemaining:
+          type: [integer, "null"]
+          minimum: 0
+          description: Current implementation projects the remaining per-season purchase limit here.
+        purchaseLimit:
+          type: [integer, "null"]
+          minimum: 1
+        purchased:
+          type: integer
+          minimum: 0
+        enabled:
+          type: boolean
+        featured:
+          type: boolean
+    ExtractionCatalog:
+      type: object
+      additionalProperties: false
+      required: [revision, items]
+      properties:
+        revision:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionShopProduct"
+    CreateExtractionOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [userId, productId, quantity]
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+        productId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 99
+    ExtractionOrder:
+      type: object
+      additionalProperties: false
+      required:
+        - orderId
+        - productId
+        - productName
+        - quantity
+        - currency
+        - totalAmount
+        - state
+        - statusMessage
+        - createdAt
+        - updatedAt
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        productId:
+          type: string
+          format: uuid
+        productName:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        totalAmount:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        state:
+          type: string
+          enum: [accepted, pending, delivering, succeeded, failed, uncertain, cancelled]
+        statusMessage:
+          type: [string, "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ExtractionOrderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionOrder"
+    ExtractionLedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [entryId, currency, amount, balanceAfter, reason, referenceId, createdAt]
+      properties:
+        entryId:
+          type: string
+          format: uuid
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        amount:
+          type: integer
+          format: int64
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        balanceAfter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        reason:
+          type: string
+        referenceId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    ExtractionLedgerList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionLedgerEntry"
+    ExtractionRun:
+      type: object
+      additionalProperties: false
+      required:
+        - runId
+        - state
+        - extractedItemCount
+        - extractedValue
+        - rewardCurrency
+        - rewardAmount
+        - startedAt
+        - endedAt
+        - statusMessage
+        - internalState
+      properties:
+        runId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [preparing, deployed, extracted, failed, uncertain, cancelled]
+        extractedItemCount:
+          type: integer
+          minimum: 0
+        extractedValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        rewardCurrency:
+          type: string
+          const: weeklyTicket
+        rewardAmount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: [string, "null"]
+          format: date-time
+        statusMessage:
+          type: [string, "null"]
+        internalState:
+          type: string
+          enum: [Quoted, Consuming, Removed, Settled, Failed, Uncertain, Expired, Cancelled]
+    ExtractionRunList:
+      type: object
+      additionalProperties: false
+      required: [items, settlementEnabled, reason]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionRun"
+        settlementEnabled:
+          type: boolean
+        reason:
+          type: [string, "null"]
+    CreateExtractionQuoteRequest:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+    ExtractionQuoteItem:
+      type: object
+      additionalProperties: false
+      required: [itemId, name, quantity, unitValue, totalValue]
+      properties:
+        itemId:
+          type: string
+        name:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        unitValue:
+          type: integer
+          format: int64
+          minimum: 1
+        totalValue:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+    ExtractionQuote:
+      type: object
+      additionalProperties: false
+      required: [runId, state, zoneName, items, itemCount, totalValue, expiresAt]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          const: quoted
+        zoneName:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ExtractionQuoteItem"
+        itemCount:
+          type: integer
+          minimum: 1
+        totalValue:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        expiresAt:
+          type: string
+          format: date-time
+    SettleExtractionRunRequest:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+    ExtractionWalletAdjustmentRequest:
+      type: object
+      additionalProperties: false
+      required: [userId, currency, delta, reason]
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        delta:
+          type: integer
+          format: int64
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+          not:
+            const: 0
+        reason:
+          type: string
+          minLength: 1
+    ExtractionRepositoryCurrency:
+      type: string
+      enum: [MarketCoin, SeasonVoucher]
+      description: Enum spelling emitted by the embedded repository record in the admin response.
+    ExtractionRepositoryLedgerEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - entryId
+        - accountId
+        - currency
+        - seasonId
+        - delta
+        - balanceAfter
+        - reason
+        - referenceType
+        - referenceId
+        - actor
+        - createdAt
+      properties:
+        entryId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        currency:
+          $ref: "#/components/schemas/ExtractionRepositoryCurrency"
+        seasonId:
+          type: [string, "null"]
+          format: uuid
+        delta:
+          type: integer
+          format: int64
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        balanceAfter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        reason:
+          type: string
+        referenceType:
+          type: string
+        referenceId:
+          type: string
+        actor:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    ExtractionWalletAdjustmentResponse:
+      type: object
+      additionalProperties: false
+      required: [accountId, currency, balance, ledgerEntry, created]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        balance:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        ledgerEntry:
+          $ref: "#/components/schemas/ExtractionRepositoryLedgerEntry"
+        created:
+          type: boolean
+    ExtractionOrderReconciliationRequest:
+      type: object
+      additionalProperties: false
+      required: [resolution, reason, confirmation]
+      properties:
+        resolution:
+          type: string
+          enum: [delivered, refund]
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        confirmation:
+          type: string
+          description: Exact ORDER-{orderId:N}-{DELIVERED|REFUND} operator confirmation.
+    ExtractionRunReconciliationRequest:
+      type: object
+      additionalProperties: false
+      required: [resolution, reason, confirmation]
+      properties:
+        resolution:
+          type: string
+          enum: [failed, settled]
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        confirmation:
+          type: string
+          description: Exact RUN-{runId:N}-{FAILED|SETTLED} operator confirmation.
+    ExtractionRconStatus:
+      type: object
+      additionalProperties: false
+      required: [enabled, connected, outcome, error]
+      properties:
+        enabled:
+          type: boolean
+        connected:
+          type: boolean
+        outcome:
+          type: string
+          enum: [disabled, success, failed, uncertain]
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    ExtractionRolloverMaintenanceRequest:
+      type: object
+      additionalProperties: false
+      required: [maintenance, reason]
+      properties:
+        maintenance:
+          type: boolean
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    ExtractionOperationGateState:
+      type: object
+      additionalProperties: false
+      required: [maintenance, reason, actor, updatedAt]
+      properties:
+        maintenance:
+          type: boolean
+        reason:
+          type: string
+        actor:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    ExtractionRolloverPreflight:
+      type: object
+      additionalProperties: false
+      required:
+        - checkedAt
+        - currentSeasonId
+        - currentSeasonCode
+        - currentSeasonWorldId
+        - currentSeasonEndsAt
+        - actualWorldId
+        - targetSeasonCode
+        - targetSeasonStartsAt
+        - targetSeasonEndsAt
+        - canStartWorldSwitch
+        - reason
+      properties:
+        checkedAt:
+          type: string
+          format: date-time
+        currentSeasonId:
+          type: [string, "null"]
+          format: uuid
+        currentSeasonCode:
+          type: [string, "null"]
+        currentSeasonWorldId:
+          type: [string, "null"]
+          pattern: "^[A-F0-9]{32}$"
+        currentSeasonEndsAt:
+          type: [string, "null"]
+          format: date-time
+        actualWorldId:
+          type: string
+          pattern: "^[A-F0-9]{32}$"
+        targetSeasonCode:
+          type: string
+        targetSeasonStartsAt:
+          type: string
+          format: date-time
+        targetSeasonEndsAt:
+          type: string
+          format: date-time
+        canStartWorldSwitch:
+          type: boolean
+        reason:
+          type: string
+    ExtractionBlockingOrder:
+      type: object
+      additionalProperties: false
+      required: [orderId, state, updatedAt]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [PendingDelivery, Dispatching, DeliveryFailed, DeliveryUncertain]
+        updatedAt:
+          type: string
+          format: date-time
+    ExtractionBlockingRun:
+      type: object
+      additionalProperties: false
+      required: [runId, state, updatedAt]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [Quoted, Consuming, Removed, Uncertain]
+        updatedAt:
+          type: string
+          format: date-time
+    ExtractionRolloverReadiness:
+      type: object
+      additionalProperties: false
+      required: [maintenance, readyForWorldSwitch, activeOperations, blockingOrders, blockingRuns]
+      properties:
+        maintenance:
+          $ref: "#/components/schemas/ExtractionOperationGateState"
+        readyForWorldSwitch:
+          type: boolean
+        activeOperations:
+          type: integer
+          minimum: 0
+        blockingOrders:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionBlockingOrder"
+        blockingRuns:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtractionBlockingRun"
+    ExtractionRolloverCommitRequest:
+      type: object
+      additionalProperties: false
+      required: [worldId]
+      properties:
+        worldId:
+          type: string
+          pattern: "^[A-Fa-f0-9]{32}$"
+          description: New DedicatedServerName submitted by the guarded rollover script.
+    ExtractionRolloverCommitResponse:
+      type: object
+      additionalProperties: false
+      required: [seasonId, seasonCode, worldId, revision]
+      properties:
+        seasonId:
+          type: string
+          format: uuid
+        seasonCode:
+          type: string
+        worldId:
+          type: string
+          pattern: "^[A-F0-9]{32}$"
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        traceId:
+          type: [string, "null"]
+security: []

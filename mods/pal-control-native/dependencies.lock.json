@@ -1,0 +1,17 @@
+{
+  "palworldTarget": "v1.0.0.100427",
+  "ue4ss": {
+    "repository": "https://github.com/Okaetsu/RE-UE4SS",
+    "releaseTag": "experimental-palworld",
+    "sourceCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
+    "releaseArchive": "UE4SS-Palworld.zip",
+    "releaseArchiveSha256": "7c80b2f4a29baf0f384552c8517e58196e78c8a1b8530637b7179eddae1b54a9",
+    "runtimeDllSha256": "afc83a57a30c3d44bc0d432222f24857b0c3788738b8a1975dfeef746edab798"
+  },
+  "build": {
+    "cmake": "3.31.6",
+    "rustc": "1.97.0",
+    "msvc": "19.44.35217",
+    "palControlNativeDllSha256": "a367645b1a55f5431c50a6c43ca032632d879568f22b09c0580f1352833aaecb"
+  }
+}
