@@ -9,11 +9,14 @@ npm run test:contract
 `resource-economy-contract.ps1` protects the Scheme A resource-economy
 boundary without contacting a game server. It verifies that the settlement
 whitelist is non-empty and case-insensitively unique, all prices are positive
-and bounded, every item exists in the versioned Palworld resource catalog,
-quotes remain whitelist-only, and inventory aggregation continues to cover
-`Items`, `Food`, and `DropSlot`. It also pins both overview endpoints and the
-OpenAPI schema to `weekly-resource-economy`, with explicit settled, failed,
-uncertain, and exchanged-value metrics.
+and bounded, and every item exactly matches the committed Scheme A item-id
+fixture. When the ignored, locally authorized full Palworld resource catalog is
+present, the test additionally checks every ID against it; a clean clone does
+not require or redistribute that external dataset. The contract also verifies
+that quotes remain whitelist-only, inventory aggregation covers `Items`,
+`Food`, and `DropSlot`, and both overview endpoints and the OpenAPI schema stay
+pinned to `weekly-resource-economy`, with explicit settled, failed, uncertain,
+and exchanged-value metrics.
 
 `extraction-mode-options-contract.ps1` runs a small .NET harness against the
 real `ExtractionModeOptions.IsValid` implementation. It freezes the enabled

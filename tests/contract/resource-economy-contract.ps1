@@ -5,6 +5,8 @@ $settlementPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\ExtractionSettlementService.cs"
 $resourceCatalogPath = Join-Path $repositoryRoot `
     "services\control-api\Resources\palworld-resource-catalog.json"
+$approvedItemIdsPath = Join-Path $PSScriptRoot `
+    "fixtures\resource-economy-item-ids.txt"
 $coordinatorPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\ExtractionModeCoordinator.cs"
 $adminOverviewPath = Join-Path $repositoryRoot `
@@ -63,16 +65,30 @@ Assert-Contract ($matches.Count -gt 0) "the sellable resource whitelist is empty
 Assert-Contract ($matches.Count -le 500) `
     "the whitelist unexpectedly exceeds the reviewable safety limit of 500 entries."
 
-$knownCatalog = [IO.File]::ReadAllText($resourceCatalogPath, $utf8) |
-    ConvertFrom-Json
-Assert-Contract ($null -ne $knownCatalog.items -and $knownCatalog.items.Count -gt 0) `
-    "the versioned Palworld item catalog is empty."
-
-$knownItemIds = [Collections.Generic.HashSet[string]]::new(
+$approvedItemIds = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::OrdinalIgnoreCase)
-foreach ($item in $knownCatalog.items) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$item.id)) {
-        [void]$knownItemIds.Add([string]$item.id)
+foreach ($line in [IO.File]::ReadAllLines($approvedItemIdsPath, $utf8)) {
+    $itemId = $line.Trim()
+    if (-not [string]::IsNullOrWhiteSpace($itemId)) {
+        Assert-Contract ($approvedItemIds.Add($itemId)) `
+            "duplicate approved item id '$itemId'."
+    }
+}
+Assert-Contract ($approvedItemIds.Count -gt 0) `
+    "the committed Scheme A item-id fixture is empty."
+
+$knownItemIds = $null
+if (Test-Path -LiteralPath $resourceCatalogPath -PathType Leaf) {
+    $knownCatalog = [IO.File]::ReadAllText($resourceCatalogPath, $utf8) |
+        ConvertFrom-Json
+    Assert-Contract ($null -ne $knownCatalog.items -and $knownCatalog.items.Count -gt 0) `
+        "the local Palworld item catalog is empty."
+    $knownItemIds = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $knownCatalog.items) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.id)) {
+            [void]$knownItemIds.Add([string]$item.id)
+        }
     }
 }
 
@@ -90,10 +106,16 @@ foreach ($match in $matches) {
         "item '$itemId' has no display name."
     Assert-Contract ($unitValue -gt 0 -and $unitValue -le 1000000) `
         "item '$itemId' has unsafe unit value '$unitValue'."
-    Assert-Contract ($knownItemIds.Contains($itemId)) `
-        "item '$itemId' is absent from the versioned Palworld item catalog."
+    Assert-Contract ($approvedItemIds.Contains($itemId)) `
+        "item '$itemId' is absent from the committed Scheme A item-id fixture."
+    if ($null -ne $knownItemIds) {
+        Assert-Contract ($knownItemIds.Contains($itemId)) `
+            "item '$itemId' is absent from the local Palworld item catalog."
+    }
     $totalUnitValue += $unitValue
 }
+Assert-Contract ($whitelistIds.Count -eq $approvedItemIds.Count) `
+    "the committed Scheme A item-id fixture contains stale or missing entries."
 
 $singleline = [Text.RegularExpressions.RegexOptions]::Singleline
 Assert-Contract ([regex]::IsMatch(
