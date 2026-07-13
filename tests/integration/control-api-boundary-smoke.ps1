@@ -21,48 +21,49 @@ function Wait-ForEndpoint(
             throw "Control API exited before becoming ready (exit $($process.ExitCode))."
         }
         try {
-            Invoke-WebRequest $uri -TimeoutSec 1 | Out-Null
-            return
+            $response = $script:LoopbackHttpClient.GetAsync($uri).GetAwaiter().GetResult()
+            try {
+                if ($response.IsSuccessStatusCode) {
+                    return
+                }
+            }
+            finally {
+                $response.Dispose()
+            }
         }
         catch {
-            Start-Sleep -Milliseconds 200
+            # Keep polling until the process exits or the wall-clock deadline.
         }
+        Start-Sleep -Milliseconds 200
     }
     throw "Endpoint did not become ready within ${timeoutSeconds}s: $uri"
 }
 
 function Invoke-CapturedGet([string] $uri, [hashtable] $headers = @{}) {
+    $request = [Net.Http.HttpRequestMessage]::new(
+        [Net.Http.HttpMethod]::Get,
+        $uri)
     try {
-        $response = Invoke-WebRequest $uri -Headers $headers -TimeoutSec 5
-        return [pscustomobject]@{
-            StatusCode = [int]$response.StatusCode
-            Content = [string]$response.Content
+        foreach ($header in $headers.GetEnumerator()) {
+            if (-not $request.Headers.TryAddWithoutValidation(
+                    [string]$header.Key,
+                    [string]$header.Value)) {
+                throw "Could not add test HTTP header '$($header.Key)'."
+            }
+        }
+        $response = $script:LoopbackHttpClient.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            return [pscustomobject]@{
+                StatusCode = [int]$response.StatusCode
+                Content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+        }
+        finally {
+            $response.Dispose()
         }
     }
-    catch {
-        $response = $_.Exception.Response
-        if ($null -eq $response) {
-            throw
-        }
-        $content = [string]$_.ErrorDetails.Message
-        if ([string]::IsNullOrWhiteSpace($content)) {
-            try {
-                $reader = [IO.StreamReader]::new($response.GetResponseStream())
-                try {
-                    $content = $reader.ReadToEnd()
-                }
-                finally {
-                    $reader.Dispose()
-                }
-            }
-            catch {
-                $content = ""
-            }
-        }
-        return [pscustomobject]@{
-            StatusCode = [int]$response.StatusCode
-            Content = $content
-        }
+    finally {
+        $request.Dispose()
     }
 }
 
@@ -89,6 +90,12 @@ function Remove-TestTree([string] $path) {
     }
     Remove-Item -LiteralPath $fullTarget -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+Add-Type -AssemblyName System.Net.Http
+$loopbackHandler = [Net.Http.HttpClientHandler]::new()
+$loopbackHandler.UseProxy = $false
+$script:LoopbackHttpClient = [Net.Http.HttpClient]::new($loopbackHandler)
+$script:LoopbackHttpClient.Timeout = [TimeSpan]::FromSeconds(5)
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $serviceRoot = Join-Path $repositoryRoot "services\control-api"
@@ -193,4 +200,5 @@ finally {
     if (Test-Path $testRoot) {
         Remove-TestTree $testRoot
     }
+    $script:LoopbackHttpClient.Dispose()
 }
