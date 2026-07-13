@@ -169,6 +169,19 @@ function Write-FixtureFile([string] $path, [string] $content) {
     [IO.File]::WriteAllBytes($path, [Text.Encoding]::UTF8.GetBytes($content))
 }
 
+function Get-Sha256Hex([string] $path) {
+    $stream = [IO.File]::OpenRead($path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Remove-TestTree {
     $separators = [char[]]@(
         [IO.Path]::DirectorySeparatorChar,
@@ -383,7 +396,7 @@ OptionSettings=(ServerName="Fake Palworld",ServerDescription="save smoke")
     if (-not (Test-Path -LiteralPath $copiedLevel -PathType Leaf)) {
         throw "Managed backup did not contain Level.sav."
     }
-    $copiedLevelHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $copiedLevel).Hash.ToLowerInvariant()
+    $copiedLevelHash = Get-Sha256Hex $copiedLevel
     if ($manifestText.ToLowerInvariant() -notlike "*$copiedLevelHash*") {
         throw "Managed manifest does not contain the copied Level.sav SHA-256."
     }
