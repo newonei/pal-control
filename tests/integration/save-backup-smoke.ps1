@@ -88,7 +88,8 @@ function Invoke-JsonPostResponse(
     $response = Invoke-WebRequest -Method Post -Uri $uri `
         -Headers @{ "Idempotency-Key" = $idempotencyKey } `
         -ContentType "application/json" `
-        -Body ($body | ConvertTo-Json -Depth 6 -Compress) -TimeoutSec 3
+        -Body ($body | ConvertTo-Json -Depth 6 -Compress) -TimeoutSec 3 `
+        -UseBasicParsing
     return [pscustomobject]@{
         statusCode = [int]$response.StatusCode
         body = $response.Content | ConvertFrom-Json
@@ -142,7 +143,8 @@ function Assert-HttpStatus(
     [int[]] $expected,
     [string] $failure) {
     try {
-        Invoke-WebRequest -Method $method -Uri $uri -TimeoutSec 2 | Out-Null
+        Invoke-WebRequest -Method $method -Uri $uri -TimeoutSec 2 `
+            -UseBasicParsing | Out-Null
     }
     catch {
         if ([int]$_.Exception.Response.StatusCode -in $expected) {

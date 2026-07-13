@@ -107,14 +107,14 @@ try {
     $notModified = $false
     $etag = $null
     for ($index = 0; $index -lt 10 -and -not $notModified; $index += 1) {
-        $httpResponse = Invoke-WebRequest $mapUri -TimeoutSec 2
+        $httpResponse = Invoke-WebRequest $mapUri -TimeoutSec 2 -UseBasicParsing
         $etag = [string]$httpResponse.Headers["ETag"]
         if ([string]::IsNullOrWhiteSpace($etag)) {
             throw "Snapshot response did not include an ETag."
         }
         try {
             $conditional = Invoke-WebRequest $mapUri `
-                -Headers @{ "If-None-Match" = $etag } -TimeoutSec 2
+                -Headers @{ "If-None-Match" = $etag } -TimeoutSec 2 -UseBasicParsing
             $notModified = [int]$conditional.StatusCode -eq 304
         }
         catch {
@@ -125,7 +125,7 @@ try {
         throw "If-None-Match did not return 304."
     }
 
-    $sseLines = & curl.exe --silent --no-buffer --max-time 3 $eventsUri 2>$null
+    $sseLines = & curl.exe --silent --no-buffer --noproxy "*" --max-time 3 $eventsUri 2>$null
     $curlStatus = $LASTEXITCODE
     if ($curlStatus -notin @(0, 28)) {
         throw "SSE request failed with curl exit code $curlStatus."
