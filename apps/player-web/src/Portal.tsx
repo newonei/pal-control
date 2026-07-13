@@ -22,6 +22,7 @@ import {
   settleRun
 } from "./api";
 import { ExtractionMap } from "./ExtractionMap";
+import { resourceExchangeStateLabel } from "./runState";
 
 type Tab = "shop" | "map" | "orders" | "ledger" | "runs";
 
@@ -40,10 +41,10 @@ type PurchaseDraft = {
 
 const tabs: Array<{ key: Tab; label: string; shortLabel: string; icon: string }> = [
   { key: "shop", label: "战备商城", shortLabel: "商城", icon: "商" },
-  { key: "map", label: "撤离地图", shortLabel: "地图", icon: "图" },
+  { key: "map", label: "兑换点地图", shortLabel: "地图", icon: "图" },
   { key: "orders", label: "我的订单", shortLabel: "订单", icon: "单" },
   { key: "ledger", label: "资金流水", shortLabel: "资金", icon: "账" },
-  { key: "runs", label: "撤离记录", shortLabel: "记录", icon: "撤" }
+  { key: "runs", label: "兑换记录", shortLabel: "记录", icon: "换" }
 ];
 
 export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props) {
@@ -106,7 +107,7 @@ export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props
         onSessionExpired();
         return;
       }
-      setExtractionZonesError(reason instanceof Error ? reason.message : "撤离点数据加载失败");
+      setExtractionZonesError(reason instanceof Error ? reason.message : "资源兑换点数据加载失败");
     } finally {
       setExtractionZonesLoading(false);
     }
@@ -190,8 +191,8 @@ export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props
     try {
       const result = await settleRun(quote.runId, settleKey, csrfToken);
       setNotice(result.state === "extracted" || result.state === "settled"
-        ? `撤离结算成功，已获得 ${result.rewardAmount.toLocaleString("zh-CN")} ${currencyName(result.rewardCurrency)}。`
-        : result.statusMessage || "撤离结算已提交，请等待结果核验。");
+        ? `资源兑换成功，已获得 ${result.rewardAmount.toLocaleString("zh-CN")} ${currencyName(result.rewardCurrency)}。`
+        : result.statusMessage || "资源兑换已提交，请等待结果核验。");
       setQuote(null);
       setSettleKey(null);
       await Promise.all([reload(true), reloadExtractionZones(true)]);
@@ -247,7 +248,7 @@ export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props
             ))}
           </nav>
           <div className="sidebar-note">
-            <strong>本周行动结束</strong>
+            <strong>本周世界结束</strong>
             <span>{overview ? formatDate(overview.season.endsAt) : "--"}</span>
             <small>商域币永久保留，周券随新档更新。</small>
           </div>
@@ -258,7 +259,7 @@ export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props
             <div className="welcome">
               <span className="eyebrow">WELCOME BACK</span>
               <h1>{greeting()}，{displayName}</h1>
-              <p>准备下一趟行动，或者结算刚带回来的战利品。</p>
+              <p>采购本周战备，或到兑换点出售白名单资源。</p>
             </div>
             <BalanceCard icon="币" name="永久商域币" value={balance?.merchantCoin} hint="跨周永久保留" />
             <BalanceCard icon="券" name="周战备券" value={balance?.weeklyTicket} hint="仅本周有效" tone="amber" />
@@ -371,17 +372,17 @@ export function Portal({ session, csrfToken, onLogout, onSessionExpired }: Props
       {quote && (
         <div className="modal-backdrop" role="presentation">
           <section className="modal quote-modal" role="dialog" aria-modal="true" aria-labelledby="quote-title">
-            <span className="eyebrow">EXTRACTION QUOTE</span>
-            <h2 id="quote-title">确认撤离战利品</h2>
-            <p>撤离点：<strong>{quote.zoneName}</strong> · 报价有效至 {formatTime(quote.expiresAt)}</p>
+            <span className="eyebrow">RESOURCE QUOTE</span>
+            <h2 id="quote-title">确认出售资源</h2>
+            <p>资源兑换点：<strong>{quote.zoneName}</strong> · 报价有效至 {formatTime(quote.expiresAt)}</p>
             <div className="quote-items">
               {quote.items.map((item) => <div key={item.itemId}><span>{item.name} × {item.quantity}</span><strong>券 {item.totalValue.toLocaleString("zh-CN")}</strong></div>)}
             </div>
-            <div className="purchase-total"><span>{quote.itemCount} 件战利品</span><strong>券 {quote.totalValue.toLocaleString("zh-CN")}</strong></div>
-            <p className="modal-note warning">结算会从背包扣除以上物品。结果不确定时不会重复入账，请等待管理员核对。</p>
+            <div className="purchase-total"><span>{quote.itemCount} 件资源</span><strong>券 {quote.totalValue.toLocaleString("zh-CN")}</strong></div>
+            <p className="modal-note warning">确认后会出售报价中的全部物品并从背包扣除。结果不确定时不会重复入账，请等待管理员核对。</p>
             <div className="modal-actions">
-              <button className="secondary" disabled={quoteBusy} onClick={() => setQuote(null)}>暂不结算</button>
-              <button className="primary" disabled={quoteBusy} onClick={() => void confirmSettlement()}>{quoteBusy ? "结算中…" : "确认扣除并结算"}</button>
+              <button className="secondary" disabled={quoteBusy} onClick={() => setQuote(null)}>暂不出售</button>
+              <button className="primary" disabled={quoteBusy} onClick={() => void confirmSettlement()}>{quoteBusy ? "兑换中…" : "确认出售全部资源"}</button>
             </div>
           </section>
         </div>
@@ -422,15 +423,15 @@ function Orders({ orders }: { orders: Order[] }) {
 }
 
 function Ledger({ entries }: { entries: LedgerEntry[] }) {
-  if (!entries.length) return <Empty title="暂无资金流水" detail="购买、撤离和活动奖励都会形成可追溯记录。" />;
+  if (!entries.length) return <Empty title="暂无资金流水" detail="购买、资源兑换和活动奖励都会形成可追溯记录。" />;
   return <div className="data-list ledger-list">{entries.map((entry) => <article key={entry.entryId}><div className={entry.amount >= 0 ? "amount-icon income" : "amount-icon expense"}>{entry.amount >= 0 ? "+" : "−"}</div><div className="data-main"><strong>{entry.reason}</strong><span>{entry.referenceId ? `关联 ${entry.referenceId.slice(0, 12)}` : "系统账务"}</span></div><div className="data-value"><strong className={entry.amount >= 0 ? "positive" : "negative"}>{entry.amount >= 0 ? "+" : ""}{entry.amount.toLocaleString("zh-CN")} {currencyName(entry.currency)}</strong><time>余额 {entry.balanceAfter.toLocaleString("zh-CN")} · {formatDateTime(entry.createdAt)}</time></div></article>)}</div>;
 }
 
 function Runs({ runs, busy, online, onQuote }: { runs: RunList | null; busy: boolean; online: boolean; onQuote: () => void }) {
   return <>
-    <section className="extraction-action"><div><span className="eyebrow">LIVE SETTLEMENT</span><h3>已到达撤离点？</h3><p>扫描当前掉落栏中的可结算物品，确认报价后再扣除并入账。</p></div><button className="primary large" disabled={busy || !online || !runs?.settlementEnabled} onClick={onQuote}>{busy ? "扫描中…" : "扫描撤离物品"}</button></section>
-    {!runs?.settlementEnabled && <div className="inline-tip warning">{runs?.reason || "撤离结算当前不可用"}</div>}
-    {!runs?.items.length ? <Empty title="本周还没有撤离记录" detail="到达配置的撤离区域后，就能扫描并结算战利品。" /> : <div className="data-list">{runs.items.map((run) => <article key={run.runId}><div className={`state ${run.state}`}>{runState(run.state)}</div><div className="data-main"><strong>{run.extractedItemCount} 件战利品</strong><span>{run.statusMessage || `行动 ${run.runId.slice(0, 8)}`}</span></div><div className="data-value"><strong>{currencyIcon(run.rewardCurrency)} {run.rewardAmount.toLocaleString("zh-CN")}</strong><time>{formatDateTime(run.startedAt)}</time></div></article>)}</div>}
+    <section className="extraction-action"><div><span className="eyebrow">RESOURCE EXCHANGE</span><h3>已到达资源兑换点？</h3><p>扫描允许容器中的白名单资源，确认整单报价后再扣除并入账。</p></div><button className="primary large" disabled={busy || !online || !runs?.settlementEnabled} onClick={onQuote}>{busy ? "扫描中…" : "扫描可售资源"}</button></section>
+    {!runs?.settlementEnabled && <div className="inline-tip warning">{runs?.reason || "资源兑换当前不可用"}</div>}
+    {!runs?.items.length ? <Empty title="本周还没有资源兑换记录" detail="到达开放的资源兑换点后，即可扫描并出售白名单资源。" /> : <div className="data-list">{runs.items.map((run) => <article key={run.runId}><div className={`state ${run.state}`}>{resourceExchangeStateLabel(run.state)}</div><div className="data-main"><strong>{run.extractedItemCount} 件资源</strong><span>{run.statusMessage || `兑换单 ${run.runId.slice(0, 8)}`}</span></div><div className="data-value"><strong>{currencyIcon(run.rewardCurrency)} {run.rewardAmount.toLocaleString("zh-CN")}</strong><time>{formatDateTime(run.startedAt)}</time></div></article>)}</div>}
   </>;
 }
 
@@ -441,8 +442,7 @@ function clamp(value: number, min: number, max: number) { return Math.min(max, M
 function currencyIcon(currency: Currency) { return currency === "merchantCoin" ? "币" : "券"; }
 function currencyName(currency: Currency) { return currency === "merchantCoin" ? "商域币" : "周券"; }
 function orderState(state: Order["state"]) { return ({ accepted: "已受理", pending: "待发货", delivering: "发货中", succeeded: "已送达", failed: "失败", uncertain: "待核对", cancelled: "已取消", refunded: "已退款" } as const)[state]; }
-function runState(state: string) { return ({ preparing: "准备中", deployed: "行动中", extracted: "待结算", settled: "已结算", failed: "失败", uncertain: "待核对", cancelled: "已取消" } as Record<string, string>)[state] ?? state; }
-function tabEyebrow(tab: Tab) { return ({ shop: "SUPPLY MARKET", map: "EXTRACTION ROUTES", orders: "DELIVERY TRACKING", ledger: "WALLET HISTORY", runs: "EXTRACTION LOG" })[tab]; }
+function tabEyebrow(tab: Tab) { return ({ shop: "SUPPLY MARKET", map: "EXCHANGE LOCATIONS", orders: "DELIVERY TRACKING", ledger: "WALLET HISTORY", runs: "EXCHANGE LOG" })[tab]; }
 function formatDate(value: string) { return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatDateTime(value: string) { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatTime(value: string) { return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value)); }

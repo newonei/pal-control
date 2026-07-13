@@ -214,7 +214,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
     try {
       setExtractionQuote(await createExtractionQuote(userId));
     } catch (nextError) {
-      setError(errorMessage(nextError, "扫描撤离战利品失败"));
+      setError(errorMessage(nextError, "扫描可售资源失败"));
     } finally {
       setScanning(false);
     }
@@ -232,8 +232,8 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
       });
       setExtractionQuote(undefined);
       setNotice(run.state === "extracted"
-        ? `撤离成功，已获得 ${formatNumber(run.rewardAmount)} 战备券。`
-        : run.statusMessage || "撤离进入待核验状态，请勿重复提交。");
+        ? `资源兑换成功，已获得 ${formatNumber(run.rewardAmount)} 战备券。`
+        : run.statusMessage || "资源兑换进入待核验状态，请勿重复提交。");
       const [nextOverview, nextLedger, nextRuns] = await Promise.all([
         getExtractionOverview(userId),
         getWalletLedger(userId),
@@ -245,7 +245,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
       setSettlementEnabled(nextRuns.settlementEnabled);
       setSettlementReason(nextRuns.reason ?? undefined);
     } catch (nextError) {
-      setError(errorMessage(nextError, "撤离结算失败"));
+      setError(errorMessage(nextError, "资源兑换结算失败"));
     } finally {
       setSettling(false);
     }
@@ -255,7 +255,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
     return (
       <section className="extraction-center extraction-empty-account">
         <span className="extraction-empty-icon">域</span>
-        <p className="extraction-eyebrow">EXTRACTION ECONOMY</p>
+        <p className="extraction-eyebrow">WORLD RESOURCE ECONOMY</p>
         <h2>请先选择玩家账户</h2>
         <p>商城余额和订单使用平台 UserId 跨周存档保存，不能使用随世界重置的 PlayerUID。</p>
         {onSelectPlayer ? <button className="extraction-primary" onClick={onSelectPlayer} type="button">选择在线玩家</button> : null}
@@ -267,7 +267,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
     <section className="extraction-center">
       <header className="extraction-hero">
         <div>
-          <p className="extraction-eyebrow">幻兽商域 · 搜打撤赛季</p>
+          <p className="extraction-eyebrow">幻兽商域 · 周世界资源经济</p>
           <h2>{overview?.season.name ?? "赛季战备中心"}</h2>
           <p>永久货币跨档保存；战备券、角色成长和游戏内物资随周档重置。</p>
         </div>
@@ -296,15 +296,15 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
           accent="cyan"
           label="本周战备券"
           value={overview?.balances.weeklyTicket}
-          note="撤离结算获得 · 周档采购 · 结档清零"
+          note="资源兑换获得 · 周档采购 · 结档清零"
           glyph="券"
         />
         <article className="extraction-stat-card">
-          <span>本周撤离</span>
-          <strong>{overview ? overview.seasonStats.successfulRuns : "--"}</strong>
+          <span>本周已结算兑换</span>
+          <strong>{overview ? overview.seasonStats.settledExchanges : "--"}</strong>
           <small>
-            失败 {overview?.seasonStats.failedRuns ?? "--"} · 待核验 {overview?.seasonStats.uncertainRuns ?? "--"} ·
-            带出价值 {formatNumber(overview?.seasonStats.extractedValue)}
+            失败结算 {overview?.seasonStats.failedSettlements ?? "--"} · 待核验 {overview?.seasonStats.uncertainSettlements ?? "--"} ·
+            已兑换价值 {formatNumber(overview?.seasonStats.exchangedValue)}
           </small>
         </article>
         <article className="extraction-stat-card">
@@ -316,14 +316,14 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
 
       <section className="extraction-settlement-panel">
         <div>
-          <p className="extraction-eyebrow">EXTRACTION SETTLEMENT</p>
-          <h3>撤离战利品结算</h3>
-          <p>进入撤离区后扫描 Items、Food 与 DropSlot。系统先用 RCON 扣除白名单战利品，REST 回读证明后才发放战备券。</p>
+          <p className="extraction-eyebrow">RESOURCE SETTLEMENT</p>
+          <h3>白名单资源兑换</h3>
+          <p>进入资源回收区后扫描 Items、Food 与 DropSlot。系统先用 RCON 扣除白名单资源，REST 回读证明后才发放战备券。</p>
           {!settlementEnabled && settlementReason ? <small>{settlementReason}</small> : null}
         </div>
         <span className={settlementEnabled ? "ready" : "locked"}>{settlementEnabled ? "结算链路已就绪" : "结算链路未启用"}</span>
         <button className="extraction-primary" disabled={!settlementEnabled || scanning} onClick={() => void scanExtractionLoot()} type="button">
-          {scanning ? "位置与背包核验中…" : "扫描撤离战利品"}
+          {scanning ? "位置与背包核验中…" : "扫描可售资源"}
         </button>
       </section>
 
@@ -397,9 +397,9 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
           {visibleLedger.map((entry) => <LedgerRow entry={entry} key={entry.entryId} />)}
           {!loading && visibleLedger.length === 0 ? <div className="extraction-mini-empty">暂无货币变动</div> : null}
         </HistoryCard>
-        <HistoryCard title="最近撤离记录" eyebrow="EXTRACTION LOG">
+        <HistoryCard title="最近资源兑换记录" eyebrow="SETTLEMENT LOG">
           {visibleRuns.map((run) => <RunRow key={run.runId} run={run} />)}
-          {!loading && visibleRuns.length === 0 ? <div className="extraction-mini-empty">暂无撤离记录</div> : null}
+          {!loading && visibleRuns.length === 0 ? <div className="extraction-mini-empty">暂无资源兑换记录</div> : null}
         </HistoryCard>
       </div>
 
@@ -446,10 +446,10 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
         }}>
           <section aria-labelledby="extraction-settle-title" aria-modal="true" className="extraction-dialog extraction-settle-dialog" role="dialog">
             <header>
-              <div><p className="extraction-eyebrow">EXTRACTION QUOTE</p><h3 id="extraction-settle-title">确认撤离出售</h3></div>
+              <div><p className="extraction-eyebrow">RESOURCE QUOTE</p><h3 id="extraction-settle-title">确认出售资源</h3></div>
               <button aria-label="关闭" disabled={settling} onClick={() => setExtractionQuote(undefined)} type="button">×</button>
             </header>
-            <p className="extraction-zone-label">撤离点：<strong>{extractionQuote.zoneName}</strong> · 报价剩余 {formatShortCountdown(extractionQuote.expiresAt, clock)}</p>
+            <p className="extraction-zone-label">资源回收点：<strong>{extractionQuote.zoneName}</strong> · 报价剩余 {formatShortCountdown(extractionQuote.expiresAt, clock)}</p>
             <div className="extraction-quote-lines">
               {extractionQuote.items.map((item) => (
                 <article key={item.itemId}>
@@ -460,7 +460,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
               ))}
             </div>
             <dl className="extraction-order-summary">
-              <div><dt>战利品数量</dt><dd>{formatNumber(extractionQuote.itemCount)} 件</dd></div>
+              <div><dt>可售资源数量</dt><dd>{formatNumber(extractionQuote.itemCount)} 件</dd></div>
               <div className="total"><dt>预计获得</dt><dd>{formatNumber(extractionQuote.totalValue)} 战备券</dd></div>
             </dl>
             <p className="extraction-dialog-warning">确认后会永久移除上列游戏物品。扣物结果未经 REST 回读证明时不会入账，也不会自动重试。</p>
@@ -490,7 +490,7 @@ function LedgerRow({ entry }: { entry: WalletLedgerEntry }) {
 }
 
 function RunRow({ run }: { run: ExtractionRun }) {
-  return <article className="extraction-history-row"><span className={run.state}>{run.state === "extracted" ? "撤" : run.state === "failed" ? "败" : run.state === "uncertain" ? "核" : "行"}</span><div><strong>{runStateName(run.state)} · 带出 {run.extractedItemCount} 件</strong><small>{formatDate(run.endedAt ?? run.startedAt)} · 估值 {formatNumber(run.extractedValue)}</small>{run.statusMessage ? <p>{run.statusMessage}</p> : null}</div><em className={run.rewardAmount > 0 ? "positive" : ""}>+{formatNumber(run.rewardAmount)} {currencyName(run.rewardCurrency)}</em></article>;
+  return <article className="extraction-history-row"><span className={run.state}>{run.state === "extracted" ? "成" : run.state === "failed" ? "败" : run.state === "uncertain" ? "核" : "结"}</span><div><strong>{runStateName(run.state)} · 资源 {run.extractedItemCount} 件</strong><small>{formatDate(run.endedAt ?? run.startedAt)} · 兑换价值 {formatNumber(run.extractedValue)}</small>{run.statusMessage ? <p>{run.statusMessage}</p> : null}</div><em className={run.rewardAmount > 0 ? "positive" : ""}>+{formatNumber(run.rewardAmount)} {currencyName(run.rewardCurrency)}</em></article>;
 }
 
 function HistoryCard({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) {
@@ -533,7 +533,7 @@ function categoryName(category: string) {
 }
 
 function seasonStateName(state?: ExtractionOverview["season"]["state"]) {
-  if (state === "active") return "本周战局进行中";
+  if (state === "active") return "本周商域运营中";
   if (state === "settling") return "赛季结算中";
   if (state === "scheduled") return "赛季未开始";
   if (state === "closed") return "赛季已结束";
@@ -563,12 +563,12 @@ function orderStateHelp(state: ShopOrder["state"]) {
 
 function runStateName(state: ExtractionRun["state"]) {
   const names: Record<ExtractionRun["state"], string> = {
-    preparing: "战备中",
-    deployed: "行动中",
-    extracted: "成功撤离",
-    failed: "撤离失败",
+    preparing: "报价中",
+    deployed: "结算处理中",
+    extracted: "已结算",
+    failed: "结算失败",
     uncertain: "待核验（请勿重试）",
-    cancelled: "行动取消"
+    cancelled: "报价已取消"
   };
   return names[state];
 }

@@ -41,7 +41,7 @@ type NavKey =
 const navigation: Array<{ key: NavKey; label: string; glyph: string; group: string }> = [
   { key: "dashboard", label: "仪表盘", glyph: "总", group: "总览" },
   { key: "players", label: "玩家中心", glyph: "玩", group: "玩家运营" },
-  { key: "extraction", label: "摸金商城", glyph: "撤", group: "玩家运营" },
+  { key: "extraction", label: "资源经济", glyph: "兑", group: "玩家运营" },
   { key: "operations", label: "奖励与管理", glyph: "奖", group: "玩家运营" },
   { key: "directory", label: "公会与封禁", glyph: "会", group: "玩家运营" },
   { key: "announcements", label: "公告中心", glyph: "公", group: "内容运营" },

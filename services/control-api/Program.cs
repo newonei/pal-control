@@ -167,6 +167,22 @@ var app = builder.Build();
 // PalDefender, save-management, official REST, RCON, or native bridge routes.
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
+// Every API surface except the purpose-built player portal is operator-only.
+// Enforce the documented loopback boundary in code as defense in depth: a
+// reverse-proxy routing mistake must not expose wallet adjustments, settlement
+// reconciliation, PalDefender or Native operations to the public network.
+app.Use(async (context, next) =>
+{
+    if (IsOperatorOnlyApi(context.Request.Path) && !IsLoopback(context.Connection.RemoteIpAddress))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new ApiError(
+            "OPERATOR_API_LOOPBACK_REQUIRED",
+            "该管理 API 只允许从本机回环地址访问。"));
+        return;
+    }
+    await next(context);
+});
 // The player-portal traffic guard must run after trusted X-Forwarded-For has
 // replaced the loopback proxy address, but before any public player endpoint.
 app.UseMiddleware<PlayerPortalTrafficGuardMiddleware>();
@@ -179,15 +195,49 @@ app.MapGet("/health/live", () => Results.Ok(new
     time = DateTimeOffset.UtcNow
 }));
 
-app.MapGet("/health/ready", async (BridgeState bridge, CancellationToken cancellationToken) =>
+app.MapGet("/health/ready", async (
+    BridgeState bridge,
+    ExtractionCommerceService commerce,
+    ExtractionModeCoordinator extraction,
+    ExtractionOperationGate operationGate,
+    PalDefenderCommandQueue deliveryCommands,
+    CancellationToken cancellationToken) =>
 {
     var capabilities = await bridge.GetCapabilitiesAsync("local", cancellationToken);
+    if (!commerce.IsReady)
+    {
+        return Results.Json(new
+        {
+            status = "unavailable",
+            readReady = false,
+            officialRestConnected = capabilities.OfficialRestConnected,
+            bridgeConnected = capabilities.BridgeConnected,
+            economy = new
+            {
+                enabled = extraction.Enabled,
+                gameplayMode = ExtractionModeCoordinator.GameplayMode,
+                storeReady = false,
+                deliveryQueueReady = deliveryCommands.IsReady,
+                maintenance = operationGate.Current.Maintenance
+            },
+            time = DateTimeOffset.UtcNow
+        }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
     return Results.Ok(new
     {
-        status = capabilities.OfficialRestConnected ? "degraded" : "unavailable",
+        status = capabilities.OfficialRestConnected ? "ready" : "degraded",
+        readReady = true,
         mode = capabilities.Mode,
         officialRestConnected = capabilities.OfficialRestConnected,
         bridgeConnected = capabilities.BridgeConnected,
+        economy = new
+        {
+            enabled = extraction.Enabled,
+            gameplayMode = ExtractionModeCoordinator.GameplayMode,
+            storeReady = true,
+            deliveryQueueReady = deliveryCommands.IsReady,
+            maintenance = operationGate.Current.Maintenance
+        },
         time = DateTimeOffset.UtcNow
     });
 });
@@ -2362,6 +2412,13 @@ api.MapGet("/events", async (HttpContext context, CancellationToken cancellation
 });
 
 app.Run();
+
+static bool IsOperatorOnlyApi(PathString path) =>
+    path.StartsWithSegments("/api/v1") &&
+    !path.StartsWithSegments("/api/v1/player");
+
+static bool IsLoopback(IPAddress? address) =>
+    address is not null && IPAddress.IsLoopback(address);
 
 static string LiveMapEtag(string streamId, long sequence) =>
     $"\"live-map-{streamId}-{sequence}\"";

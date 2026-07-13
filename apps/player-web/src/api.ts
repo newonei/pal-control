@@ -20,6 +20,7 @@ export type Overview = {
   userId: string;
   displayName: string | null;
   online: boolean;
+  gameplayMode: "weekly-resource-economy";
   season: {
     seasonId: string;
     name: string;
@@ -30,10 +31,14 @@ export type Overview = {
   };
   balances: { merchantCoin: number; weeklyTicket: number };
   seasonStats: {
-    successfulRuns: number;
-    failedRuns: number;
-    uncertainRuns: number;
-    extractedValue: number;
+    settledExchanges: number;
+    failedSettlements: number;
+    uncertainSettlements: number;
+    exchangedValue: number;
+    successfulRuns?: number;
+    failedRuns?: number;
+    uncertainRuns?: number;
+    extractedValue?: number;
   };
 };
 
@@ -256,7 +261,7 @@ export async function getExtractionZones(): Promise<ExtractionZoneList> {
   }
 
   if ("items" in response && Array.isArray(response.items)) return response;
-  throw new ApiClientError("撤离点响应格式无效", 502, "INVALID_EXTRACTION_ZONE_RESPONSE");
+  throw new ApiClientError("资源兑换点响应格式无效", 502, "INVALID_EXTRACTION_ZONE_RESPONSE");
 }
 
 export function createOrder(

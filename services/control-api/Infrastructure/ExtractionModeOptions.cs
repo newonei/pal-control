@@ -5,14 +5,15 @@ namespace PalControl.ControlApi.Infrastructure;
 public sealed class ExtractionModeOptions
 {
     private const long MaximumWebSafeInteger = 9_007_199_254_740_991;
-    public bool Enabled { get; init; } = true;
+    public bool Enabled { get; init; }
     public string ServerId { get; init; } = "local";
     public string TimeZoneId { get; init; } = "Asia/Shanghai";
     public DayOfWeek WeeklyResetDay { get; init; } = DayOfWeek.Monday;
     public int WeeklyResetHour { get; init; } = 4;
     public int DailyRefreshHour { get; init; } = 4;
-    public long InitialMarketCoin { get; init; } = 1_000;
-    public long InitialSeasonVoucher { get; init; } = 300;
+    public long InitialMarketCoin { get; init; }
+    public long InitialSeasonVoucher { get; init; }
+    public string BootstrapPolicyVersion { get; init; } = "legacy-v1";
     public int DeliveryPollMilliseconds { get; init; } = 1_000;
     public bool RefundDefinitiveDeliveryFailures { get; init; } = true;
     public int ExtractionQuoteSeconds { get; init; } = 30;
@@ -59,6 +60,32 @@ public sealed class ExtractionModeOptions
             error = "Initial extraction wallet balances must fit the exact integer range supported by the web console.";
             return false;
         }
+        if (string.IsNullOrWhiteSpace(BootstrapPolicyVersion) ||
+            BootstrapPolicyVersion.Length > 32 ||
+            BootstrapPolicyVersion.Any(character =>
+                !(char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.')))
+        {
+            error = "ExtractionMode:BootstrapPolicyVersion must contain 1 to 32 ASCII letters, digits, '-', '_' or '.'.";
+            return false;
+        }
+        if (Enabled && string.Equals(
+                BootstrapPolicyVersion,
+                "legacy-v1",
+                StringComparison.Ordinal) &&
+            (InitialMarketCoin != 1_000 || InitialSeasonVoucher != 300))
+        {
+            error = "The frozen legacy-v1 bootstrap policy must remain 1000 MarketCoin and 300 SeasonVoucher; use explicit audited adjustments for a policy change.";
+            return false;
+        }
+        if (Enabled && !string.Equals(
+                BootstrapPolicyVersion,
+                "legacy-v1",
+                StringComparison.Ordinal) &&
+            (InitialMarketCoin != 0 || InitialSeasonVoucher != 0))
+        {
+            error = "Non-legacy bootstrap policies must grant zero currency; publish new-player rewards through an explicit audited migration or activity.";
+            return false;
+        }
         if (DeliveryPollMilliseconds is < 250 or > 30_000)
         {
             error = "ExtractionMode:DeliveryPollMilliseconds must be between 250 and 30000.";
@@ -96,9 +123,9 @@ public sealed class ExtractionModeOptions
 public sealed class ExtractionZoneOptions
 {
     public string Id { get; init; } = "dev-extract";
-    public string DisplayName { get; init; } = "开发服撤离点";
+    public string DisplayName { get; init; } = "开发服资源回收点";
     public string RouteHint { get; init; } =
-        "打开游戏地图前往坐标 (248, -504)，进入中心半径 100 的区域；到达后回到玩家商城扫描并确认战利品。";
+        "打开游戏地图前往坐标 (248, -504)，进入中心半径 100 的区域；到达后回到玩家商城扫描并出售白名单资源。";
     public double MapX { get; init; } = 248;
     public double MapY { get; init; } = -504;
     public double Radius { get; init; } = 100;

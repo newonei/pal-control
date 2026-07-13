@@ -44,15 +44,36 @@ public sealed record ExtractionSettlementRun(
     DateTimeOffset QuotedAt,
     DateTimeOffset ExpiresAt,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset? SettledAt);
+    DateTimeOffset? SettledAt)
+{
+    // These properties were added after the original JSON format shipped.
+    // Missing properties deserialize to zero/null so existing stores remain valid.
+    public long Revision { get; init; }
+    public DateTimeOffset? StateChangedAt { get; init; }
+    public Guid? LeaseId { get; init; }
+    public string? LeaseOwner { get; init; }
+    public DateTimeOffset? LeaseExpiresAt { get; init; }
+}
 
 public sealed record ExtractionConsumptionStart(
     ExtractionSettlementRun Run,
     bool Started,
     bool IdempotencyConflict);
 
+public sealed record ExtractionRunMutation(
+    ExtractionSettlementRun Run,
+    bool Applied);
+
+public sealed record ExtractionSeasonStatistics(
+    int SettledCount,
+    int FailedCount,
+    int UncertainCount,
+    long SettledTotalValue);
+
 public sealed class ExtractionRunStore : IDisposable
 {
+    public static readonly TimeSpan SettlementLeaseDuration = TimeSpan.FromMinutes(2);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -110,9 +131,11 @@ public sealed class ExtractionRunStore : IDisposable
                 snapshot[expired.RunId] = expired with
                 {
                     State = ExtractionSettlementState.Expired,
+                    Revision = checked(expired.Revision + 1),
+                    StateChangedAt = now,
                     UpdatedAt = now,
                     ErrorCode = "QUOTE_EXPIRED",
-                    ErrorMessage = "撤离报价已过期。"
+                    ErrorMessage = "资源兑换报价已过期。"
                 };
             }
             var blocking = snapshot.Values.FirstOrDefault(run =>
@@ -124,7 +147,7 @@ public sealed class ExtractionRunStore : IDisposable
             {
                 throw new ExtractionModeException(
                     "EXTRACTION_RECONCILIATION_REQUIRED",
-                    $"已有撤离记录 {blocking.RunId:N} 等待结算或人工对账。",
+                    $"已有资源兑换记录 {blocking.RunId:N} 等待结算或人工对账。",
                     StatusCodes.Status409Conflict);
             }
             foreach (var previous in snapshot.Values.Where(run =>
@@ -134,9 +157,11 @@ public sealed class ExtractionRunStore : IDisposable
                 snapshot[previous.RunId] = previous with
                 {
                     State = ExtractionSettlementState.Cancelled,
+                    Revision = checked(previous.Revision + 1),
+                    StateChangedAt = now,
                     UpdatedAt = now,
                     ErrorCode = "QUOTE_REPLACED",
-                    ErrorMessage = "已生成新的撤离报价。"
+                    ErrorMessage = "已生成新的资源兑换报价。"
                 };
             }
             var totalValue = checked(items.Sum(item => item.TotalValue));
@@ -160,7 +185,11 @@ public sealed class ExtractionRunStore : IDisposable
                 now,
                 expiresAt,
                 now,
-                null);
+                null)
+            {
+                Revision = 1,
+                StateChangedAt = now
+            };
             snapshot[run.RunId] = run;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
             return Clone(run);
@@ -211,6 +240,51 @@ public sealed class ExtractionRunStore : IDisposable
         }
     }
 
+    public async Task<ExtractionSeasonStatistics> GetSeasonStatisticsAsync(
+        Guid accountId,
+        Guid seasonId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            var settled = 0;
+            var failed = 0;
+            var uncertain = 0;
+            long settledTotalValue = 0;
+            foreach (var run in _runs.Values.Where(run =>
+                         run.AccountId == accountId && run.SeasonId == seasonId))
+            {
+                checked
+                {
+                    switch (run.State)
+                    {
+                        case ExtractionSettlementState.Settled:
+                            settled++;
+                            settledTotalValue += run.TotalValue;
+                            break;
+                        case ExtractionSettlementState.Failed:
+                            failed++;
+                            break;
+                        case ExtractionSettlementState.Uncertain:
+                            uncertain++;
+                            break;
+                    }
+                }
+            }
+            return new ExtractionSeasonStatistics(
+                settled,
+                failed,
+                uncertain,
+                settledTotalValue);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<IReadOnlyList<ExtractionSettlementRun>> ListRolloverBlockingAsync(
         CancellationToken cancellationToken)
     {
@@ -244,10 +318,12 @@ public sealed class ExtractionRunStore : IDisposable
         try
         {
             EnsureReady();
+            var now = DateTimeOffset.UtcNow;
             return _runs.Values
                 .Where(run => run.State is
-                    ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed)
-                .OrderBy(run => run.UpdatedAt)
+                        (ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed) &&
+                    !HasActiveLease(run, now))
+                .OrderBy(run => run.StateChangedAt ?? run.UpdatedAt)
                 .Take(Math.Clamp(limit, 1, 100))
                 .Select(Clone)
                 .ToArray();
@@ -273,14 +349,14 @@ public sealed class ExtractionRunStore : IDisposable
             {
                 throw new ExtractionModeException(
                     "EXTRACTION_RUN_NOT_FOUND",
-                    "撤离报价不存在。",
+                    "资源兑换报价不存在。",
                     StatusCodes.Status404NotFound);
             }
             if (!string.Equals(run.UserId, userId, StringComparison.OrdinalIgnoreCase))
             {
                 throw new ExtractionModeException(
                     "EXTRACTION_RUN_OWNER_MISMATCH",
-                    "撤离报价不属于该玩家。",
+                    "资源兑换报价不属于该玩家。",
                     StatusCodes.Status403Forbidden);
             }
             if (run.SettlementIdempotencyKey is not null)
@@ -300,19 +376,22 @@ public sealed class ExtractionRunStore : IDisposable
                     var expired = snapshot[runId] with
                     {
                         State = ExtractionSettlementState.Expired,
+                        Revision = checked(run.Revision + 1),
+                        StateChangedAt = now,
                         UpdatedAt = now,
                         ErrorCode = "QUOTE_EXPIRED",
-                        ErrorMessage = "撤离报价已过期。"
+                        ErrorMessage = "资源兑换报价已过期。"
                     };
                     snapshot[runId] = expired;
                     await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
                 }
                 throw new ExtractionModeException(
                     "EXTRACTION_QUOTE_NOT_SETTLEABLE",
-                    "撤离报价已过期或不处于可结算状态。",
+                    "资源兑换报价已过期或不处于可结算状态。",
                     StatusCodes.Status409Conflict);
             }
             var updatedSnapshot = CloneSnapshot();
+            var leaseId = Guid.NewGuid();
             var updated = updatedSnapshot[runId] with
             {
                 State = ExtractionSettlementState.Consuming,
@@ -320,7 +399,12 @@ public sealed class ExtractionRunStore : IDisposable
                     preDeleteTotals,
                     StringComparer.OrdinalIgnoreCase),
                 SettlementIdempotencyKey = idempotencyKey,
-                UpdatedAt = now
+                Revision = checked(run.Revision + 1),
+                StateChangedAt = now,
+                UpdatedAt = now,
+                LeaseId = leaseId,
+                LeaseOwner = "http-settlement",
+                LeaseExpiresAt = now.Add(SettlementLeaseDuration)
             };
             updatedSnapshot[runId] = updated;
             await PersistAndSwapSnapshotAsync(updatedSnapshot, cancellationToken);
@@ -332,60 +416,167 @@ public sealed class ExtractionRunStore : IDisposable
         }
     }
 
-    public Task<ExtractionSettlementRun> MarkRemovedAsync(
+    public Task<ExtractionRunMutation> TryAcquireRecoveryLeaseAsync(
         Guid runId,
+        long expectedRevision,
+        string leaseOwner,
         CancellationToken cancellationToken) =>
-        TransitionAsync(
+        TryAcquireLeaseAsync(
             runId,
-            ExtractionSettlementState.Removed,
-            null,
-            null,
+            expectedRevision,
+            leaseOwner,
+            static state => state is
+                ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed,
             cancellationToken);
 
-    public Task<ExtractionSettlementRun> MarkFailedAsync(
+    public Task<ExtractionRunMutation> TryBeginManualSettlementAsync(
         Guid runId,
-        string code,
-        string message,
-        CancellationToken cancellationToken) =>
-        TransitionAsync(
-            runId,
-            ExtractionSettlementState.Failed,
-            code,
-            message,
-            cancellationToken);
-
-    public Task<ExtractionSettlementRun> MarkUncertainAsync(
-        Guid runId,
-        string code,
-        string message,
-        CancellationToken cancellationToken) =>
-        TransitionAsync(
-            runId,
-            ExtractionSettlementState.Uncertain,
-            code,
-            message,
-            cancellationToken);
-
-    public Task<ExtractionSettlementRun> MarkSettledAsync(
-        Guid runId,
-        CancellationToken cancellationToken) =>
-        TransitionAsync(
-            runId,
-            ExtractionSettlementState.Settled,
-            null,
-            null,
-            cancellationToken);
-
-    public Task<ExtractionSettlementRun> MarkManuallySettledAsync(
-        Guid runId,
+        long expectedRevision,
         string reason,
         CancellationToken cancellationToken) =>
         TransitionAsync(
             runId,
-            ExtractionSettlementState.Settled,
-            "MANUALLY_RECONCILED_SETTLED",
+            expectedRevision,
+            null,
+            expectedLeaseOwner: null,
+            ExtractionSettlementState.Uncertain,
+            ExtractionSettlementState.Removed,
+            "MANUALLY_RECONCILED_REMOVED",
             reason,
+            acquireLeaseOwner: "manual-reconciliation",
             cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkRemovedAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            leaseId,
+            expectedLeaseOwner: "http-settlement",
+            ExtractionSettlementState.Consuming,
+            ExtractionSettlementState.Removed,
+            null,
+            null,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkFailedAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        string code,
+        string message,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            leaseId,
+            expectedLeaseOwner: null,
+            ExtractionSettlementState.Consuming,
+            ExtractionSettlementState.Failed,
+            code,
+            message,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkManuallyFailedAsync(
+        Guid runId,
+        long expectedRevision,
+        string reason,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            null,
+            expectedLeaseOwner: null,
+            ExtractionSettlementState.Uncertain,
+            ExtractionSettlementState.Failed,
+            "MANUALLY_RECONCILED_FAILED",
+            reason,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkUncertainAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        string code,
+        string message,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            leaseId,
+            expectedLeaseOwner: null,
+            ExtractionSettlementState.Consuming,
+            ExtractionSettlementState.Uncertain,
+            code,
+            message,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkSettledAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        string? reconciliationReason,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            leaseId,
+            expectedLeaseOwner: null,
+            ExtractionSettlementState.Removed,
+            ExtractionSettlementState.Settled,
+            reconciliationReason is null ? null : "MANUALLY_RECONCILED_SETTLED",
+            reconciliationReason,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public async Task<ExtractionRunMutation> TryReleaseLeaseAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+            if (run.Revision != expectedRevision ||
+                run.LeaseId != leaseId ||
+                run.State is not
+                    (ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = CloneSnapshot();
+            var updated = snapshot[runId] with
+            {
+                Revision = checked(run.Revision + 1),
+                UpdatedAt = now,
+                LeaseId = null,
+                LeaseOwner = null,
+                LeaseExpiresAt = null
+            };
+            snapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return new ExtractionRunMutation(Clone(updated), true);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     public void Dispose()
     {
@@ -399,11 +590,61 @@ public sealed class ExtractionRunStore : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private async Task<ExtractionSettlementRun> TransitionAsync(
+    private async Task<ExtractionRunMutation> TryAcquireLeaseAsync(
         Guid runId,
+        long expectedRevision,
+        string leaseOwner,
+        Func<ExtractionSettlementState, bool> stateAllowed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (run.Revision != expectedRevision ||
+                !stateAllowed(run.State) ||
+                HasActiveLease(run, now))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+
+            var snapshot = CloneSnapshot();
+            var updated = snapshot[runId] with
+            {
+                Revision = checked(run.Revision + 1),
+                StateChangedAt = run.StateChangedAt ?? run.UpdatedAt,
+                UpdatedAt = now,
+                LeaseId = Guid.NewGuid(),
+                LeaseOwner = leaseOwner.Trim(),
+                LeaseExpiresAt = now.Add(SettlementLeaseDuration)
+            };
+            snapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return new ExtractionRunMutation(Clone(updated), true);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<ExtractionRunMutation> TransitionAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid? expectedLeaseId,
+        string? expectedLeaseOwner,
+        ExtractionSettlementState expectedState,
         ExtractionSettlementState state,
         string? errorCode,
         string? errorMessage,
+        string? acquireLeaseOwner,
         CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -414,29 +655,83 @@ public sealed class ExtractionRunStore : IDisposable
             {
                 throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
             }
-            if (run.State == state)
-            {
-                return Clone(run);
-            }
             var now = DateTimeOffset.UtcNow;
+            if (run.Revision != expectedRevision || run.State != expectedState)
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+            if (expectedLeaseId is Guid leaseId)
+            {
+                if (run.LeaseId != leaseId)
+                {
+                    return new ExtractionRunMutation(Clone(run), false);
+                }
+            }
+            else if (HasActiveLease(run, now))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+            if (expectedLeaseOwner is not null &&
+                !string.Equals(run.LeaseOwner, expectedLeaseOwner, StringComparison.Ordinal))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+            if (!IsAllowedTransition(run.State, state))
+            {
+                throw new InvalidOperationException(
+                    $"Extraction run transition {run.State} -> {state} is not allowed.");
+            }
+
+            var keepLease = state == ExtractionSettlementState.Removed;
+            var newLeaseId = acquireLeaseOwner is null
+                ? keepLease ? run.LeaseId : null
+                : Guid.NewGuid();
+            var newLeaseOwner = acquireLeaseOwner ?? (keepLease ? run.LeaseOwner : null);
+            DateTimeOffset? newLeaseExpiry = newLeaseId is null
+                ? null
+                : now.Add(SettlementLeaseDuration);
             var snapshot = CloneSnapshot();
             var updated = snapshot[runId] with
             {
                 State = state,
+                Revision = checked(run.Revision + 1),
+                StateChangedAt = now,
                 ErrorCode = errorCode,
                 ErrorMessage = errorMessage,
                 UpdatedAt = now,
-                SettledAt = state == ExtractionSettlementState.Settled ? now : run.SettledAt
+                SettledAt = state == ExtractionSettlementState.Settled ? now : run.SettledAt,
+                LeaseId = newLeaseId,
+                LeaseOwner = newLeaseOwner,
+                LeaseExpiresAt = newLeaseExpiry
             };
             snapshot[runId] = updated;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
-            return Clone(updated);
+            return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
         {
             _gate.Release();
         }
     }
+
+    private static bool HasActiveLease(
+        ExtractionSettlementRun run,
+        DateTimeOffset now) =>
+        run.LeaseId is not null && run.LeaseExpiresAt is not null && run.LeaseExpiresAt > now;
+
+    private static bool IsAllowedTransition(
+        ExtractionSettlementState source,
+        ExtractionSettlementState target) =>
+        (source, target) switch
+        {
+            (ExtractionSettlementState.Consuming, ExtractionSettlementState.Removed) => true,
+            (ExtractionSettlementState.Consuming, ExtractionSettlementState.Failed) => true,
+            (ExtractionSettlementState.Consuming, ExtractionSettlementState.Uncertain) => true,
+            (ExtractionSettlementState.Uncertain, ExtractionSettlementState.Removed) => true,
+            (ExtractionSettlementState.Uncertain, ExtractionSettlementState.Failed) => true,
+            (ExtractionSettlementState.Removed, ExtractionSettlementState.Settled) => true,
+            _ => false
+        };
 
     private void Load()
     {

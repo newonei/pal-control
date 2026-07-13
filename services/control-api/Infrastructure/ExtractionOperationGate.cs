@@ -179,7 +179,7 @@ public sealed class ExtractionOperationGate
         {
             throw new ExtractionModeException(
                 "EXTRACTION_MAINTENANCE",
-                $"摸金经济已进入换档维护：{state.Reason}",
+                $"资源经济已进入换档维护：{state.Reason}",
                 StatusCodes.Status423Locked);
         }
     }

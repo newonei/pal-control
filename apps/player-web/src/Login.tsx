@@ -55,9 +55,9 @@ export function Login({ onAuthenticated }: Props) {
   return (
     <main className="login-shell">
       <section className="login-brand" aria-labelledby="brand-title">
-        <span className="eyebrow">PALWORLD EXTRACTION</span>
+        <span className="eyebrow">PALWORLD RESOURCE ECONOMY</span>
         <h1 id="brand-title">幻兽商域</h1>
-        <p>每一趟出发都有代价，每一次撤离都有收获。</p>
+        <p>经营一周世界，把资源转化为下一轮战备。</p>
         <div className="login-features" aria-label="玩法特点">
           <span>每周新档</span><span>永久商域币</span><span>在线即时发货</span>
         </div>

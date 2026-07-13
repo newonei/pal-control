@@ -48,6 +48,14 @@ public interface IExtractionRepository
         int limit,
         CancellationToken cancellationToken);
 
+    Task<WalletLedgerEntry?> FindLedgerEntryByReferenceAsync(
+        Guid accountId,
+        ExtractionCurrency currency,
+        Guid? seasonId,
+        string referenceType,
+        string referenceId,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ShopProduct>> ListProductsAsync(
         bool includeInactive,
         CancellationToken cancellationToken);

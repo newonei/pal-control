@@ -146,10 +146,10 @@ h1, h2, h3, p { margin-top: 0; }
 .data-list article { display: grid; grid-template-columns: 82px minmax(180px, 1fr) auto; align-items: center; gap: 1rem; padding: 1rem; border-bottom: 1px solid var(--line); }
 .data-list article:last-child { border-bottom: 0; }
 .state { justify-self: start; padding: .35rem .55rem; border-radius: 5px; color: #aec0c9; background: #1b2d38; font-size: .68rem; font-weight: 750; }
-.state.succeeded, .state.settled { color: var(--success); background: #17382b; }
+.state.succeeded, .state.settled, .state.extracted { color: var(--success); background: #17382b; }
 .state.failed, .state.cancelled { color: #ff9b9b; background: #3b2025; }
 .state.uncertain { color: var(--amber); background: #3a2e18; }
-.state.pending, .state.accepted, .state.delivering, .state.extracted { color: #80e8de; background: #173b3d; }
+.state.pending, .state.accepted, .state.delivering, .state.preparing, .state.deployed { color: #80e8de; background: #173b3d; }
 .data-main, .data-value { display: flex; flex-direction: column; }
 .data-main strong { font-size: .86rem; }
 .data-main span, .data-value time { margin-top: .3rem; color: var(--muted); font-size: .68rem; }

@@ -1,6 +1,6 @@
 # 幻兽商域（Pal Control）
 
-面向 Windows **Palworld Dedicated Server** 的本机优先运营控制面：包含 React 管理台、玩家自助商城、ASP.NET Core Control API、UE4SS C++ 服务端 MOD，以及“摸金搜打撤”经济与换档工具。
+面向 Windows **Palworld Dedicated Server** 的本机优先运营控制面：包含 React 管理台、玩家自助商城、ASP.NET Core Control API、UE4SS C++ 服务端 MOD，以及“周世界资源经济服”的资源兑换与换档工具。
 
 > 当前定位：已完成指定游戏版本上的本机开发服原型和部分真实联调，**不是可直接暴露到公网的生产系统**。管理 API、Palworld 官方 REST、PalDefender、RCON 与 Native Bridge 必须保持在服务器本机或受信网络内。
 
@@ -60,22 +60,22 @@
 - **实时地图**：从官方 REST 只读采集在线玩家位置，支持搜索、缩放、拖动、选择与持续跟随。
 - **服务器配置**：搜索并分类编辑 `PalWorldSettings.ini`，提供输入校验、差异预览、危险项确认和保存前备份。
 - **存档中心**：请求官方保存、复制稳定快照、生成逐文件 SHA-256 清单并复核完整性；不提供恢复、删除、上传或原始 `.sav` 编辑。
-- **摸金商城运营**：管理永久商域币、每周战备券、商品轮换、库存与限购、订单发货、钱包调账、撤离报价、人工对账和周换档。
+- **资源经济运营**：管理永久商域币、每周战备券、商品轮换、库存与限购、订单发货、钱包调账、资源报价、人工对账和周换档。
 - **接口与审计**：展示 PalDefender 白名单能力、运维命令和追加式审计记录；所有写操作经过持久化命令队列。
 
 ### 玩家门户
 
 - **游戏内验证码登录**：玩家提交平台 UserId/SteamID64，在线角色收到 8 位一次性验证码；网页不收集游戏密码。
 - **双币钱包与战备商城**：查看永久商域币、周战备券、商品库存与个人限购，在线购买并跟踪发货状态。
-- **订单与资金流水**：只允许玩家查询自己的订单、退款/不确定状态以及购买、活动和撤离形成的账本记录。
-- **个人撤离地图**：只返回当前登录玩家的位置、撤离点范围、距离和路线提示，不暴露其他玩家坐标。
-- **撤离报价与结算**：扫描允许容器中的白名单战利品，生成限时报价，确认扣物后入账并保留撤离记录。
+- **订单与资金流水**：只允许玩家查询自己的订单、退款/不确定状态以及购买、活动和资源兑换形成的账本记录。
+- **个人兑换点地图**：只返回当前登录玩家的位置、资源兑换点范围、距离和路线提示，不暴露其他玩家坐标。
+- **资源报价与兑换**：扫描允许容器中的白名单资源，生成限时整单报价，确认扣物后入账并保留兑换记录。
 
 ### 服务端与安全
 
 - **统一 Control API 边界**：浏览器只连接 ASP.NET Core API；官方 REST、PalDefender REST、白名单 RCON 与 Native Bridge 均由服务端封装。
 - **幂等队列与最终状态**：公告、通知、存档和 PalDefender 写操作使用 `Idempotency-Key`、持久队列与追加式审计；派发后无法证明结果时进入 `uncertain`，禁止盲目重发。
-- **事务经济账本**：SQLite 保存账户、钱包、订单、账本和撤离事件，明确失败可退款，不确定结果转人工对账。
+- **事务经济账本**：SQLite 保存账户、钱包、订单、账本和资源兑换事件，明确失败可退款，不确定结果转人工对账。
 - **玩家门户防护**：显式 Origin 白名单、HttpOnly/Secure/SameSite Cookie、CSRF Token、验证码限流、请求限流和并发上限。
 - **最小公网暴露**：公网反向代理只能开放玩家门户静态页面和 `/api/v1/player/*`；管理 API、官方 REST、PalDefender、RCON 与 Named Pipe 不应公开。
 
@@ -84,7 +84,7 @@
 - **本机 Named Pipe 双工桥**：长度前缀 JSON、hello/heartbeat、受限命令队列和游戏线程命令泵，Unreal 对象只在游戏线程访问。
 - **运行时探针与受控写入**：玩家、成长、背包和帕鲁操作使用能力探针、revision、预演与回读校验；背包只修改已有非空槽位，等级/Rank/IV 等高风险字段保持只读。
 - **原生通知**：在签名与版本门禁通过后发布顶部横幅、客户端浮层和定向 UI 通知。
-- **玩法扩展**：支持 `!撤离`/`!extract` 本人查询，以及实验性的服务端随机安全复活；反射签名不唯一或版本不匹配时 fail-closed。
+- **玩法扩展**：兼容 `!撤离`/`!extract` 本人资源兑换点查询，以及实验性的服务端随机安全复活；反射签名不唯一或版本不匹配时 fail-closed。
 
 ### 功能启用条件
 
@@ -94,7 +94,7 @@
 | 玩家列表、服务器状态、实时地图 | Palworld 官方 REST |
 | 奖励、公会、封禁和 PalDefender 运维 | PalDefender REST 与受限 Token |
 | 背包/帕鲁精细工具、顶部横幅、客户端浮层 | 精确版本 UE4SS Native MOD |
-| 玩家登录、商城发货与撤离结算 | Player Portal、PalDefender、白名单 RCON 与版本门禁 |
+| 玩家登录、商城发货与资源兑换 | Player Portal、PalDefender、白名单 RCON 与版本门禁 |
 
 默认配置中 **PalDefender、RCON 和玩家门户全部关闭**。首次启动只能验证基础 Web/API；完整运营能力需要按本文配置外部服务。界面会依据服务端 capabilities 自动禁用未满足条件的写操作。
 
@@ -270,13 +270,13 @@ PalDefender 的安装、Token 文件、版本和权限边界见 [PalDefender 集
 2. 输入完整平台 UserId，Steam 玩家也可直接输入 17 位 SteamID64；
 3. 在游戏内接收 8 位一次性验证码；
 4. 回到网页完成验证；
-5. 登录后查看钱包、商品、订单、流水和本人撤离地图。
+5. 登录后查看钱包、商品、订单、流水和本人资源兑换点地图。
 
 不要让玩家输入游戏密码，也不要让其把验证码发给他人。
 
-### 使用摸金搜打撤模式
+### 使用周世界资源经济模式
 
-当前闭环使用本机 SQLite、PalDefender 发货和白名单 RCON 扣物，仅适合受控开发服。公开经济测试前必须完成平台身份/管理员 RBAC 与 Native 原子背包消费。
+当前闭环允许出售本周世界允许容器中的任意白名单资源，使用本机 SQLite、PalDefender 发货和白名单 RCON 扣物，仅适合受控开发服。公开经济测试前必须完成平台身份/管理员 RBAC 与 Native 原子背包消费。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
 
 只读检查和周换档入口：
 
@@ -307,16 +307,15 @@ dotnet publish .\services\control-api\PalControl.ControlApi.csproj `
 
 ## 测试
 
-以下测试使用假的 REST/Bridge 和临时目录，不会连接真实 Palworld 服务端：
+统一测试入口会运行玩家端单元测试、方案 A 契约测试、结算状态机 harness 和现有隔离 smoke；它们使用本地 fake 与临时目录，不会连接真实 Palworld 服务端：
 
 ```powershell
-.\tests\integration\announcement-publish-smoke.ps1
-.\tests\integration\in-game-notification-smoke.ps1
-.\tests\integration\live-map-smoke.ps1
-.\tests\integration\save-backup-smoke.ps1
+npm test
+npm run test:contract
+npm run test:integration
 ```
 
-当前尚无前端单元测试、lint、C# 单元测试项目、自动契约测试或 GitHub Actions CI。发布前建议至少把前端构建、`.NET` 构建和上述隔离测试加入 CI。
+Windows GitHub Actions 会执行 `npm ci`、两个前端构建、Control API/Bridge smoke/.NET 测试 harness 的 Release 构建和统一测试。结算 harness 已覆盖旧数据兼容、lease/CAS、终态不可倒退、钱包幂等和超过 1000 条的完整周统计，但不模拟真实 RCON；请求取消、RCON 成功后崩溃、入账后崩溃等服务级故障注入仍是公开测试前的 TODO。
 
 ## 数据与安全边界
 
@@ -332,6 +331,7 @@ dotnet publish .\services\control-api\PalControl.ControlApi.csproj `
 ## 文档索引
 
 - [总体架构](docs/architecture/overview.md)
+- [ADR-0001：采用周世界资源经济服](docs/architecture/decisions/0001-weekly-world-resource-economy.md)
 - [MOD 能力与接口维护手册](docs/MOD能力与接口维护手册.md)
 - [玩家门户部署与安全资料](docs/player-portal/README.md)
 - [PalDefender 集成运行手册](docs/runbooks/paldefender-integration.md)

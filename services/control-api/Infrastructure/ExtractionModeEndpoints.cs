@@ -20,18 +20,22 @@ public static class ExtractionModeEndpoints
         {
             try
             {
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    userId,
-                    requireOnline: false,
-                    cancellationToken);
-                var runs = await settlement.ListAsync(
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(userId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        userId,
+                        requireOnline: false,
+                        cancellationToken);
+                var statistics = await settlement.GetSeasonStatisticsAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
-                    1000,
                     cancellationToken);
                 return Results.Ok(new
                 {
+                    gameplayMode = ExtractionModeCoordinator.GameplayMode,
                     userId = context.Account.ExternalUserId,
                     displayName = context.Account.DisplayName,
                     season = SeasonDto(context.Season, coordinator.GetNextDailyRefresh(DateTimeOffset.UtcNow)),
@@ -42,12 +46,16 @@ public static class ExtractionModeEndpoints
                     },
                     seasonStats = new
                     {
-                        successfulRuns = runs.Count(run => run.State == ExtractionSettlementState.Settled),
-                        failedRuns = runs.Count(run => run.State == ExtractionSettlementState.Failed),
-                        uncertainRuns = runs.Count(run => run.State == ExtractionSettlementState.Uncertain),
-                        extractedValue = runs
-                            .Where(run => run.State == ExtractionSettlementState.Settled)
-                            .Sum(run => run.TotalValue)
+                        settledExchanges = statistics.SettledCount,
+                        failedSettlements = statistics.FailedCount,
+                        uncertainSettlements = statistics.UncertainCount,
+                        exchangedValue = statistics.SettledTotalValue,
+                        // Compatibility aliases retained for older clients. These
+                        // count settlement outcomes, never raid/action outcomes.
+                        successfulRuns = statistics.SettledCount,
+                        failedRuns = statistics.FailedCount,
+                        uncertainRuns = statistics.UncertainCount,
+                        extractedValue = statistics.SettledTotalValue
                     },
                     online = context.Online,
                     persistence = "sqlite-event-store"
@@ -67,15 +75,19 @@ public static class ExtractionModeEndpoints
         {
             try
             {
-                using var operationLease = operationGate.AcquireOperation();
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
                 var products = await coordinator.ListProductsAsync(cancellationToken);
                 Dictionary<Guid, int> purchasedByProduct = [];
                 if (!string.IsNullOrWhiteSpace(userId))
                 {
-                    var context = await coordinator.GetAccountContextAsync(
-                        userId,
-                        requireOnline: false,
-                        cancellationToken);
+                    var context = operationLease is null
+                        ? await coordinator.GetExistingAccountContextAsync(userId, cancellationToken)
+                        : await coordinator.GetAccountContextAsync(
+                            userId,
+                            requireOnline: false,
+                            cancellationToken);
                     var orders = await coordinator.ListOrdersAsync(
                         context.Account.AccountId,
                         context.Season.SeasonId,
@@ -115,11 +127,15 @@ public static class ExtractionModeEndpoints
         {
             try
             {
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    userId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(userId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        userId,
+                        requireOnline: false,
+                        cancellationToken);
                 var orders = await coordinator.ListOrdersAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -141,11 +157,15 @@ public static class ExtractionModeEndpoints
         {
             try
             {
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    userId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(userId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        userId,
+                        requireOnline: false,
+                        cancellationToken);
                 var entries = await coordinator.ListLedgerAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -159,7 +179,7 @@ public static class ExtractionModeEndpoints
                         currency = ExtractionModeCoordinator.ToClientCurrency(entry.Currency),
                         amount = entry.Delta,
                         balanceAfter = entry.BalanceAfter,
-                        reason = entry.Reason,
+                        reason = LedgerReason(entry),
                         referenceId = entry.ReferenceId,
                         createdAt = entry.CreatedAt
                     }).ToArray()
@@ -180,11 +200,15 @@ public static class ExtractionModeEndpoints
         {
             try
             {
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    userId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(userId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        userId,
+                        requireOnline: false,
+                        cancellationToken);
                 var runs = await settlement.ListAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -243,7 +267,7 @@ public static class ExtractionModeEndpoints
                 {
                     return Results.BadRequest(new ApiError(
                         "IDEMPOTENCY_KEY_REQUIRED",
-                        "撤离结算必须提供 8 到 128 个字符的 Idempotency-Key。"));
+                        "资源兑换结算必须提供 8 到 128 个字符的 Idempotency-Key。"));
                 }
                 var run = await settlement.SettleAsync(
                     runId,
@@ -470,7 +494,7 @@ public static class ExtractionModeEndpoints
                 {
                     return Results.Conflict(new ApiError(
                         "RECONCILIATION_MAINTENANCE_REQUIRED",
-                        "人工终结不确定撤离前必须先进入维护状态。"));
+                        "人工终结不确定资源兑换前必须先进入维护状态。"));
                 }
                 ArgumentException.ThrowIfNullOrWhiteSpace(request.Resolution);
                 ArgumentException.ThrowIfNullOrWhiteSpace(request.Confirmation);
@@ -506,7 +530,7 @@ public static class ExtractionModeEndpoints
                     enabled = false,
                     connected = false,
                     outcome = "disabled",
-                    error = new ApiError("RCON_DISABLED", "撤离 RCON 适配器未启用。")
+                    error = new ApiError("RCON_DISABLED", "资源兑换 RCON 适配器未启用。")
                 });
             }
             var result = await settlement.ProbeSettlementAsync(cancellationToken);
@@ -613,7 +637,7 @@ public static class ExtractionModeEndpoints
                 {
                     return Results.Conflict(new ApiError(
                         "ROLLOVER_NOT_READY",
-                        $"仍有 {blockers.ActiveOperations} 个在途写操作、{blockers.Orders.Count} 个订单和 {blockers.Runs.Count} 个撤离记录等待终结。"));
+                        $"仍有 {blockers.ActiveOperations} 个在途写操作、{blockers.Orders.Count} 个订单和 {blockers.Runs.Count} 个资源兑换记录等待终结。"));
                 }
                 var season = await coordinator.CommitRolloverAsync(
                     request.WorldId,
@@ -720,6 +744,11 @@ public static class ExtractionModeEndpoints
             updatedAt = order.UpdatedAt
         };
     }
+
+    internal static string LedgerReason(WalletLedgerEntry entry) =>
+        string.Equals(entry.ReferenceType, "extraction_run", StringComparison.Ordinal)
+            ? $"资源兑换结算 {entry.ReferenceId}"
+            : entry.Reason;
 
     internal static object QuoteDto(ExtractionSettlementRun run) => new
     {
@@ -833,7 +862,7 @@ public static class ExtractionModeEndpoints
             new ApiError("EXTRACTION_STORE_UNAVAILABLE", ioException.Message),
             statusCode: StatusCodes.Status503ServiceUnavailable),
         _ => Results.Json(
-            new ApiError("EXTRACTION_REQUEST_FAILED", "摸金模式请求处理失败。"),
+            new ApiError("EXTRACTION_REQUEST_FAILED", "资源经济请求处理失败。"),
             statusCode: StatusCodes.Status500InternalServerError)
     };
 

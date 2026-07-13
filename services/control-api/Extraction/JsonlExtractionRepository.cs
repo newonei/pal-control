@@ -419,6 +419,56 @@ public sealed class SqliteExtractionRepository : IExtractionRepository, IDisposa
         }
     }
 
+    public async Task<WalletLedgerEntry?> FindLedgerEntryByReferenceAsync(
+        Guid accountId,
+        ExtractionCurrency currency,
+        Guid? seasonId,
+        string referenceType,
+        string referenceId,
+        CancellationToken cancellationToken)
+    {
+        var normalizedReferenceType = NormalizeRequired(
+            referenceType,
+            64,
+            nameof(referenceType));
+        var normalizedReferenceId = NormalizeRequired(
+            referenceId,
+            128,
+            nameof(referenceId));
+        var scopedSeasonId = ScopeSeasonId(currency, seasonId);
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            RequireAccount(accountId);
+            var matches = _ledger.Values
+                .Where(entry => entry.AccountId == accountId &&
+                    entry.Currency == currency &&
+                    entry.SeasonId == scopedSeasonId &&
+                    string.Equals(
+                        entry.ReferenceType,
+                        normalizedReferenceType,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        entry.ReferenceId,
+                        normalizedReferenceId,
+                        StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (matches.Length > 1)
+            {
+                throw new InvalidDataException(
+                    $"More than one wallet ledger entry exists for reference '{normalizedReferenceType}:{normalizedReferenceId}'.");
+            }
+            return matches.SingleOrDefault();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<IReadOnlyList<ShopProduct>> ListProductsAsync(
         bool includeInactive,
         CancellationToken cancellationToken)

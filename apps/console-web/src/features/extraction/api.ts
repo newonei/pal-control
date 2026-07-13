@@ -15,14 +15,23 @@ export type ExtractionBalances = {
 };
 
 export type ExtractionOverview = {
+  gameplayMode: "weekly-resource-economy";
   userId: string;
   displayName: string | null;
   season: ExtractionSeason;
   balances: ExtractionBalances;
   seasonStats: {
+    settledExchanges: number;
+    failedSettlements: number;
+    uncertainSettlements: number;
+    exchangedValue: number;
+    /** @deprecated compatibility alias for settledExchanges */
     successfulRuns: number;
+    /** @deprecated compatibility alias for failedSettlements */
     failedRuns: number;
+    /** @deprecated compatibility alias for uncertainSettlements */
     uncertainRuns: number;
+    /** @deprecated compatibility alias for exchangedValue */
     extractedValue: number;
   };
 };
@@ -164,7 +173,7 @@ export async function createExtractionQuote(userId: string): Promise<ExtractionQ
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId })
   });
-  if (!response.ok) throw new Error(await apiError(response, "扫描撤离战利品失败"));
+  if (!response.ok) throw new Error(await apiError(response, "扫描可售资源失败"));
   return response.json() as Promise<ExtractionQuote>;
 }
 
@@ -181,7 +190,7 @@ export async function settleExtractionRun(input: {
     },
     body: JSON.stringify({ userId: input.userId })
   });
-  if (!response.ok) throw new Error(await apiError(response, "撤离结算失败"));
+  if (!response.ok) throw new Error(await apiError(response, "资源兑换结算失败"));
   return response.json() as Promise<ExtractionRun>;
 }
 
@@ -209,7 +218,7 @@ function withUserId(path: string, userId: string) {
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, { signal });
-  if (!response.ok) throw new Error(await apiError(response, "读取搜打撤数据失败"));
+  if (!response.ok) throw new Error(await apiError(response, "读取资源经济数据失败"));
   return response.json() as Promise<T>;
 }
 

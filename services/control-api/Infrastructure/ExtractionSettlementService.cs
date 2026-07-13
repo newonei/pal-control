@@ -41,6 +41,7 @@ public sealed class ExtractionSettlementService
     private readonly IExtractionRconAdapter _rcon;
     private readonly ExtractionModeOptions _options;
     private readonly ExtractionRconOptions _rconOptions;
+    private readonly ILogger<ExtractionSettlementService> _logger;
 
     public ExtractionSettlementService(
         ExtractionModeCoordinator coordinator,
@@ -49,7 +50,8 @@ public sealed class ExtractionSettlementService
         PalDefenderRestClient palDefender,
         IExtractionRconAdapter rcon,
         IOptions<ExtractionModeOptions> options,
-        IOptions<ExtractionRconOptions> rconOptions)
+        IOptions<ExtractionRconOptions> rconOptions,
+        ILogger<ExtractionSettlementService> logger)
     {
         _coordinator = coordinator;
         _commerce = commerce;
@@ -58,6 +60,7 @@ public sealed class ExtractionSettlementService
         _rcon = rcon;
         _options = options.Value;
         _rconOptions = rconOptions.Value;
+        _logger = logger;
     }
 
     public bool SettlementEnabled => _rconOptions.Enabled;
@@ -131,7 +134,7 @@ public sealed class ExtractionSettlementService
         {
             throw new ExtractionModeException(
                 capability.ErrorCode ?? "RCON_UNAVAILABLE",
-                capability.ErrorMessage ?? "撤离结算 RCON 当前不可用。",
+                capability.ErrorMessage ?? "资源兑换 RCON 当前不可用。",
                 StatusCodes.Status503ServiceUnavailable);
         }
         var context = await _coordinator.GetAccountContextAsync(
@@ -166,7 +169,7 @@ public sealed class ExtractionSettlementService
         {
             throw new ExtractionModeException(
                 "NO_SELLABLE_EXTRACTION_LOOT",
-                "Items、Food 和 DropSlot 中没有可撤离出售的白名单战利品。",
+                "Items、Food 和 DropSlot 中没有可出售的白名单资源。",
                 StatusCodes.Status422UnprocessableEntity);
         }
         return await _runs.CreateQuoteAsync(
@@ -195,14 +198,14 @@ public sealed class ExtractionSettlementService
         var existing = await _runs.GetAsync(runId, cancellationToken)
             ?? throw new ExtractionModeException(
                 "EXTRACTION_RUN_NOT_FOUND",
-                "撤离报价不存在。",
+                "资源兑换报价不存在。",
                 StatusCodes.Status404NotFound);
         if (existing.AccountId != context.Account.AccountId ||
             existing.SeasonId != context.Season.SeasonId)
         {
             throw new ExtractionModeException(
                 "EXTRACTION_RUN_SCOPE_MISMATCH",
-                "撤离报价不属于当前玩家或当前周档。",
+                "资源兑换报价不属于当前玩家或当前周档。",
                 StatusCodes.Status403Forbidden);
         }
         if (existing.SettlementIdempotencyKey is not null)
@@ -214,7 +217,7 @@ public sealed class ExtractionSettlementService
             {
                 throw new ExtractionModeException(
                     "IDEMPOTENCY_CONFLICT",
-                    "该撤离记录已使用另一个 Idempotency-Key。",
+                    "该资源兑换记录已使用另一个 Idempotency-Key。",
                     StatusCodes.Status409Conflict);
             }
             return existing;
@@ -228,7 +231,7 @@ public sealed class ExtractionSettlementService
         {
             throw new ExtractionModeException(
                 "EXTRACTION_INVENTORY_CHANGED",
-                "报价后可出售战利品发生变化，请重新扫描。",
+                "报价后可出售资源发生变化，请重新扫描。",
                 StatusCodes.Status409Conflict);
         }
 
@@ -246,53 +249,101 @@ public sealed class ExtractionSettlementService
         {
             throw new ExtractionModeException(
                 "IDEMPOTENCY_CONFLICT",
-                "该撤离记录已使用另一个 Idempotency-Key。",
+                "该资源兑换记录已使用另一个 Idempotency-Key。",
                 StatusCodes.Status409Conflict);
         }
         if (!start.Started)
         {
             return start.Run;
         }
-
-        var deletion = await _rcon.DeleteItemsAsync(
-            context.Account.ExternalUserId,
-            start.Run.Items.Select(line => new RconItemDeletion(line.ItemId, line.Quantity)).ToArray(),
-            cancellationToken);
-        if (deletion.Outcome == RconOperationOutcome.Failed)
+        var leaseId = RequireLeaseId(start.Run);
+        // Once Consuming is durable, the settlement must not be abandoned just
+        // because the browser disconnects. Use a bounded service-owned token so
+        // RCON outcome classification and the final CAS can still complete.
+        using var criticalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(
+            Math.Clamp(_rconOptions.TimeoutSeconds + 30, 15, 90)));
+        var settlementToken = criticalTimeout.Token;
+        try
         {
-            return await _runs.MarkFailedAsync(
-                runId,
-                deletion.ErrorCode ?? "RCON_DELETE_FAILED",
-                deletion.ErrorMessage ?? "PalDefender 明确拒绝扣除撤离物品。",
-                cancellationToken);
-        }
-        if (deletion.Outcome == RconOperationOutcome.Uncertain)
-        {
-            return await _runs.MarkUncertainAsync(
-                runId,
-                deletion.ErrorCode ?? "RCON_DELETE_UNCERTAIN",
-                deletion.ErrorMessage ?? "扣物结果不确定，禁止自动重试或入账。",
-                cancellationToken);
-        }
-
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            var verified = await TryVerifyRemovalAsync(start.Run, cancellationToken);
-            if (verified)
+            var deletion = await _rcon.DeleteItemsAsync(
+                context.Account.ExternalUserId,
+                start.Run.Items.Select(line => new RconItemDeletion(line.ItemId, line.Quantity)).ToArray(),
+                settlementToken);
+            if (deletion.Outcome == RconOperationOutcome.Failed)
             {
-                _ = await _runs.MarkRemovedAsync(runId, cancellationToken);
-                return await CreditRemovedRunAsync(runId, cancellationToken);
+                var failed = await _runs.TryMarkFailedAsync(
+                    runId,
+                    start.Run.Revision,
+                    leaseId,
+                    deletion.ErrorCode ?? "RCON_DELETE_FAILED",
+                    deletion.ErrorMessage ?? "PalDefender 明确拒绝扣除待售资源。",
+                    settlementToken);
+                return failed.Run;
             }
-            if (attempt < 19)
+            if (deletion.Outcome == RconOperationOutcome.Uncertain)
             {
-                await Task.Delay(250, cancellationToken);
+                var uncertain = await _runs.TryMarkUncertainAsync(
+                    runId,
+                    start.Run.Revision,
+                    leaseId,
+                    deletion.ErrorCode ?? "RCON_DELETE_UNCERTAIN",
+                    deletion.ErrorMessage ?? "扣物结果不确定，禁止自动重试或入账。",
+                    settlementToken);
+                return uncertain.Run;
             }
+
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                var verified = await TryVerifyRemovalAsync(start.Run, settlementToken);
+                if (verified)
+                {
+                    var removed = await _runs.TryMarkRemovedAsync(
+                        runId,
+                        start.Run.Revision,
+                        leaseId,
+                        settlementToken);
+                    return removed.Applied
+                        ? await CreditRemovedRunAsync(removed.Run, null, settlementToken)
+                        : removed.Run;
+                }
+                if (attempt < 19)
+                {
+                    await Task.Delay(250, settlementToken);
+                }
+            }
+            var mismatch = await _runs.TryMarkUncertainAsync(
+                runId,
+                start.Run.Revision,
+                leaseId,
+                "RCON_DELETE_READBACK_MISMATCH",
+                "RCON 返回成功，但 REST 背包回读未证明物品已按报价移除。",
+                settlementToken);
+            return mismatch.Run;
         }
-        return await _runs.MarkUncertainAsync(
-            runId,
-            "RCON_DELETE_READBACK_MISMATCH",
-            "RCON 返回成功，但 REST 背包回读未证明物品已按报价移除。",
-            cancellationToken);
+        catch (OperationCanceledException exception)
+        {
+            var current = await TryMarkCriticalSectionUncertainAsync(
+                start.Run,
+                leaseId,
+                "SETTLEMENT_CRITICAL_SECTION_CANCELLED",
+                "资源扣除是否完成无法确认，已停止自动入账并转人工核对。",
+                exception);
+            if (current is not null)
+            {
+                return current;
+            }
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _ = await TryMarkCriticalSectionUncertainAsync(
+                start.Run,
+                leaseId,
+                "SETTLEMENT_CRITICAL_SECTION_FAILED",
+                "资源扣除收尾异常，已停止自动入账并转人工核对。",
+                exception);
+            throw;
+        }
     }
 
     public Task<IReadOnlyList<ExtractionSettlementRun>> ListAsync(
@@ -301,6 +352,12 @@ public sealed class ExtractionSettlementService
         int limit,
         CancellationToken cancellationToken) =>
         _runs.ListAsync(accountId, seasonId, limit, cancellationToken);
+
+    public Task<ExtractionSeasonStatistics> GetSeasonStatisticsAsync(
+        Guid accountId,
+        Guid seasonId,
+        CancellationToken cancellationToken) =>
+        _runs.GetSeasonStatisticsAsync(accountId, seasonId, cancellationToken);
 
     public Task<IReadOnlyList<ExtractionSettlementRun>> ListRecoverableAsync(
         int limit,
@@ -325,7 +382,7 @@ public sealed class ExtractionSettlementService
         var run = await _runs.GetAsync(runId, cancellationToken)
             ?? throw new ExtractionModeException(
                 "EXTRACTION_RUN_NOT_FOUND",
-                "撤离记录不存在。",
+                "资源兑换记录不存在。",
                 StatusCodes.Status404NotFound);
 
         if (normalizedResolution == "failed")
@@ -338,14 +395,22 @@ public sealed class ExtractionSettlementService
             {
                 throw new ExtractionModeException(
                     "RECONCILIATION_NOT_ALLOWED",
-                    "只有 uncertain 撤离记录可以人工终结。",
+                    "只有 uncertain 资源兑换记录可以人工终结。",
                     StatusCodes.Status409Conflict);
             }
-            return await _runs.MarkFailedAsync(
+            var failed = await _runs.TryMarkManuallyFailedAsync(
                 runId,
-                "MANUALLY_RECONCILED_FAILED",
+                run.Revision,
                 normalizedReason,
                 cancellationToken);
+            if (!failed.Applied && failed.Run.State != ExtractionSettlementState.Failed)
+            {
+                throw new ExtractionModeException(
+                    "RECONCILIATION_CONFLICT",
+                    "资源兑换记录已被另一个结算流程更新，请刷新后重试。",
+                    StatusCodes.Status409Conflict);
+            }
+            return failed.Run;
         }
 
         if (normalizedResolution == "settled")
@@ -358,26 +423,30 @@ public sealed class ExtractionSettlementService
             {
                 throw new ExtractionModeException(
                     "RECONCILIATION_NOT_ALLOWED",
-                    "只有 uncertain 撤离记录可以人工确认扣物并入账。",
+                    "只有 uncertain 资源兑换记录可以人工确认扣物并入账。",
                     StatusCodes.Status409Conflict);
             }
-            var credit = await _commerce.GrantSeasonVoucherAsync(
-                run.AccountId,
-                run.SeasonId,
-                run.TotalValue,
-                "extraction_run",
-                run.RunId.ToString("N"),
-                $"extraction-credit-{run.RunId:N}",
-                "manual-reconciliation",
+            // Persist the confirmed removal before touching the wallet. This makes
+            // a crash/retry resume from Removed and prevents a competing manual
+            // failure from winning after a credit has already been created.
+            var removed = await _runs.TryBeginManualSettlementAsync(
+                runId,
+                run.Revision,
                 normalizedReason,
                 cancellationToken);
-            if (credit.ErrorCode is not null)
+            if (!removed.Applied)
             {
-                throw new IOException(
-                    $"Extraction wallet credit failed: {credit.ErrorCode}: {credit.ErrorMessage}");
+                if (removed.Run.State == ExtractionSettlementState.Settled)
+                {
+                    return removed.Run;
+                }
+                throw new ExtractionModeException(
+                    "RECONCILIATION_CONFLICT",
+                    "资源兑换记录已被另一个结算流程更新，请刷新后重试。",
+                    StatusCodes.Status409Conflict);
             }
-            return await _runs.MarkManuallySettledAsync(
-                runId,
+            return await CreditRemovedRunAsync(
+                removed.Run,
                 normalizedReason,
                 cancellationToken);
         }
@@ -454,11 +523,11 @@ public sealed class ExtractionSettlementService
         };
         var statusMessage = status switch
         {
-            "live" when activeZone is not null => "已进入撤离区域。",
-            "live" => "尚未进入撤离区域。",
-            "offline" => "玩家当前不在线；静态撤离点信息仍可查看。",
+            "live" when activeZone is not null => "已进入资源回收区域。",
+            "live" => "尚未进入资源回收区域。",
+            "offline" => "玩家当前不在线；静态资源回收点信息仍可查看。",
             "position-unavailable" => "玩家在线，但当前位置暂时不可用。",
-            _ => "暂时无法从 PalDefender 确认玩家状态；静态撤离点信息仍可查看。"
+            _ => "暂时无法从 PalDefender 确认玩家状态；静态资源回收点信息仍可查看。"
         };
 
         return new PlayerExtractionZoneSnapshot(
@@ -478,53 +547,150 @@ public sealed class ExtractionSettlementService
         ExtractionSettlementRun run,
         CancellationToken cancellationToken)
     {
-        if (run.State == ExtractionSettlementState.Removed)
+        var lease = await _runs.TryAcquireRecoveryLeaseAsync(
+            run.RunId,
+            run.Revision,
+            "settlement-recovery",
+            cancellationToken);
+        if (!lease.Applied)
         {
-            return await CreditRemovedRunAsync(run.RunId, cancellationToken);
+            return lease.Run;
         }
-        if (run.State != ExtractionSettlementState.Consuming)
+        var claimed = lease.Run;
+        var leaseId = RequireLeaseId(claimed);
+        if (claimed.State == ExtractionSettlementState.Removed)
         {
-            return run;
-        }
-        if (await TryVerifyRemovalAsync(run, cancellationToken))
-        {
-            _ = await _runs.MarkRemovedAsync(run.RunId, cancellationToken);
-            return await CreditRemovedRunAsync(run.RunId, cancellationToken);
-        }
-        if (DateTimeOffset.UtcNow - run.UpdatedAt >= TimeSpan.FromSeconds(60))
-        {
-            return await _runs.MarkUncertainAsync(
-                run.RunId,
-                "RCON_DELETE_RECOVERY_UNPROVEN",
-                "服务重启后无法证明扣物结果，已停止自动重试和入账。",
+            var reconciliationReason = string.Equals(
+                claimed.ErrorCode,
+                "MANUALLY_RECONCILED_REMOVED",
+                StringComparison.Ordinal)
+                ? claimed.ErrorMessage
+                : null;
+            return await CreditRemovedRunAsync(
+                claimed,
+                reconciliationReason,
                 cancellationToken);
         }
-        return run;
+        if (claimed.State != ExtractionSettlementState.Consuming)
+        {
+            return claimed;
+        }
+        // Consuming does not prove that RCON was dispatched or acknowledged.
+        // A lower aggregate inventory total could also come from the player
+        // dropping or consuming items, so recovery must never infer a credit
+        // from that observation. Only a durable Removed record may auto-credit.
+        var stateChangedAt = claimed.StateChangedAt ?? claimed.UpdatedAt;
+        if (DateTimeOffset.UtcNow - stateChangedAt >= TimeSpan.FromSeconds(60))
+        {
+            var uncertain = await _runs.TryMarkUncertainAsync(
+                claimed.RunId,
+                claimed.Revision,
+                leaseId,
+                "RCON_DELETE_RECOVERY_UNPROVEN",
+                "服务中断后无法证明扣物命令是否执行，已停止自动重试和入账。",
+                cancellationToken);
+            return uncertain.Run;
+        }
+        var released = await _runs.TryReleaseLeaseAsync(
+            claimed.RunId,
+            claimed.Revision,
+            leaseId,
+            cancellationToken);
+        return released.Run;
+    }
+
+    private async Task<ExtractionSettlementRun?> TryMarkCriticalSectionUncertainAsync(
+        ExtractionSettlementRun startedRun,
+        Guid leaseId,
+        string code,
+        string message,
+        Exception cause)
+    {
+        using var finalizationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            var result = await _runs.TryMarkUncertainAsync(
+                startedRun.RunId,
+                startedRun.Revision,
+                leaseId,
+                code,
+                message,
+                finalizationTimeout.Token);
+            _logger.LogWarning(
+                cause,
+                "Resource settlement {RunId} left its critical section in state {State}; automatic credit is disabled unless Removed was already durable.",
+                startedRun.RunId,
+                result.Run.State);
+            return result.Run;
+        }
+        catch (Exception finalizationException)
+        {
+            _logger.LogError(
+                finalizationException,
+                "Could not persist the uncertain outcome for resource settlement {RunId}; lease recovery will retry conservatively.",
+                startedRun.RunId);
+            return null;
+        }
     }
 
     private async Task<ExtractionSettlementRun> CreditRemovedRunAsync(
-        Guid runId,
+        ExtractionSettlementRun run,
+        string? reconciliationReason,
         CancellationToken cancellationToken)
     {
-        var run = await _runs.GetAsync(runId, cancellationToken)
-            ?? throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
-        var result = await _commerce.GrantSeasonVoucherAsync(
-            run.AccountId,
-            run.SeasonId,
-            run.TotalValue,
-            "extraction_run",
-            run.RunId.ToString("N"),
-            $"extraction-credit-{run.RunId:N}",
-            "extraction-settlement",
-            $"撤离结算 {run.RunId:N}",
-            cancellationToken);
-        if (result.ErrorCode is not null)
+        if (run.State != ExtractionSettlementState.Removed)
         {
-            throw new IOException(
-                $"Extraction wallet credit failed: {result.ErrorCode}: {result.ErrorMessage}");
+            return run;
         }
-        return await _runs.MarkSettledAsync(run.RunId, cancellationToken);
+        var leaseId = RequireLeaseId(run);
+        // Every path uses the exact same immutable request. The wallet store can
+        // therefore replay this key after a crash without creating a second entry
+        // or conflicting with a later manual reconciliation.
+        var referenceId = run.RunId.ToString("N");
+        var existingCredit = await _commerce.FindLedgerEntryByReferenceAsync(
+            run.AccountId,
+            ExtractionCurrency.SeasonVoucher,
+            run.SeasonId,
+            "extraction_run",
+            referenceId,
+            cancellationToken);
+        if (existingCredit is not null && existingCredit.Delta != run.TotalValue)
+        {
+            throw new InvalidDataException(
+                $"Extraction run '{run.RunId}' has a wallet credit for {existingCredit.Delta}, expected {run.TotalValue}.");
+        }
+        if (existingCredit is null)
+        {
+            var result = await _commerce.GrantSeasonVoucherAsync(
+                run.AccountId,
+                run.SeasonId,
+                run.TotalValue,
+                "extraction_run",
+                referenceId,
+                $"extraction-credit-{run.RunId:N}",
+                "extraction-settlement",
+                // Keep the original immutable request text for compatibility with
+                // credits committed before the public terminology changed.
+                $"撤离结算 {run.RunId:N}",
+                cancellationToken);
+            if (result.ErrorCode is not null)
+            {
+                throw new IOException(
+                    $"Extraction wallet credit failed: {result.ErrorCode}: {result.ErrorMessage}");
+            }
+        }
+        var settled = await _runs.TryMarkSettledAsync(
+            run.RunId,
+            run.Revision,
+            leaseId,
+            reconciliationReason,
+            cancellationToken);
+        return settled.Run;
     }
+
+    private static Guid RequireLeaseId(ExtractionSettlementRun run) =>
+        run.LeaseId ?? throw new InvalidDataException(
+            $"Extraction run '{run.RunId}' in state {run.State} does not own a settlement lease.");
 
     private async Task<bool> TryVerifyRemovalAsync(
         ExtractionSettlementRun run,
@@ -554,7 +720,7 @@ public sealed class ExtractionSettlementService
         var first = await _coordinator.GetLivePlayerAsync(userId, cancellationToken);
         var firstZone = FindZone(first) ?? throw new ExtractionModeException(
             "PLAYER_OUTSIDE_EXTRACTION_ZONE",
-            "玩家不在配置的撤离区域内。",
+            "玩家不在配置的资源回收区域内。",
             StatusCodes.Status409Conflict);
         await Task.Delay(_options.ExtractionPositionSampleMilliseconds, cancellationToken);
         var second = await _coordinator.GetLivePlayerAsync(userId, cancellationToken);
@@ -563,7 +729,7 @@ public sealed class ExtractionSettlementService
         {
             throw new ExtractionModeException(
                 "EXTRACTION_ZONE_NOT_STABLE",
-                "两次位置采样未持续处于同一撤离区域。",
+                "两次位置采样未持续处于同一资源回收区域。",
                 StatusCodes.Status409Conflict);
         }
         return firstZone;
@@ -746,7 +912,22 @@ public sealed class ExtractionSettlementRecoveryWorker : BackgroundService
                 var runs = await _settlement.ListRecoverableAsync(25, stoppingToken);
                 foreach (var run in runs)
                 {
-                    _ = await _settlement.ReconcileAsync(run, stoppingToken);
+                    try
+                    {
+                        _ = await _settlement.ReconcileAsync(run, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception exception)
+                    {
+                        _logger.LogError(
+                            exception,
+                            "Extraction settlement recovery failed for run {RunId} revision {Revision}.",
+                            run.RunId,
+                            run.Revision);
+                    }
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

@@ -142,18 +142,22 @@ public static class PlayerPortalEndpoints
             {
                 RejectIdentityOverride(httpContext);
                 var session = authentication.RequireSession(httpContext);
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    session.UserId,
-                    requireOnline: false,
-                    cancellationToken);
-                var runs = await settlement.ListAsync(
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(session.UserId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: false,
+                        cancellationToken);
+                var statistics = await settlement.GetSeasonStatisticsAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
-                    1000,
                     cancellationToken);
                 return Results.Ok(new
                 {
+                    gameplayMode = ExtractionModeCoordinator.GameplayMode,
                     userId = context.Account.ExternalUserId,
                     displayName = context.Account.DisplayName,
                     season = ExtractionModeEndpoints.SeasonDto(
@@ -166,14 +170,15 @@ public static class PlayerPortalEndpoints
                     },
                     seasonStats = new
                     {
-                        successfulRuns = runs.Count(run =>
-                            run.State == ExtractionSettlementState.Settled),
-                        failedRuns = runs.Count(run => run.State == ExtractionSettlementState.Failed),
-                        uncertainRuns = runs.Count(run =>
-                            run.State == ExtractionSettlementState.Uncertain),
-                        extractedValue = runs
-                            .Where(run => run.State == ExtractionSettlementState.Settled)
-                            .Sum(run => run.TotalValue)
+                        settledExchanges = statistics.SettledCount,
+                        failedSettlements = statistics.FailedCount,
+                        uncertainSettlements = statistics.UncertainCount,
+                        exchangedValue = statistics.SettledTotalValue,
+                        // Compatibility aliases retained for older clients.
+                        successfulRuns = statistics.SettledCount,
+                        failedRuns = statistics.FailedCount,
+                        uncertainRuns = statistics.UncertainCount,
+                        extractedValue = statistics.SettledTotalValue
                     },
                     online = context.Online,
                     persistence = "sqlite-event-store"
@@ -244,11 +249,15 @@ public static class PlayerPortalEndpoints
             {
                 RejectIdentityOverride(httpContext);
                 var session = authentication.RequireSession(httpContext);
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    session.UserId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(session.UserId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: false,
+                        cancellationToken);
                 var products = await coordinator.ListProductsAsync(cancellationToken);
                 var orders = await coordinator.ListOrdersAsync(
                     context.Account.AccountId,
@@ -292,11 +301,15 @@ public static class PlayerPortalEndpoints
             {
                 RejectIdentityOverride(httpContext);
                 var session = authentication.RequireSession(httpContext);
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    session.UserId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(session.UserId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: false,
+                        cancellationToken);
                 var orders = await coordinator.ListOrdersAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -324,11 +337,15 @@ public static class PlayerPortalEndpoints
             {
                 RejectIdentityOverride(httpContext);
                 var session = authentication.RequireSession(httpContext);
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    session.UserId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(session.UserId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: false,
+                        cancellationToken);
                 var entries = await coordinator.ListLedgerAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -342,7 +359,7 @@ public static class PlayerPortalEndpoints
                         currency = ExtractionModeCoordinator.ToClientCurrency(entry.Currency),
                         amount = entry.Delta,
                         balanceAfter = entry.BalanceAfter,
-                        reason = entry.Reason,
+                        reason = ExtractionModeEndpoints.LedgerReason(entry),
                         referenceId = entry.ReferenceId,
                         createdAt = entry.CreatedAt
                     }).ToArray()
@@ -366,11 +383,15 @@ public static class PlayerPortalEndpoints
             {
                 RejectIdentityOverride(httpContext);
                 var session = authentication.RequireSession(httpContext);
-                using var operationLease = operationGate.AcquireOperation();
-                var context = await coordinator.GetAccountContextAsync(
-                    session.UserId,
-                    requireOnline: false,
-                    cancellationToken);
+                using var operationLease = operationGate.Current.Maintenance
+                    ? null
+                    : operationGate.AcquireOperation();
+                var context = operationLease is null
+                    ? await coordinator.GetExistingAccountContextAsync(session.UserId, cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: false,
+                        cancellationToken);
                 var runs = await settlement.ListAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
@@ -383,7 +404,7 @@ public static class PlayerPortalEndpoints
                     settlementEnabled = settlementProbe.Success,
                     reason = settlementProbe.Success
                         ? null
-                        : settlementProbe.ErrorMessage ?? "撤离结算当前不可用。"
+                        : settlementProbe.ErrorMessage ?? "资源兑换结算当前不可用。"
                 });
             }
             catch (Exception exception)

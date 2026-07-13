@@ -133,6 +133,21 @@ public sealed class ExtractionCommerceService
         CancellationToken cancellationToken) =>
         _repository.GetLedgerAsync(accountId, seasonId, limit, cancellationToken);
 
+    public Task<WalletLedgerEntry?> FindLedgerEntryByReferenceAsync(
+        Guid accountId,
+        ExtractionCurrency currency,
+        Guid? seasonId,
+        string referenceType,
+        string referenceId,
+        CancellationToken cancellationToken) =>
+        _repository.FindLedgerEntryByReferenceAsync(
+            accountId,
+            currency,
+            seasonId,
+            referenceType,
+            referenceId,
+            cancellationToken);
+
     public Task<IReadOnlyList<ShopProduct>> ListProductsAsync(
         bool includeInactive,
         CancellationToken cancellationToken) =>

@@ -8,9 +8,14 @@
     "apps/player-web"
   ],
   "scripts": {
+    "build": "npm run build:web && npm run build:player",
     "dev:web": "npm run dev --workspace @pal-control/console-web",
     "build:web": "npm run build --workspace @pal-control/console-web",
     "dev:player": "npm run dev --workspace @pal-control/player-web",
-    "build:player": "npm run build --workspace @pal-control/player-web"
+    "build:player": "npm run build --workspace @pal-control/player-web",
+    "test": "npm run test:player && powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1",
+    "test:player": "npm run test --workspace @pal-control/player-web",
+    "test:contract": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1 -Suite Contract",
+    "test:integration": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1 -Suite Integration"
   }
 }

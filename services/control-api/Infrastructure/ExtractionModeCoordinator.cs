@@ -10,9 +10,12 @@ namespace PalControl.ControlApi.Infrastructure;
 
 public sealed partial class ExtractionModeCoordinator
 {
+    public const string GameplayMode = "weekly-resource-economy";
+
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private readonly ExtractionCommerceService _commerce;
     private readonly PalDefenderRestClient _palDefender;
+    private readonly PalDefenderCommandQueue _deliveryCommands;
     private readonly PalworldResourceCatalogService _catalogService;
     private readonly SaveManagementService _saveManagement;
     private readonly ExtractionModeOptions _options;
@@ -23,6 +26,7 @@ public sealed partial class ExtractionModeCoordinator
     public ExtractionModeCoordinator(
         ExtractionCommerceService commerce,
         PalDefenderRestClient palDefender,
+        PalDefenderCommandQueue deliveryCommands,
         PalworldResourceCatalogService catalogService,
         SaveManagementService saveManagement,
         IOptions<ExtractionModeOptions> options,
@@ -30,6 +34,7 @@ public sealed partial class ExtractionModeCoordinator
     {
         _commerce = commerce;
         _palDefender = palDefender;
+        _deliveryCommands = deliveryCommands;
         _catalogService = catalogService;
         _saveManagement = saveManagement;
         _options = options.Value;
@@ -90,6 +95,31 @@ public sealed partial class ExtractionModeCoordinator
         return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false);
     }
 
+    public async Task<ExtractionAccountContext> GetExistingAccountContextAsync(
+        string userId,
+        CancellationToken cancellationToken)
+    {
+        EnsureEnabled();
+        var normalizedUserId = NormalizeUserId(userId);
+        var provider = normalizedUserId[..normalizedUserId.IndexOf('_')];
+        var account = await _commerce.FindPlayerAsync(provider, normalizedUserId, cancellationToken)
+            ?? throw new ExtractionModeException(
+                "ACCOUNT_NOT_AVAILABLE_DURING_MAINTENANCE",
+                "维护期间只允许读取已有账户；请等待维护结束后再创建账户。",
+                StatusCodes.Status423Locked);
+        var season = await _commerce.GetActiveSeasonAsync(_options.ServerId, cancellationToken)
+            ?? throw new ExtractionModeException(
+                "ACTIVE_SEASON_UNAVAILABLE",
+                "当前没有可读取的活动经济周档。",
+                StatusCodes.Status503ServiceUnavailable);
+        var wallet = await _commerce.GetWalletAsync(
+            account.AccountId,
+            season.SeasonId,
+            cancellationToken);
+        var livePlayer = await FindPalDefenderPlayerAsync(normalizedUserId, cancellationToken);
+        return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false);
+    }
+
     public async Task<ExtractionLivePlayer> GetLivePlayerAsync(
         string userId,
         CancellationToken cancellationToken)
@@ -100,7 +130,7 @@ public sealed partial class ExtractionModeCoordinator
         {
             throw new ExtractionModeException(
                 "PLAYER_NOT_ONLINE",
-                "玩家必须在线并加载完成才能执行撤离结算。",
+                "玩家必须在线并加载完成才能执行资源兑换结算。",
                 StatusCodes.Status409Conflict);
         }
         if (player.MapX is null || player.MapY is null)
@@ -297,7 +327,7 @@ public sealed partial class ExtractionModeCoordinator
         {
             throw new ExtractionModeException(
                 "SEASON_WORLD_UNBOUND",
-                "当前经济赛季尚未绑定 Palworld 世界，商城与撤离保持关闭。",
+                "当前经济赛季尚未绑定 Palworld 世界，商城与资源兑换保持关闭。",
                 StatusCodes.Status423Locked);
         }
         var resolvedWorld = await ResolveActiveWorldAsync(cancellationToken);
@@ -308,7 +338,7 @@ public sealed partial class ExtractionModeCoordinator
         {
             throw new ExtractionModeException(
                 "SEASON_WORLD_MISMATCH",
-                "当前 Palworld 世界与经济赛季不一致，商城与撤离保持关闭。",
+                "当前 Palworld 世界与经济赛季不一致，商城与资源兑换保持关闭。",
                 StatusCodes.Status423Locked);
         }
     }
@@ -334,6 +364,13 @@ public sealed partial class ExtractionModeCoordinator
         string idempotencyKey,
         CancellationToken cancellationToken)
     {
+        if (!_deliveryCommands.IsReady)
+        {
+            throw new ExtractionModeException(
+                "SHOP_DELIVERY_QUEUE_NOT_READY",
+                "游戏内发货队列当前不可用，订单尚未扣款，请稍后重试。",
+                StatusCodes.Status503ServiceUnavailable);
+        }
         await EnsureSeasonMatchesActiveWorldAsync(context.Season, cancellationToken);
         return await _commerce.PurchaseAsync(
             new ShopPurchaseRequest(
@@ -402,13 +439,7 @@ public sealed partial class ExtractionModeCoordinator
 
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
-        if (!_options.Enabled)
-        {
-            throw new ExtractionModeException(
-                "EXTRACTION_MODE_DISABLED",
-                "摸金搜打撤模式尚未启用。",
-                StatusCodes.Status503ServiceUnavailable);
-        }
+        EnsureEnabled();
         await _initializationGate.WaitAsync(cancellationToken);
         try
         {
@@ -423,6 +454,17 @@ public sealed partial class ExtractionModeCoordinator
         finally
         {
             _initializationGate.Release();
+        }
+    }
+
+    private void EnsureEnabled()
+    {
+        if (!_options.Enabled)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_MODE_DISABLED",
+                "幻兽商域资源经济模式尚未启用。",
+                StatusCodes.Status503ServiceUnavailable);
         }
     }
 
@@ -444,7 +486,7 @@ public sealed partial class ExtractionModeCoordinator
             {
                 throw new ExtractionModeException(
                     "SEASON_WORLD_UNBOUND",
-                    "当前经济赛季尚未绑定 Palworld 世界，商城与撤离保持关闭。",
+                    "当前经济赛季尚未绑定 Palworld 世界，商城与资源兑换保持关闭。",
                     StatusCodes.Status423Locked);
             }
             return;
@@ -473,7 +515,7 @@ public sealed partial class ExtractionModeCoordinator
             cancellationToken);
         throw new ExtractionModeException(
             "SEASON_WORLD_UNBOUND",
-            "已创建首个经济赛季；请在维护状态下提交当前 worldId 后再开放商城与撤离。",
+            "已创建首个经济赛季；请在维护状态下提交当前 worldId 后再开放商城与资源兑换。",
             StatusCodes.Status423Locked);
     }
 
@@ -580,30 +622,42 @@ public sealed partial class ExtractionModeCoordinator
     {
         if (_options.InitialMarketCoin > 0)
         {
+            var policyVersion = _options.BootstrapPolicyVersion.Trim();
+            var legacyPolicy = string.Equals(policyVersion, "legacy-v1", StringComparison.Ordinal);
             var result = await _commerce.GrantMarketCoinAsync(
                 account.AccountId,
                 _options.InitialMarketCoin,
                 "account_bootstrap",
-                account.AccountId.ToString("N"),
+                legacyPolicy
+                    ? account.AccountId.ToString("N")
+                    : $"{policyVersion}:{account.AccountId:N}",
                 $"bootstrap-market-{account.AccountId:N}",
                 "system-bootstrap",
-                "开发服初始商域币",
+                legacyPolicy
+                    ? "开发服初始商域币"
+                    : $"初始商域币（策略 {policyVersion}）",
                 cancellationToken);
-            ThrowIfWalletFailed(result);
+            HandleWalletBootstrapResult(result, account.AccountId, null, policyVersion);
         }
         if (_options.InitialSeasonVoucher > 0)
         {
+            var policyVersion = _options.BootstrapPolicyVersion.Trim();
+            var legacyPolicy = string.Equals(policyVersion, "legacy-v1", StringComparison.Ordinal);
             var result = await _commerce.GrantSeasonVoucherAsync(
                 account.AccountId,
                 season.SeasonId,
                 _options.InitialSeasonVoucher,
                 "season_bootstrap",
-                season.SeasonId.ToString("N"),
+                legacyPolicy
+                    ? season.SeasonId.ToString("N")
+                    : $"{policyVersion}:{season.SeasonId:N}",
                 $"bootstrap-voucher-{season.SeasonId:N}-{account.AccountId:N}",
                 "system-bootstrap",
-                "开发服本周初始战备券",
+                legacyPolicy
+                    ? "开发服本周初始战备券"
+                    : $"本周初始战备券（策略 {policyVersion}）",
                 cancellationToken);
-            ThrowIfWalletFailed(result);
+            HandleWalletBootstrapResult(result, account.AccountId, season.SeasonId, policyVersion);
         }
     }
 
@@ -668,7 +722,7 @@ public sealed partial class ExtractionModeCoordinator
             new DateTimeOffset(startUtc, TimeSpan.Zero),
             new DateTimeOffset(endUtc, TimeSpan.Zero),
             $"S{year}-W{week:00}",
-            $"第 {week:00} 周行动");
+            $"第 {week:00} 周商域");
     }
 
     private DateOnly GetBusinessDate(DateTimeOffset now)
@@ -751,8 +805,25 @@ public sealed partial class ExtractionModeCoordinator
         return normalized;
     }
 
-    private static void ThrowIfWalletFailed(WalletAdjustmentResult result)
+    private void HandleWalletBootstrapResult(
+        WalletAdjustmentResult result,
+        Guid accountId,
+        Guid? seasonId,
+        string policyVersion)
     {
+        if (result.IdempotencyConflict)
+        {
+            // The stable bootstrap key deliberately prevents a configuration edit
+            // from silently granting money twice. Existing players must still be
+            // able to sign in; use an explicit audited adjustment/migration for a
+            // changed policy instead of retrying bootstrap with a new key.
+            _logger.LogWarning(
+                "Bootstrap policy {PolicyVersion} differs from the recorded grant for account {AccountId} season {SeasonId}; existing balance was left unchanged.",
+                policyVersion,
+                accountId,
+                seasonId);
+            return;
+        }
         if (result.ErrorCode is not null)
         {
             throw new InvalidOperationException(
