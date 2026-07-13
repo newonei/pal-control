@@ -93,8 +93,9 @@ function Remove-TestTree([string] $path) {
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $serviceRoot = Join-Path $repositoryRoot "services\control-api"
 $project = Join-Path $serviceRoot "PalControl.ControlApi.csproj"
-$apiExecutable = Join-Path $serviceRoot `
-    "bin\Release\net10.0\PalControl.ControlApi.exe"
+$apiAssembly = Join-Path $serviceRoot `
+    "bin\Release\net10.0\PalControl.ControlApi.dll"
+$dotnetExecutable = (Get-Command dotnet -ErrorAction Stop).Source
 $apiPort = Get-FreeTcpPort
 $testRoot = Join-Path $env:TEMP (
     "pal-control-boundary-smoke-" + [guid]::NewGuid().ToString("N"))
@@ -129,7 +130,8 @@ try {
     $env:PlayerPortal__Enabled = "false"
     $env:SaveManagement__BackupRoot = Join-Path $testRoot "backups"
 
-    $api = Start-Process -FilePath $apiExecutable -WorkingDirectory $serviceRoot `
+    $api = Start-Process -FilePath $dotnetExecutable `
+        -ArgumentList ('"{0}"' -f $apiAssembly) -WorkingDirectory $serviceRoot `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr
     Wait-ForEndpoint "$baseUri/health/live" $api
