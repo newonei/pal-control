@@ -338,6 +338,7 @@ dotnet publish .\services\control-api\PalControl.ControlApi.csproj `
 - [存档中心运行手册](docs/runbooks/save-management.md)
 - [公告发布运行手册](docs/runbooks/announcement-publishing.md)
 - [幻兽商域模式设计](extraction-mode/README.md)
+- [玩法完成度与开发 TODO](TODO.md)
 - [OpenAPI 契约](packages/contracts/openapi/control-api.yaml)
 - [第三方来源与许可证说明](THIRD_PARTY_NOTICES.md)
 
