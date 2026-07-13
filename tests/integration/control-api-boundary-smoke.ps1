@@ -14,8 +14,9 @@ function Get-FreeTcpPort {
 function Wait-ForEndpoint(
     [string] $uri,
     [Diagnostics.Process] $process,
-    [int] $attempts = 100) {
-    for ($index = 0; $index -lt $attempts; $index += 1) {
+    [int] $timeoutSeconds = 60) {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
         if ($process.HasExited) {
             throw "Control API exited before becoming ready (exit $($process.ExitCode))."
         }
@@ -24,10 +25,10 @@ function Wait-ForEndpoint(
             return
         }
         catch {
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds 200
         }
     }
-    throw "Endpoint did not become ready: $uri"
+    throw "Endpoint did not become ready within ${timeoutSeconds}s: $uri"
 }
 
 function Invoke-CapturedGet([string] $uri, [hashtable] $headers = @{}) {
