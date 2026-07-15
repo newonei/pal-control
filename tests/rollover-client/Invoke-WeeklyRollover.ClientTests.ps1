@@ -32,6 +32,15 @@ function New-TestDirectory([string]$Name) {
     return $path
 }
 
+function New-TestSecureString([string]$Value) {
+    $secure = [Security.SecureString]::new()
+    foreach ($character in $Value.ToCharArray()) {
+        $secure.AppendChar($character)
+    }
+    $secure.MakeReadOnly()
+    return $secure
+}
+
 function Get-FreePort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -83,9 +92,9 @@ function Invoke-Client {
         [string]$ResumeOperationId = "",
         [switch]$Plan
     )
-    $apiKey = ConvertTo-SecureString $knownApiKey -AsPlainText -Force
+    $apiKey = New-TestSecureString $knownApiKey
     $totpProvider = {
-        ConvertTo-SecureString $knownTotp -AsPlainText -Force
+        New-TestSecureString $knownTotp
     }
     $adapter = {
         param($Action, $Context)
@@ -167,7 +176,7 @@ try {
         "default plan wrote a client journal"
 
     $legacyState = New-TestDirectory "legacy-delete"
-    $apiKey = ConvertTo-SecureString $knownApiKey -AsPlainText -Force
+    $apiKey = New-TestSecureString $knownApiKey
     Expect-ClientFailure `
         -MessagePattern "retired|never moves or deletes" `
         -FailureMessage "legacy Delete parameter was not rejected" `
