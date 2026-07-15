@@ -31,6 +31,19 @@ function Get-Sha256Hex([string] $value) {
 function Wait-ForApi([string] $uri, [Diagnostics.Process] $process) {
     for ($attempt = 0; $attempt -lt 120; $attempt += 1) {
         if ($process.HasExited) {
+            $process.WaitForExit()
+            $process.Refresh()
+            foreach ($log in @(
+                    @{ Label = "Control API stdout"; Path = $script:apiStdout },
+                    @{ Label = "Control API stderr"; Path = $script:apiStderr })) {
+                if (Test-Path -LiteralPath $log.Path) {
+                    $content = Get-Content -LiteralPath $log.Path -Raw
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        Write-Host "--- $($log.Label) ---"
+                        Write-Host $content
+                    }
+                }
+            }
             throw "Control API exited before startup (exit $($process.ExitCode))."
         }
         try {
@@ -105,6 +118,10 @@ $economyStagingRoot = Join-Path $testRoot "economy-staging"
 $palDefenderCredential = Join-Path $testRoot "paldefender-credential.json"
 $stdout = Join-Path $testRoot "api.out.log"
 $stderr = Join-Path $testRoot "api.err.log"
+$script:apiStdout = $stdout
+$script:apiStderr = $stderr
+$palworldRoot = Join-Path $testRoot "PalServer"
+$logRoot = Join-Path $testRoot "logs"
 $port = Get-FreeTcpPort
 $baseUri = "http://127.0.0.1:$port"
 $viewerKey = "observability-viewer-key-000000000000"
@@ -136,9 +153,11 @@ try {
 
     $arguments = @(
         (Join-Path $buildRoot "PalControl.ControlApi.dll"),
+        "--contentRoot=$buildRoot",
         "--urls=$baseUri",
         "--Security:DevelopmentMode=false",
-        "--Security:StartupValidation:Strict=false",
+        "--Security:StartupValidation:Strict=true",
+        "--Security:StartupValidation:LogDirectory=$logRoot",
         "--Security:AdminAuthentication:Enabled=true",
         "--Security:AdminAuthentication:EnableLoopbackDevelopmentPrincipal=false",
         "--Security:AdminAuthentication:Principals:0:Subject=observability-viewer",
@@ -157,12 +176,13 @@ try {
         "--ExtractionMode:Observability:Enabled=true",
         "--ExtractionMode:Observability:AutoCircuitBreakEnabled=true",
         "--PlayerPortal:Enabled=false",
+        "--Palworld:InstallRoot=$palworldRoot",
         "--CommandPersistence:DataDirectory=$commandRoot",
         "--SaveManagement:BackupRoot=$gameBackupRoot",
         "--SaveManagement:RequireRunningProcess=false"
     )
     $api = Start-Process -FilePath "dotnet" -ArgumentList $arguments `
-        -WorkingDirectory $serviceRoot -PassThru -WindowStyle Hidden `
+        -WorkingDirectory $buildRoot -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     Wait-ForApi "$baseUri/health/live" $api
 
