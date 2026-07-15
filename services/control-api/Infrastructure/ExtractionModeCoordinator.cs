@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Extraction;
 
 namespace PalControl.ControlApi.Infrastructure;
@@ -22,6 +23,7 @@ public sealed partial class ExtractionModeCoordinator
     private readonly ExtractionModeOptions _options;
     private readonly TimeZoneInfo _timeZone;
     private readonly ILogger<ExtractionModeCoordinator> _logger;
+    private readonly EconomyContentRuntimeService? _content;
     private volatile bool _initialized;
 
     public ExtractionModeCoordinator(
@@ -32,7 +34,8 @@ public sealed partial class ExtractionModeCoordinator
         PalworldResourceCatalogService catalogService,
         SaveManagementService saveManagement,
         IOptions<ExtractionModeOptions> options,
-        ILogger<ExtractionModeCoordinator> logger)
+        ILogger<ExtractionModeCoordinator> logger,
+        EconomyContentRuntimeService? content = null)
     {
         _commerce = commerce;
         _palDefender = palDefender;
@@ -43,6 +46,7 @@ public sealed partial class ExtractionModeCoordinator
         _options = options.Value;
         _timeZone = _options.ResolveTimeZone();
         _logger = logger;
+        _content = content;
     }
 
     public bool Enabled => _options.Enabled;
@@ -201,8 +205,20 @@ public sealed partial class ExtractionModeCoordinator
         }
     }
 
-    public Task<IReadOnlyList<ShopProduct>> ListProductsAsync(CancellationToken cancellationToken) =>
-        _commerce.ListProductsAsync(includeInactive: false, cancellationToken);
+    public async Task<IReadOnlyList<ShopProduct>> ListProductsAsync(CancellationToken cancellationToken)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        return await _commerce.ListProductsAsync(includeInactive: false, cancellationToken);
+    }
+
+    public async Task<EconomyRuntimeContent?> GetCurrentContentAsync(
+        CancellationToken cancellationToken)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        return _content is null
+            ? null
+            : await _content.GetCurrentAsync(cancellationToken);
+    }
 
     public async Task<ExtractionSeason> CommitRolloverAsync(
         string worldId,
@@ -385,6 +401,12 @@ public sealed partial class ExtractionModeCoordinator
         CancellationToken cancellationToken) =>
         _commerce.ListOrdersAsync(accountId, seasonId, limit, cancellationToken);
 
+    public Task<long> GetGlobalPurchasedQuantityAsync(
+        Guid seasonId,
+        string sku,
+        CancellationToken cancellationToken) =>
+        _commerce.GetGlobalPurchasedQuantityAsync(seasonId, sku, cancellationToken);
+
     public Task<IReadOnlyList<WalletLedgerEntry>> ListLedgerAsync(
         Guid accountId,
         Guid seasonId,
@@ -424,7 +446,9 @@ public sealed partial class ExtractionModeCoordinator
                 actor,
                 $"购买商城商品 {product.Sku}",
                 context.IdentityBinding!.PlayerUid,
-                context.IdentityBinding.WorldId),
+                context.IdentityBinding.WorldId,
+                product.ContentVersionId,
+                product.ContentHash),
             cancellationToken);
     }
 
@@ -432,12 +456,61 @@ public sealed partial class ExtractionModeCoordinator
         Guid productId,
         CancellationToken cancellationToken)
     {
+        await EnsureInitializedAsync(cancellationToken);
         var products = await _commerce.ListProductsAsync(includeInactive: false, cancellationToken);
         return products.SingleOrDefault(product => product.ProductId == productId)
             ?? throw new ExtractionModeException(
                 "PRODUCT_NOT_FOUND",
                 "商城商品不存在或已下架。",
                 StatusCodes.Status404NotFound);
+    }
+
+    public async Task<ShopProduct> ResolveProductOfferAsync(
+        Guid productId,
+        Guid? offeredContentVersionId,
+        string? offeredContentHash,
+        string? offeredSku,
+        CancellationToken cancellationToken)
+    {
+        var product = await FindProductAsync(productId, cancellationToken);
+        if (_content is null)
+        {
+            return product;
+        }
+        if (offeredContentVersionId is not Guid versionId ||
+            string.IsNullOrWhiteSpace(offeredContentHash) ||
+            string.IsNullOrWhiteSpace(offeredSku))
+        {
+            throw new ExtractionModeException(
+                "OFFER_EVIDENCE_REQUIRED",
+                "购买请求缺少内容版本证据，请刷新商城后重试。",
+                StatusCodes.Status409Conflict);
+        }
+        if (!string.Equals(product.Sku, offeredSku.Trim(), StringComparison.OrdinalIgnoreCase) ||
+            product.ContentVersionId != versionId ||
+            !string.Equals(product.ContentHash, offeredContentHash.Trim(), StringComparison.Ordinal))
+        {
+            throw new ExtractionModeException(
+                "OFFER_NOT_AVAILABLE",
+                "商城内容已经更新，请刷新后重新选择商品。",
+                StatusCodes.Status409Conflict);
+        }
+        try
+        {
+            _ = await _content.ResolveCurrentProductAsync(
+                versionId,
+                offeredContentHash,
+                offeredSku,
+                cancellationToken);
+        }
+        catch (ContentStoreException exception) when (exception.Code == "OFFER_NOT_AVAILABLE")
+        {
+            throw new ExtractionModeException(
+                exception.Code,
+                "商城内容已经更新，请刷新后重新选择商品。",
+                StatusCodes.Status409Conflict);
+        }
+        return product;
     }
 
     public Task<WalletAdjustmentResult> AdjustWalletAsync(
@@ -488,11 +561,18 @@ public sealed partial class ExtractionModeCoordinator
         try
         {
             await EnsureSeasonAsync(cancellationToken);
-            if (!_initialized)
+            if (_content is not null)
             {
-                await EnsureProductsAsync(cancellationToken);
+                _ = await _content.EnsureCurrentForBusinessDateAsync(cancellationToken);
             }
-            await EnsureDailyRotationAsync(cancellationToken);
+            else
+            {
+                if (!_initialized)
+                {
+                    await EnsureProductsAsync(cancellationToken);
+                }
+                await EnsureDailyRotationAsync(cancellationToken);
+            }
             _initialized = true;
         }
         finally

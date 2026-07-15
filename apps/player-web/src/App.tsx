@@ -9,6 +9,7 @@ export function App() {
   const [session, setSession] = useState<PlayerSession | null>(null);
   const [csrfToken, setCsrfToken] = useState(() => sessionStorage.getItem(csrfStorageKey));
   const [restoring, setRestoring] = useState(true);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -33,12 +34,14 @@ export function App() {
   function authenticate(next: PlayerSession) {
     setSession(next);
     setCsrfToken(next.csrfToken);
+    setSessionNotice(null);
     if (next.csrfToken) sessionStorage.setItem(csrfStorageKey, next.csrfToken);
   }
 
-  function clearSession() {
+  function clearSession(notice: string | null = null) {
     setSession(null);
     setCsrfToken(null);
+    setSessionNotice(notice);
     sessionStorage.removeItem(csrfStorageKey);
   }
 
@@ -51,6 +54,11 @@ export function App() {
   }
 
   if (restoring) return <div className="boot" role="status"><span className="brand-mark">幻</span><p>正在恢复安全会话…</p></div>;
-  if (!session?.authenticated || !csrfToken) return <Login onAuthenticated={authenticate} />;
-  return <Portal session={session} csrfToken={csrfToken} onLogout={signOut} onSessionExpired={clearSession} />;
+  if (!session?.authenticated || !csrfToken) return <Login initialMessage={sessionNotice} onAuthenticated={authenticate} />;
+  return <Portal
+    session={session}
+    csrfToken={csrfToken}
+    onLogout={signOut}
+    onSessionExpired={() => clearSession("安全会话已过期。请重新完成平台身份和本周游戏角色验证后再继续。")}
+  />;
 }

@@ -233,55 +233,6 @@ function Set-Maintenance([bool] $enabled, [string] $reason) {
     Assert-Status $response 200 "set rollover maintenance=$enabled"
 }
 
-function Write-SyntheticResourceCatalog([string] $contentRoot) {
-    # The redistributable repository deliberately excludes the real game-data
-    # catalog. Keep this integration test self-contained by writing the smallest
-    # synthetic catalog required by the built-in shop products to the isolated
-    # test content root.
-    $resourceRoot = Join-Path $contentRoot "Resources"
-    New-Item -ItemType Directory -Force -Path $resourceRoot | Out-Null
-    $catalog = @'
-{
-  "schemaVersion": "synthetic-test-v1",
-  "revision": "player-economy-smoke",
-  "generatedAt": "2026-01-01T00:00:00Z",
-  "source": {
-    "name": "synthetic integration-test fixture",
-    "note": "Contains identifiers already referenced by the test target; no game data is redistributed.",
-    "itemsUrl": "https://example.invalid/synthetic-items",
-    "palsUrl": "https://example.invalid/synthetic-pals",
-    "technologiesUrl": "https://example.invalid/synthetic-technologies"
-  },
-  "coverage": {
-    "items": "built-in test products only",
-    "pals": "single synthetic validation entry",
-    "eggs": "none",
-    "technologies": "none",
-    "templates": "none"
-  },
-  "items": [
-    { "id": "PalSphere", "name": "Synthetic PalSphere", "category": "Item" },
-    { "id": "Baked_Berries", "name": "Synthetic Baked Berries", "category": "Item" },
-    { "id": "Herbs", "name": "Synthetic Herbs", "category": "Item" },
-    { "id": "Medicines", "name": "Synthetic Medicines", "category": "Item" },
-    { "id": "PalSphere_Mega", "name": "Synthetic Mega Sphere", "category": "Item" },
-    { "id": "RoughBullet", "name": "Synthetic Rough Bullet", "category": "Item" },
-    { "id": "BowGun", "name": "Synthetic Crossbow", "category": "Item" },
-    { "id": "Arrow", "name": "Synthetic Arrow", "category": "Item" }
-  ],
-  "pals": [
-    { "id": "SyntheticPal", "name": "Synthetic Pal", "category": "Pal" }
-  ],
-  "eggs": [],
-  "technologies": []
-}
-'@
-    [IO.File]::WriteAllText(
-        (Join-Path $resourceRoot "palworld-resource-catalog.json"),
-        $catalog,
-        [Text.UTF8Encoding]::new($false))
-}
-
 function Start-TestApi([int] $generation) {
     $stdout = Join-Path $script:testRoot "control-api-$generation.out.log"
     $stderr = Join-Path $script:testRoot "control-api-$generation.err.log"
@@ -346,6 +297,7 @@ function Remove-TestTree([string] $path) {
 }
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "helpers\synthetic-resource-catalog.ps1")
 $script:serviceRoot = Join-Path $repositoryRoot "services\control-api"
 $project = Join-Path $script:serviceRoot "PalControl.ControlApi.csproj"
 $fakeScript = Join-Path $PSScriptRoot "fake_palworld_rest.py"
@@ -627,6 +579,23 @@ try {
         "$script:apiBase/api/v1/player/me/catalog"
     Assert-Status $catalogResponse 200 "player shop catalog"
     $catalog = Convert-ResponseJson $catalogResponse "player shop catalog"
+    if ([string]$catalog.contentVersionId -notmatch `
+            '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or
+        [string]$catalog.contentHash -notmatch '^[a-f0-9]{64}$' -or
+        [string]$catalog.businessDate -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+        [string]::IsNullOrWhiteSpace([string]$catalog.rulesVersion) -or
+        $null -eq $catalog.rotation -or
+        [string]$catalog.rotation.currentContentVersionId -ne [string]$catalog.contentVersionId -or
+        [string]$catalog.rotation.contentHash -ne [string]$catalog.contentHash) {
+        throw "The player catalog omitted or mismatched published content evidence: $($catalogResponse.Text)"
+    }
+    foreach ($catalogProduct in @($catalog.items)) {
+        if ([string]::IsNullOrWhiteSpace([string]$catalogProduct.sku) -or
+            [string]$catalogProduct.contentVersionId -ne [string]$catalog.contentVersionId -or
+            [string]$catalogProduct.contentHash -ne [string]$catalog.contentHash) {
+            throw "A player catalog product did not carry the current offer evidence: $($catalogResponse.Text)"
+        }
+    }
     $product = @($catalog.items | Where-Object {
         $_.enabled -eq $true -and $_.price.currency -eq "merchantCoin" -and
             [long]$_.price.amount -le [long]$aliceOverview.balances.merchantCoin
@@ -636,10 +605,36 @@ try {
     }
 
     $beforeDelivery = Get-FakeState
+    $staleVersionId = "00000000-0000-0000-0000-000000000000"
+    if ([string]$catalog.contentVersionId -eq $staleVersionId) {
+        $staleVersionId = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    }
+    $staleOrderBody = @{
+        productId = [string]$product.productId
+        quantity = 1
+        sku = [string]$product.sku
+        contentVersionId = $staleVersionId
+        contentHash = [string]$product.contentHash
+    } | ConvertTo-Json -Compress
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/orders" $staleOrderBody @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = "stale-shop-offer-e2e-0001"
+            }) `
+        409 "OFFER_NOT_AVAILABLE" "stale shop offer"
+    if ([int](Get-FakeState).pdGiveCount -ne [int]$beforeDelivery.pdGiveCount) {
+        throw "A stale shop offer dispatched a PalDefender item grant."
+    }
+
     $orderKey = "player-shop-order-e2e-0001"
     $orderBody = @{
         productId = [string]$product.productId
         quantity = 1
+        sku = [string]$product.sku
+        contentVersionId = [string]$product.contentVersionId
+        contentHash = [string]$product.contentHash
     } | ConvertTo-Json -Compress
     $orderResponse = Invoke-TestRequest $aliceClient "POST" `
         "$script:apiBase/api/v1/player/me/orders" $orderBody @{
@@ -797,6 +792,9 @@ try {
         settlementAdapter = $settlementStatus.adapter
         deprecatedSettlementStatusAlias = $true
         initialWorldBindingPersisted = $true
+        catalogContentVersion = $catalog.contentVersionId
+        catalogEvidenceVerified = $true
+        staleOfferRejected = $true
         orderId = $createdOrder.orderId
         deliveryState = $deliveredOrder.state
         settlementRunId = $quote.runId

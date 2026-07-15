@@ -212,6 +212,17 @@ public sealed class ExtractionCommerceService
         CancellationToken cancellationToken) =>
         _repository.UpsertProductAsync(definition, expectedRevision, actor, cancellationToken);
 
+    public Task<ContentProductProjectionActivationResult> ActivateContentProductProjectionAsync(
+        ContentProductProjectionActivation activation,
+        CancellationToken cancellationToken) =>
+        _repository.ActivateContentProductProjectionAsync(activation, cancellationToken);
+
+    public Task<long> GetGlobalPurchasedQuantityAsync(
+        Guid seasonId,
+        string sku,
+        CancellationToken cancellationToken) =>
+        _repository.GetGlobalPurchasedQuantityAsync(seasonId, sku, cancellationToken);
+
     public Task<ShopPurchaseResult> PurchaseAsync(
         ShopPurchaseRequest request,
         CancellationToken cancellationToken) =>

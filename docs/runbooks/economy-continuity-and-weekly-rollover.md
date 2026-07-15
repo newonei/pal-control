@@ -5,7 +5,7 @@
 ## 安全边界
 
 - 经济权威库是 `ExtractionMode:Persistence:DataDirectory/extraction-commerce.db`。SQLite 使用 WAL；在线备份 API 会把已提交 WAL frame 合并进备份数据库，清单同时记录 checkpoint frame 数，不复制一个可能不一致的裸 `-wal` 文件。
-- 账户、钱包、账本、商城订单、资源结算 run、delivery evidence/receipt、PalDefender command outbox、身份/管理审计、经济 gate、周换档状态和赛季 job 位于同一个 SQLite 文件。快照会从 `paldefender_commands` 读取 `accepted/dispatched/uncertain/dead_lettered` 阻断项；公告/通知/存档等非经济 JSONL 仍作为兼容 side state 冻结复制和校验。
+- 账户、钱包、账本、商城订单、资源结算 run、delivery evidence/receipt、PalDefender command outbox、身份/管理审计、经济 gate、周换档状态和赛季 job 位于同一个 SQLite 文件。快照会从 `paldefender_commands` 读取 `accepted/dispatched/uncertain/dead_lettered` 阻断项；公告/通知/存档等非经济 JSONL 仍作为兼容 side state 冻结复制和校验，并生成独立的通道归档清单。
 - 恢复永远先进入 staging。工具不会自动覆盖生产数据，也不会自动删除旧世界。
 - staging 中的经济写入默认关闭；只有 worldId、账本、待决交易和所有依赖重新验证后，值班人员才能人工开放。
 - 受控脚本只支持 `PreviousWorldPolicy=Keep`，并明确拒绝旧的 `Archive`、`Delete`、`AllowDeletePreviousWorld` 和 `ArchiveRoot` 参数；代码中没有移动或删除旧世界的执行路径。任何后续人工清理都必须有单独业务 ADR 和人工审批。
@@ -24,6 +24,23 @@
 | 自动删除 | 禁止 | API 只生成候选清单，不执行删除；旧世界也不自动删除 |
 
 如果业务要求“无条件至少 8 周”，必须另立 ADR，明确每周快照频率、磁盘预算和恢复成本；不能把“8 份”偷换成“8 周”。
+
+### 非经济 JSONL 的统一归档边界
+
+活动目录中的以下通道在迁移到其他权威存储前都执行同一策略：
+
+| 文件 | 通道 | 活动文件保留 |
+|---|---|---|
+| `announcement-events.jsonl` | 公告草稿与状态 | 追加式权威；不截断、不轮转、不自动删除 |
+| `command-audit.jsonl` | 公告逐渠道派发 | 追加式权威；不截断、不轮转、不自动删除 |
+| `in-game-notification-events.jsonl` | 游戏内通知状态 | 追加式权威；不截断、不轮转、不自动删除 |
+| `in-game-notification-command-audit.jsonl` | 游戏内通知派发 | 追加式权威；不截断、不轮转、不自动删除 |
+| `save-command-audit.jsonl` | 保存/受管备份命令 | 追加式权威；不截断、不轮转、不自动删除 |
+| `paldefender-command-audit.jsonl` | 旧 PalDefender 导入源 | 只作迁移证据；当前权威 outbox 已在 SQLite |
+
+一致性快照会在 `command-state/command-side-state-archive.json`（命令目录与经济目录完全相同时位于 `economy-state/`）记录完整通道注册表、存在/缺失状态、用途、权威级别、字节数、SHA-256、拍摄时间和当时继承的保留期/最少份数。清单自身也由外层经济 manifest 记录 SHA-256。出现未登记 `.jsonl`、嵌套 JSONL、重解析点、空行、损坏 JSON 或不完整末行时，快照失败并清理 partial 目录；新增通道必须先更新注册表、恢复语义、测试和本手册，不能静默归档。
+
+JSONL 归档不单独轮转或删除，而是与 SQLite、门禁和调度状态组成不可拆分的经济快照。`PlanRetention` 只在超过保留期且高于最少份数时列出整个 bundle 候选，不执行删除；不得只删除 `command-state` 节省空间。活动文件增长计入容量计划。需要缩减活动日志时，必须先把该通道迁移到具备等价幂等/重放约束的存储，完成一次真实恢复并另行提交迁移与回滚方案，不能原地压缩现有权威日志。
 
 ## 管理请求头
 
@@ -139,7 +156,7 @@ Invoke-RestMethod -Headers $headers `
   -Uri "$base/admin/economy-continuity/snapshots/local/$($snapshot.backupId)/verify"
 ```
 
-清单固定包含文件大小、SHA-256、SQLite `user_version`、最后事件序号、WAL frame 证据、RPO/RTO 和拍摄时的待决交易清单。
+清单固定包含文件大小、SHA-256、SQLite `user_version`、最后事件序号、WAL frame 证据、RPO/RTO、非经济 JSONL 通道归档清单和拍摄时的待决交易清单。
 
 ## staging 恢复与是否切换
 
@@ -273,7 +290,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File tests/integration/continuity-rollover-smoke.ps1
 ```
 
-该命令同时运行 .NET continuity harness 和 PowerShell fake API 客户端隔离测试。覆盖：每个换档阶段前后重启、逐阶段 action 后崩溃恢复、逐阶段服务端已提交但 HTTP 响应丢失、确定性 game backup/economy snapshot/staging 重放、跳步/冲突证据、错误 world、RPO、未决交易、规则版本漂移、expiry/reward 20 次重放、ledger 崩溃窗口、在线快照、staging 恢复、凭据不进入 journal，以及恢复后经济关闭。
+该命令同时运行 .NET continuity harness 和 PowerShell fake API 客户端隔离测试。覆盖：每个换档阶段前后重启、逐阶段 action 后崩溃恢复、逐阶段服务端已提交但 HTTP 响应丢失、确定性 game backup/economy snapshot/staging 重放、跳步/冲突证据、错误 world、RPO、未决交易、规则版本漂移、expiry/reward 20 次重放、ledger 崩溃窗口、在线快照、注册 JSONL 原字节归档、未知/半行/篡改 fail-closed、bundle 级 plan-only 保留、staging 恢复、凭据不进入 journal，以及恢复后经济关闭。
 
 它不能替代以下外部验收，未取得真实证据前 TODO 必须保持未完成：
 

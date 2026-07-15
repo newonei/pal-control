@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Extraction;
 
 namespace PalControl.ControlApi.Infrastructure;
@@ -60,6 +61,13 @@ public sealed record ExtractionSettlementRun(
     public ExtractionNativeInventoryQuoteSnapshot? NativeInventorySnapshot { get; init; }
     public string? SettlementRequestHash { get; init; }
     public ExtractionNativeConsumeReceipt? NativeConsumeReceipt { get; init; }
+    public Guid? ContentVersionId { get; init; }
+    public string? ContentHash { get; init; }
+    public DateOnly? ContentBusinessDate { get; init; }
+    public string? ContentRulesVersion { get; init; }
+    public string? RotationSeed { get; init; }
+    public int ZoneYieldMultiplierBasisPoints { get; init; } = 10_000;
+    public bool Hotspot { get; init; }
 }
 
 public sealed record ExtractionConsumptionStart(
@@ -130,7 +138,10 @@ public sealed class ExtractionRunStore : IDisposable
         string snapshotHash,
         DateTimeOffset expiresAt,
         CancellationToken cancellationToken,
-        ExtractionNativeInventoryQuoteSnapshot? nativeInventorySnapshot = null)
+        ExtractionNativeInventoryQuoteSnapshot? nativeInventorySnapshot = null,
+        EconomyRuntimeContent? runtimeContent = null,
+        int zoneYieldMultiplierBasisPoints = 10_000,
+        bool hotspot = false)
     {
         ArgumentNullException.ThrowIfNull(items);
         if (nativeInventorySnapshot is not null &&
@@ -215,7 +226,14 @@ public sealed class ExtractionRunStore : IDisposable
             {
                 Revision = 1,
                 StateChangedAt = now,
-                NativeInventorySnapshot = CloneNativeSnapshot(nativeInventorySnapshot)
+                NativeInventorySnapshot = CloneNativeSnapshot(nativeInventorySnapshot),
+                ContentVersionId = runtimeContent?.Version.VersionId,
+                ContentHash = runtimeContent?.Version.ContentHash,
+                ContentBusinessDate = runtimeContent?.Version.BusinessDate,
+                ContentRulesVersion = runtimeContent?.Version.RulesVersion,
+                RotationSeed = runtimeContent?.Rotation.Seed,
+                ZoneYieldMultiplierBasisPoints = zoneYieldMultiplierBasisPoints,
+                Hotspot = hotspot
             };
             snapshot[run.RunId] = run;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);

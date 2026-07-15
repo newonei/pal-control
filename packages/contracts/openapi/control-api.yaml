@@ -48,6 +48,10 @@ tags:
     description: Local extraction-mode economy, shop, delivery, and settlement views.
   - name: ExtractionAdmin
     description: Loopback-only extraction economy administration and weekly rollover controls.
+  - name: EconomyContent
+    description: >-
+      Versioned Scheme A shop, sell allow-list, exchange-zone, task and rotation
+      definitions with guarded draft validation, publication and rollback.
   - name: EconomyObservability
     description: Privacy-safe economy state, latency, invariant, alert, backup and circuit metrics.
   - name: AdminSecurity
@@ -134,6 +138,237 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /servers/{serverId}/economy-content/current:
+    get:
+      tags: [EconomyContent]
+      summary: Get the currently published economy-content version
+      operationId: getCurrentEconomyContent
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Current immutable content version, pointer and rotation identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentCurrent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/versions:
+    get:
+      tags: [EconomyContent]
+      summary: List immutable published economy-content versions
+      operationId: listEconomyContentVersions
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      responses:
+        "200":
+          description: Published versions ordered by the content store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentVersionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/drafts:
+    get:
+      tags: [EconomyContent]
+      summary: List economy-content drafts
+      operationId: listEconomyContentDrafts
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - name: includePublished
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Drafts visible to the current administrator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentDraftList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+    post:
+      tags: [EconomyContent]
+      summary: Create an editable economy-content draft
+      operationId: createEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEconomyContentDraftRequest"
+      responses:
+        "201":
+          description: Created draft
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentDraft"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/drafts/{draftId}:
+    get:
+      tags: [EconomyContent]
+      summary: Get an economy-content draft
+      operationId: getEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/EconomyContentDraftId"
+      responses:
+        "200":
+          description: Current draft snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentDraft"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+    put:
+      tags: [EconomyContent]
+      summary: Replace a draft definition using optimistic concurrency
+      operationId: updateEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/EconomyContentDraftId"
+        - $ref: "#/components/parameters/EconomyContentRevision"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateEconomyContentDraftRequest"
+      responses:
+        "200":
+          description: Updated draft snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentDraft"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/drafts/{draftId}/diff:
+    get:
+      tags: [EconomyContent]
+      summary: Diff a draft against its selected base version
+      operationId: diffEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/EconomyContentDraftId"
+      responses:
+        "200":
+          description: Stable field-level draft diff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentDiff"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/drafts/{draftId}/validate:
+    post:
+      tags: [EconomyContent]
+      summary: Validate the exact current draft revision
+      operationId: validateEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/EconomyContentDraftId"
+        - $ref: "#/components/parameters/EconomyContentRevision"
+      responses:
+        "200":
+          description: Validation result without activating content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentValidationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/drafts/{draftId}/publish:
+    post:
+      tags: [EconomyContent]
+      summary: Publish a validated immutable economy-content version
+      description: >-
+        Requires maintenance mode, zero active player operations, and no
+        non-terminal resource quotes or settlements. The confirmation must
+        exactly equal `PUBLISH ECONOMY CONTENT` and the business date must be
+        the server's current configured business date.
+      operationId: publishEconomyContentDraft
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/EconomyContentDraftId"
+        - $ref: "#/components/parameters/EconomyContentRevision"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishEconomyContentRequest"
+      responses:
+        "200":
+          description: Published version and atomically updated current pointer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentPublishResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
+  /servers/{serverId}/economy-content/rollback:
+    post:
+      tags: [EconomyContent]
+      summary: Roll the current content pointer back to an immutable version
+      description: >-
+        Requires maintenance mode and a fully drained settlement boundary. The
+        confirmation must exactly equal `ROLLBACK ECONOMY CONTENT`. A null
+        targetVersionId selects the previous published version.
+      operationId: rollbackEconomyContent
+      parameters:
+        - $ref: "#/components/parameters/ServerId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackEconomyContentRequest"
+      responses:
+        "200":
+          description: Atomically updated current pointer or idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyContentRollbackResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/EconomyContentError"
   /servers/{serverId}/configuration:
     get:
       tags: [Configuration]
@@ -2263,6 +2498,30 @@ paths:
                 $ref: "#/components/schemas/NewPlayerActivityAvailabilityList"
         default:
           $ref: "#/components/responses/PlayerPortalError"
+  /player/me/tasks:
+    get:
+      tags: [PlayerPortal]
+      summary: List version-pinned reliable tasks for the authenticated player
+      description: >-
+        Creates or reads the current daily and weekly task instances from the
+        published content rotation. Progress accepts only durable server-authored
+        settled-resource and delivered-order facts; there is no client event
+        ingestion endpoint. Reading also retries any pending idempotent currency
+        reward outbox entry.
+      operationId: listPlayerReliableTasks
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current task progress, rewards, ranking points, and frozen content evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReliableTaskSnapshot"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
   /player/me/new-player-activities/{activityKey}/versions/{version}/claim:
     post:
       tags: [PlayerPortal]
@@ -2375,6 +2634,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionOrder"
+        "409":
+          description: >-
+            The submitted offer evidence is missing (`OFFER_EVIDENCE_REQUIRED`)
+            or no longer matches the currently published SKU
+            (`OFFER_NOT_AVAILABLE`); refresh the catalog before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         default:
           $ref: "#/components/responses/PlayerPortalError"
   /player/me/ledger:
@@ -2441,7 +2709,8 @@ paths:
         Has no request body. Player identity is derived only from the HttpOnly
         session cookie. The operation requires an allowed Origin, the session
         CSRF token, and an Idempotency-Key before consuming inventory or crediting
-        the wallet.
+        the wallet. If the current economy content version or hash changed after
+        the quote, the server returns 409 QUOTE_CONTENT_CHANGED before consuming.
       operationId: settlePlayerPortalExtractionRun
       security:
         - playerSessionCookie: []
@@ -2911,6 +3180,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionOrder"
+        "409":
+          description: >-
+            The submitted offer evidence is missing (`OFFER_EVIDENCE_REQUIRED`)
+            or stale (`OFFER_NOT_AVAILABLE`); refresh the catalog before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         default:
           $ref: "#/components/responses/ExtractionError"
   /extraction/ledger:
@@ -2976,7 +3253,9 @@ paths:
         In production, dispatches an exact Native inventory.consume request,
         persists and validates the complete removal receipt, and only then
         credits the current-season voucher. The RCON compatibility adapter is
-        restricted to explicitly configured Development environments.
+        restricted to explicitly configured Development environments. If the
+        current economy content version or hash changed after the quote, the
+        server returns 409 QUOTE_CONTENT_CHANGED before consuming.
       operationId: settleExtractionRun
       parameters:
         - $ref: "#/components/parameters/ExtractionRunId"
@@ -3669,6 +3948,21 @@ components:
       schema:
         type: string
         minLength: 1
+    EconomyContentDraftId:
+      name: draftId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EconomyContentRevision:
+      name: If-Match
+      in: header
+      required: true
+      description: Current non-negative numeric draft revision, optionally quoted.
+      schema:
+        type: string
+        pattern: '^"?[0-9]+"?$'
     PlayerId:
       name: playerId
       in: path
@@ -3949,6 +4243,16 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ApiError"
+    EconomyContentError:
+      description: >-
+        Economy-content authorization, validation, optimistic-concurrency,
+        publication, rollback, maintenance-drain, or persistence error.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ApiError"
+              - $ref: "#/components/schemas/EconomyContentValidationFailure"
   requestBodies:
     PalDefenderCommand:
       required: true
@@ -6477,10 +6781,12 @@ components:
     CreatePlayerPortalOrderRequest:
       type: object
       additionalProperties: false
-      required: [productId, quantity]
+      required: [productId, quantity, sku, contentVersionId, contentHash]
       description: >-
         Contains no player identity. The target account is always selected from
-        the authenticated HttpOnly player session cookie.
+        the authenticated HttpOnly player session cookie. SKU, immutable content
+        version and content hash must be copied from the same current catalog item;
+        stale or mixed evidence is rejected before debit or delivery.
       properties:
         productId:
           type: string
@@ -6489,6 +6795,16 @@ components:
           type: integer
           minimum: 1
           maximum: 99
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 128
+        contentVersionId:
+          type: string
+          format: uuid
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
     PlayerExtractionMapPoint:
       type: object
       additionalProperties: false
@@ -7404,6 +7720,845 @@ components:
           type: boolean
         idempotentReplay:
           type: boolean
+    EconomyContentCurrency:
+      type: string
+      enum: [MarketCoin, SeasonVoucher]
+    EconomyContentDependencies:
+      type: object
+      additionalProperties: false
+      required: [rulesVersion, resourceCatalogRevision, gameVersion, palDefenderVersion]
+      properties:
+        rulesVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        resourceCatalogRevision:
+          type: string
+          minLength: 1
+          maxLength: 128
+        gameVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        palDefenderVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+    EconomyContentItemGrant:
+      type: object
+      additionalProperties: false
+      required: [itemId, quantity]
+      properties:
+        itemId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+    EconomyContentProductDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        - sku
+        - displayName
+        - description
+        - category
+        - tags
+        - featuredRank
+        - priceCurrency
+        - unitPrice
+        - itemGrants
+        - purchaseLimitPerSeason
+        - globalStock
+        - active
+        - availableFrom
+        - availableUntil
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 512
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tags:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        featuredRank:
+          type: [integer, "null"]
+          minimum: 1
+        priceCurrency:
+          $ref: "#/components/schemas/EconomyContentCurrency"
+        unitPrice:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        itemGrants:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/EconomyContentItemGrant"
+        purchaseLimitPerSeason:
+          type: [integer, "null"]
+          minimum: 1
+        globalStock:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+        active:
+          type: boolean
+        availableFrom:
+          type: [string, "null"]
+          format: date-time
+        availableUntil:
+          type: [string, "null"]
+          format: date-time
+    EconomyContentResourceDefinition:
+      type: object
+      additionalProperties: false
+      required: [itemId, displayName, category, tags, currency, unitValue, exchangeZoneIds, active]
+      properties:
+        itemId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tags:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        currency:
+          $ref: "#/components/schemas/EconomyContentCurrency"
+        unitValue:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        exchangeZoneIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        active:
+          type: boolean
+    EconomyContentExchangeWindow:
+      type: object
+      additionalProperties: false
+      required: [dayOfWeek, opensAt, closesAt, graceSeconds]
+      properties:
+        dayOfWeek:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: System.DayOfWeek numeric value, where Sunday is 0.
+        opensAt:
+          type: string
+          pattern: "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,7})?$"
+        closesAt:
+          type: string
+          pattern: "^[0-2][0-9]:[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,7})?$"
+        graceSeconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+    EconomyContentExchangeZoneDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        - zoneId
+        - displayName
+        - routeHint
+        - mapX
+        - mapY
+        - radius
+        - yieldMultiplierBasisPoints
+        - openWindows
+        - active
+      properties:
+        zoneId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        routeHint:
+          type: string
+          maxLength: 512
+        mapX:
+          type: number
+          format: double
+        mapY:
+          type: number
+          format: double
+        radius:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+        yieldMultiplierBasisPoints:
+          type: integer
+          minimum: 1
+        openWindows:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EconomyContentExchangeWindow"
+        active:
+          type: boolean
+    EconomyContentTaskReward:
+      type: object
+      additionalProperties: false
+      required: [currency, amount, rankingPoints]
+      properties:
+        currency:
+          $ref: "#/components/schemas/EconomyContentCurrency"
+        amount:
+          type: integer
+          format: int64
+          minimum: 0
+        rankingPoints:
+          type: integer
+          minimum: 0
+    EconomyContentTaskDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        - taskKey
+        - displayName
+        - description
+        - cadence
+        - eventKind
+        - targetAmount
+        - targetItemId
+        - targetCurrency
+        - exchangeZoneIds
+        - reward
+        - active
+      properties:
+        taskKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 512
+        cadence:
+          type: string
+          enum: [Daily, Weekly]
+        eventKind:
+          type: string
+          enum:
+            - ResourceExchangeSettled
+            - ResourceItemSettled
+            - ResourceValueSettled
+            - ShopOrderDelivered
+            - CurrencySpent
+        targetAmount:
+          type: integer
+          format: int64
+          minimum: 1
+        targetItemId:
+          type: [string, "null"]
+          maxLength: 128
+        targetCurrency:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentCurrency"
+            - type: "null"
+        exchangeZoneIds:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        reward:
+          $ref: "#/components/schemas/EconomyContentTaskReward"
+        active:
+          type: boolean
+    ReliableTaskItem:
+      type: object
+      additionalProperties: false
+      required:
+        - instanceId
+        - cadence
+        - periodKey
+        - taskKey
+        - displayName
+        - description
+        - eventKind
+        - targetAmount
+        - progress
+        - completed
+        - completedAt
+        - rewardGranted
+        - reward
+        - currencyRewardLedgerEntryId
+        - rankingRewardEntryId
+        - contentVersionId
+        - contentHash
+        - rulesVersion
+        - rotationSeed
+      properties:
+        instanceId:
+          type: string
+          format: uuid
+        cadence:
+          type: string
+          enum: [Daily, Weekly]
+        periodKey:
+          type: string
+          minLength: 1
+        taskKey:
+          type: string
+          minLength: 1
+        displayName:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        eventKind:
+          type: string
+          enum:
+            - ResourceExchangeSettled
+            - ResourceItemSettled
+            - ResourceValueSettled
+            - ShopOrderDelivered
+            - CurrencySpent
+        targetAmount:
+          type: integer
+          format: int64
+          minimum: 1
+        progress:
+          type: integer
+          format: int64
+          minimum: 0
+        completed:
+          type: boolean
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        rewardGranted:
+          type: boolean
+        reward:
+          $ref: "#/components/schemas/EconomyContentTaskReward"
+        currencyRewardLedgerEntryId:
+          type: [string, "null"]
+          format: uuid
+        rankingRewardEntryId:
+          type: [string, "null"]
+          format: uuid
+        contentVersionId:
+          type: string
+          format: uuid
+        contentHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        rulesVersion:
+          type: string
+          minLength: 1
+        rotationSeed:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+    ReliableTaskSnapshot:
+      type: object
+      additionalProperties: false
+      required: [accountId, seasonId, serverId, rankingPoints, items]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        seasonId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          minLength: 1
+        rankingPoints:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReliableTaskItem"
+    EconomyContentRotationPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - rulesVersion
+        - algorithmVersion
+        - seedNamespace
+        - dailyTaskPool
+        - dailyTaskCount
+        - weeklyTaskPool
+        - weeklyTaskCount
+        - hotspotZonePool
+        - dailyHotspotCount
+      properties:
+        rulesVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        algorithmVersion:
+          type: integer
+          minimum: 1
+        seedNamespace:
+          type: string
+          minLength: 1
+          maxLength: 128
+        dailyTaskPool:
+          type: array
+          items:
+            type: string
+        dailyTaskCount:
+          type: integer
+          minimum: 0
+        weeklyTaskPool:
+          type: array
+          items:
+            type: string
+        weeklyTaskCount:
+          type: integer
+          minimum: 0
+        hotspotZonePool:
+          type: array
+          items:
+            type: string
+        dailyHotspotCount:
+          type: integer
+          minimum: 0
+    EconomyContentDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - serverId
+        - displayName
+        - dependencies
+        - timeZoneId
+        - dailyRefreshHour
+        - products
+        - resources
+        - exchangeZones
+        - tasks
+        - rotation
+      properties:
+        schemaVersion:
+          type: integer
+          minimum: 1
+        serverId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        dependencies:
+          $ref: "#/components/schemas/EconomyContentDependencies"
+        timeZoneId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        dailyRefreshHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        products:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/EconomyContentProductDefinition"
+        resources:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/EconomyContentResourceDefinition"
+        exchangeZones:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/EconomyContentExchangeZoneDefinition"
+        tasks:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/EconomyContentTaskDefinition"
+        rotation:
+          $ref: "#/components/schemas/EconomyContentRotationPolicy"
+    EconomyContentValidationIssue:
+      type: object
+      additionalProperties: false
+      required: [code, path, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        path:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+    EconomyContentValidationResult:
+      type: object
+      additionalProperties: false
+      required: [valid, contentHash, errors, warnings, validatedAt]
+      properties:
+        valid:
+          type: boolean
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentValidationIssue"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentValidationIssue"
+        validatedAt:
+          type: string
+          format: date-time
+    EconomyContentDraft:
+      type: object
+      additionalProperties: false
+      required:
+        - draftId
+        - serverId
+        - name
+        - state
+        - basedOnVersionId
+        - revision
+        - contentHash
+        - definition
+        - lastValidation
+        - publishedVersionId
+        - createdBy
+        - updatedBy
+        - createdAt
+        - updatedAt
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+        name:
+          type: string
+        state:
+          type: string
+          enum: [Draft, Published, Abandoned]
+        basedOnVersionId:
+          type: [string, "null"]
+          format: uuid
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        definition:
+          $ref: "#/components/schemas/EconomyContentDefinition"
+        lastValidation:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentValidationResult"
+            - type: "null"
+        publishedVersionId:
+          type: [string, "null"]
+          format: uuid
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    EconomyContentVersion:
+      type: object
+      additionalProperties: false
+      required:
+        - versionId
+        - serverId
+        - versionNumber
+        - businessDate
+        - rulesVersion
+        - contentHash
+        - definition
+        - sourceDraftId
+        - publishedBy
+        - publishedAt
+      properties:
+        versionId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+        versionNumber:
+          type: integer
+          format: int64
+          minimum: 1
+        businessDate:
+          type: string
+          format: date
+        rulesVersion:
+          type: string
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        definition:
+          $ref: "#/components/schemas/EconomyContentDefinition"
+        sourceDraftId:
+          type: string
+          format: uuid
+        publishedBy:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+    EconomyContentPointer:
+      type: object
+      additionalProperties: false
+      required: [serverId, versionId, versionNumber, businessDate, rulesVersion, contentHash, updatedAt]
+      properties:
+        serverId:
+          type: string
+        versionId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+          format: int64
+          minimum: 1
+        businessDate:
+          type: string
+          format: date
+        rulesVersion:
+          type: string
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        updatedAt:
+          type: string
+          format: date-time
+    EconomyContentRotationIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - serverId
+        - businessDate
+        - rulesVersion
+        - algorithmVersion
+        - seed
+        - contentHash
+        - currentContentVersionId
+      properties:
+        serverId:
+          type: string
+        businessDate:
+          type: string
+          format: date
+        rulesVersion:
+          type: string
+        algorithmVersion:
+          type: integer
+          minimum: 1
+        seed:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        currentContentVersionId:
+          type: string
+          format: uuid
+    EconomyContentCurrent:
+      type: object
+      additionalProperties: false
+      required: [pointer, version, rotation]
+      properties:
+        pointer:
+          $ref: "#/components/schemas/EconomyContentPointer"
+        version:
+          $ref: "#/components/schemas/EconomyContentVersion"
+        rotation:
+          $ref: "#/components/schemas/EconomyContentRotationIdentity"
+    EconomyContentVersionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentVersion"
+    EconomyContentDraftList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentDraft"
+    EconomyContentDiffEntry:
+      type: object
+      additionalProperties: false
+      required: [path, kind, before, after]
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [Added, Removed, Changed]
+        before:
+          type: [string, "null"]
+        after:
+          type: [string, "null"]
+    EconomyContentDiff:
+      type: object
+      additionalProperties: false
+      required: [draftId, revision, items]
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentDiffEntry"
+    CreateEconomyContentDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [name, definition]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        basedOnVersionId:
+          type: [string, "null"]
+          format: uuid
+        definition:
+          $ref: "#/components/schemas/EconomyContentDefinition"
+    UpdateEconomyContentDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [definition]
+      properties:
+        definition:
+          $ref: "#/components/schemas/EconomyContentDefinition"
+    PublishEconomyContentRequest:
+      type: object
+      additionalProperties: false
+      required: [businessDate, reason, confirmation]
+      properties:
+        businessDate:
+          type: string
+          format: date
+        reason:
+          type: string
+          minLength: 8
+          maxLength: 512
+        confirmation:
+          type: string
+          const: PUBLISH ECONOMY CONTENT
+    RollbackEconomyContentRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedCurrentVersionId, reason, confirmation]
+      properties:
+        targetVersionId:
+          type: [string, "null"]
+          format: uuid
+        expectedCurrentVersionId:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          minLength: 8
+          maxLength: 512
+        confirmation:
+          type: string
+          const: ROLLBACK ECONOMY CONTENT
+    EconomyContentPublishResult:
+      type: object
+      additionalProperties: false
+      required: [version, pointer, versionCreated, pointerChanged, replayed]
+      properties:
+        version:
+          $ref: "#/components/schemas/EconomyContentVersion"
+        pointer:
+          $ref: "#/components/schemas/EconomyContentPointer"
+        versionCreated:
+          type: boolean
+        pointerChanged:
+          type: boolean
+        replayed:
+          type: boolean
+    EconomyContentRollbackResult:
+      type: object
+      additionalProperties: false
+      required: [pointer, previousVersionId, pointerChanged, replayed]
+      properties:
+        pointer:
+          $ref: "#/components/schemas/EconomyContentPointer"
+        previousVersionId:
+          type: string
+          format: uuid
+        pointerChanged:
+          type: boolean
+        replayed:
+          type: boolean
+    EconomyContentValidationFailure:
+      type: object
+      additionalProperties: false
+      required: [error, validation]
+      properties:
+        error:
+          $ref: "#/components/schemas/ApiError"
+        validation:
+          $ref: "#/components/schemas/EconomyContentValidationResult"
     ExtractionProductPrice:
       type: object
       additionalProperties: false
@@ -7421,6 +8576,7 @@ components:
       additionalProperties: false
       required:
         - productId
+        - sku
         - name
         - description
         - category
@@ -7428,14 +8584,24 @@ components:
         - price
         - deliverySummary
         - stockRemaining
+        - personalLimitRemaining
+        - serverStockRemaining
         - purchaseLimit
+        - globalStock
         - purchased
         - enabled
         - featured
+        - featuredRank
+        - contentVersionId
+        - contentHash
       properties:
         productId:
           type: string
           format: uuid
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 128
         name:
           type: string
         description:
@@ -7454,9 +8620,22 @@ components:
         stockRemaining:
           type: [integer, "null"]
           minimum: 0
-          description: Current implementation projects the remaining per-season purchase limit here.
+          description: Backward-compatible alias for personalLimitRemaining.
+        personalLimitRemaining:
+          type: [integer, "null"]
+          minimum: 0
+          description: Remaining per-season limit for the selected account.
+        serverStockRemaining:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          description: Remaining current-season stock shared by every account.
         purchaseLimit:
           type: [integer, "null"]
+          minimum: 1
+        globalStock:
+          type: [integer, "null"]
+          format: int64
           minimum: 1
         purchased:
           type: integer
@@ -7465,14 +8644,44 @@ components:
           type: boolean
         featured:
           type: boolean
+        featuredRank:
+          type: [integer, "null"]
+          minimum: 1
+        contentVersionId:
+          type: [string, "null"]
+          format: uuid
+        contentHash:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
     ExtractionCatalog:
       type: object
       additionalProperties: false
-      required: [revision, items]
+      required:
+        - revision
+        - contentVersionId
+        - contentHash
+        - businessDate
+        - rulesVersion
+        - rotation
+        - items
       properties:
         revision:
           type: string
           pattern: "^[a-f0-9]{64}$"
+        contentVersionId:
+          type: string
+          format: uuid
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        businessDate:
+          type: string
+          format: date
+        rulesVersion:
+          type: string
+          minLength: 1
+        rotation:
+          $ref: "#/components/schemas/EconomyContentRotationIdentity"
         items:
           type: array
           items:
@@ -7480,7 +8689,7 @@ components:
     CreateExtractionOrderRequest:
       type: object
       additionalProperties: false
-      required: [userId, productId, quantity]
+      required: [userId, productId, quantity, sku, contentVersionId, contentHash]
       properties:
         userId:
           $ref: "#/components/schemas/ExtractionUserId"
@@ -7491,6 +8700,16 @@ components:
           type: integer
           minimum: 1
           maximum: 99
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 128
+        contentVersionId:
+          type: string
+          format: uuid
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
     ExtractionOrder:
       type: object
       additionalProperties: false
@@ -7526,7 +8745,7 @@ components:
           maximum: 9007199254740991
         state:
           type: string
-          enum: [accepted, pending, delivering, succeeded, failed, uncertain, cancelled]
+          enum: [accepted, pending, delivering, succeeded, failed, partial, uncertain, cancelled, refunded]
         statusMessage:
           type: [string, "null"]
         createdAt:

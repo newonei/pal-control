@@ -157,14 +157,15 @@ $script:LoopbackHttpClient = [Net.Http.HttpClient]::new($loopbackHandler)
 $script:LoopbackHttpClient.Timeout = [TimeSpan]::FromSeconds(5)
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "helpers\synthetic-resource-catalog.ps1")
 $serviceRoot = Join-Path $repositoryRoot "services\control-api"
 $project = Join-Path $serviceRoot "PalControl.ControlApi.csproj"
-$apiAssembly = Join-Path $serviceRoot `
-    "bin\Release\net10.0\PalControl.ControlApi.dll"
 $dotnetExecutable = (Get-Command dotnet -ErrorAction Stop).Source
 $apiPort = Get-FreeTcpPort
 $testRoot = Join-Path $env:TEMP (
     "pal-control-boundary-smoke-" + [guid]::NewGuid().ToString("N"))
+$buildRoot = Join-Path $testRoot "build"
+$apiAssembly = Join-Path $buildRoot "PalControl.ControlApi.dll"
 $dataDirectory = Join-Path $testRoot "data"
 $stdout = Join-Path $testRoot "control-api.out.log"
 $stderr = Join-Path $testRoot "control-api.err.log"
@@ -172,12 +173,14 @@ $api = $null
 $baseUri = "http://127.0.0.1:$apiPort"
 
 try {
-    & dotnet build $project --configuration Release --no-restore | Out-Host
+    New-Item -ItemType Directory -Path $testRoot | Out-Null
+    & dotnet build $project --configuration Release --output $buildRoot `
+        --no-restore | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Control API Release build failed."
     }
+    Write-SyntheticResourceCatalog $buildRoot
 
-    New-Item -ItemType Directory -Path $testRoot | Out-Null
     $env:Urls = $baseUri
     $env:Palworld__OfficialRestApi__BaseUrl = "http://127.0.0.1:1/v1/api/"
     $env:Palworld__OfficialRestApi__Username = "admin"
@@ -202,6 +205,7 @@ try {
     # requires the production TOTP/reason checks on high-risk routes.
     $apiArguments = @(
         ('"{0}"' -f $apiAssembly),
+        "--contentRoot=$buildRoot",
         "--Security:DevelopmentMode=true",
         "--Security:StartupValidation:Strict=false",
         "--Security:AdminAuthentication:Enabled=true",
@@ -213,7 +217,7 @@ try {
         "--Security:AdminAuthentication:Principals:0:TotpSecretBase32=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
     )
     $api = Start-Process -FilePath $dotnetExecutable `
-        -ArgumentList $apiArguments -WorkingDirectory $serviceRoot `
+        -ArgumentList $apiArguments -WorkingDirectory $buildRoot `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr
     Wait-ForEndpoint "$baseUri/health/live" $api
@@ -222,6 +226,22 @@ try {
     $ready = Convert-ResponseJson $readyResponse "readiness endpoint"
     if ($readyResponse.StatusCode -ne 200 -or $ready.readReady -ne $true) {
         throw "Readiness was not HTTP 200 with readReady=true: $($readyResponse.Content)"
+    }
+
+    # The hosted initializer must publish the current weekly economy content
+    # before the API accepts traffic. Do not let a later catalog/player request
+    # hide a missing startup bootstrap by lazily creating the content here.
+    $startupContentResponse = Invoke-CapturedGet `
+        "$baseUri/api/v1/servers/local/economy-content/current"
+    $startupContent = Convert-ResponseJson $startupContentResponse `
+        "startup economy content endpoint"
+    if ($startupContentResponse.StatusCode -ne 200 -or
+        $startupContent.pointer.versionId -ne $startupContent.version.versionId -or
+        @($startupContent.version.definition.products).Count -ne 10 -or
+        @($startupContent.version.definition.resources).Count -ne 51 -or
+        @($startupContent.version.definition.exchangeZones).Count -ne 1 -or
+        @($startupContent.version.definition.tasks).Count -ne 6) {
+        throw "Startup did not atomically publish the complete Scheme A content set: $($startupContentResponse.Content)"
     }
 
     $settlementStatusResponse = Invoke-CapturedGet `
@@ -312,6 +332,11 @@ try {
     [pscustomobject]@{
         readyStatus = $readyResponse.StatusCode
         readReady = [bool]$ready.readReady
+        startupContentVersion = $startupContent.version.versionId
+        startupProducts = @($startupContent.version.definition.products).Count
+        startupResources = @($startupContent.version.definition.resources).Count
+        startupExchangeZones = @($startupContent.version.definition.exchangeZones).Count
+        startupTasks = @($startupContent.version.definition.tasks).Count
         settlementAdapter = $settlementStatus.adapter
         settlementProbeError = $settlementStatus.error.code
         purchaseWriteEnabled = [bool]$capabilities.writes.purchase.enabled

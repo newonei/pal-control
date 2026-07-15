@@ -186,6 +186,9 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
       const order = await createShopOrder({
         userId,
         productId: selectedProduct.productId,
+        sku: selectedProduct.sku,
+        contentVersionId: selectedProduct.contentVersionId,
+        contentHash: selectedProduct.contentHash,
         quantity,
         idempotencyKey: purchaseIdempotencyKey.current
       });
@@ -362,7 +365,8 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
                   </div>
                   <div className="extraction-product-tags">
                     {product.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}
-                    {product.purchaseLimit !== null ? <span>限购 {product.purchased}/{product.purchaseLimit}</span> : null}
+                    {product.personalLimitRemaining !== null ? <span>个人本周剩余 {product.personalLimitRemaining}</span> : null}
+                    {product.serverStockRemaining !== null ? <span>全服剩余 {product.serverStockRemaining}</span> : null}
                   </div>
                   <footer>
                     <div><strong>{formatNumber(product.price.amount)}</strong><span>{currencyName(product.price.currency)}</span></div>
@@ -498,15 +502,15 @@ function HistoryCard({ title, eyebrow, children }: { title: string; eyebrow: str
 }
 
 function productMaxQuantity(product: ShopProduct) {
-  const remainingLimit = product.purchaseLimit === null ? 99 : Math.max(0, product.purchaseLimit - product.purchased);
-  const remainingStock = product.stockRemaining === null ? 99 : Math.max(0, product.stockRemaining);
-  return Math.max(1, Math.min(99, remainingLimit, remainingStock));
+  const remainingLimit = product.personalLimitRemaining ?? 99;
+  const remainingStock = product.serverStockRemaining ?? 99;
+  return Math.max(0, Math.min(99, remainingLimit, remainingStock));
 }
 
 function productUnavailableReason(product: ShopProduct, overview?: ExtractionOverview) {
   if (!product.enabled) return "已下架";
-  if (product.stockRemaining !== null && product.stockRemaining <= 0) return "已售罄";
-  if (product.purchaseLimit !== null && product.purchased >= product.purchaseLimit) return "已达限购";
+  if (product.serverStockRemaining !== null && product.serverStockRemaining <= 0) return "全服库存已售罄";
+  if (product.personalLimitRemaining !== null && product.personalLimitRemaining <= 0) return "个人本周限购已用完";
   if (overview?.season.state !== "active") return "非销售期";
   if (overview.balances[product.price.currency] < product.price.amount) return "余额不足";
   return "";
@@ -547,17 +551,21 @@ function orderStateName(state: ShopOrder["state"]) {
     delivering: "发货中",
     succeeded: "已到账",
     failed: "失败",
+    partial: "部分到账",
     uncertain: "待核验",
-    cancelled: "已取消"
+    cancelled: "已取消",
+    refunded: "已退款"
   };
   return names[state];
 }
 
 function orderStateHelp(state: ShopOrder["state"]) {
   if (state === "succeeded") return "游戏内物品已回读确认";
+  if (state === "partial") return "部分物品已确认到账，等待管理员核对差额";
   if (state === "uncertain") return "请核对背包，不要重复购买";
   if (state === "failed") return "未发货，等待系统退款或人工复核";
   if (state === "cancelled") return "订单已取消";
+  if (state === "refunded") return "款项已退回，请在资金流水中核对入账";
   return "正在排队投递至当前周档角色";
 }
 

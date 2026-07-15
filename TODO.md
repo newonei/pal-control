@@ -6,7 +6,7 @@
 
 当前玩法更准确的定位是：
 
-> **Palworld 常驻周世界 + 网页战备商城 + 固定资源兑换点。**
+> **Palworld 常驻周世界 + 网页战备商城 + 版本化资源兑换点。**
 
 项目已通过 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md) 正式采用 **方案 A：周世界资源经济服**。它已经具备一条本机开发服可运行的经济闭环，以下行为是确定的产品规则，不再作为“搜打撤缺失功能”追踪：
 
@@ -23,18 +23,20 @@
 
 1. 公网 Steam 服先经 Steam OpenID 建立短时待绑定身份；可信好友服可显式使用平台 UserId fallback。两种模式都由本机受限 RCON `/send` 向在线角色私发 8 位验证码。
 2. 验证码成功且实时确认当前 `worldId + PlayerUID` 后建立玩家门户会话。首次访问创建跨周账户；1000 商域币/300 战备券只属于 `legacy-v1` 开发兼容配置，正式奖励必须通过版本化活动显式领取。
-3. 玩家浏览 5 个硬编码战备商品；商品基础价格每天按确定性种子调整到 90%–110%。
-4. 购买时先在 SQLite 提交扣款/订单，再以确定性 key 接入同库 PalDefender outbox 发货；两者是可恢复的两个事务而非一次原子提交。确定失败退款，部分或无法证明的结果进入人工对账，派发后绝不盲重发。
-5. 玩家回到常驻 Palworld 周世界自行采集、战斗、生产、交易和积累资源。
-6. 玩家门户地图每 5 秒更新位置；默认配置只有 1 个开发服资源兑换点。
-7. 进入资源兑换区后，服务端间隔 2 秒进行两次位置采样。
-8. 系统读取 `Items`、`Food`、`DropSlot`，对约 21 种白名单资源的**全部数量**生成 30 秒报价；当前不能选择只出售一部分。
-9. 玩家确认后，Control API 以持久 run key 向 Native `inventory.consume` 发送一次完整快照消费命令；Production 不允许 RCON `/delitems` fallback。
-10. 只有 Native 逐行差值、完整 after 快照和聚合回读全部证明实际扣物与报价一致时，系统才在 SQLite 单事务内唯一增加战备券；明确失败不入账，`uncertain` 不重试并进入人工对账。当前能力仍为 experimental，真实持久化验收前 Production 闸门保持关闭。
-11. 玩家使用战备券继续购买补给，形成“采集/战斗 -> 资源出售 -> 战备采购”的循环。
-12. 周档结束后，管理员先运行默认 plan-only 的换档脚本；显式 `-Execute` 才会按持久步骤执行游戏备份、经济快照/复核、停服、新世界探针和赛季提交，脚本不会移动或删除旧世界。
+3. 玩家门户用真实订单、位置、报价、兑换和账本状态展示 5 步新手引导；当前内容版本还提供 3 个日任务和 3 个周任务，只累计服务端可证明的经济事件。
+4. 本机授权资源目录包含全部候选 ItemID 时，玩家浏览 10 个版本化战备商品；分类、标签、推荐位、个人限购和可选全服库存都是显式字段，商品基础价格每天按确定性种子调整到 90%–110%。
+5. 购买提交 `contentVersionId + contentHash + SKU`；旧 offer 稳定返回 `OFFER_NOT_AVAILABLE`。订单先在 SQLite 提交扣款，再以确定性 key 接入同库 PalDefender outbox 发货；两者是可恢复的两个事务而非一次原子提交。确定失败退款，部分或无法证明的结果进入人工对账，派发后绝不盲重发。
+6. 玩家回到常驻 Palworld 周世界自行采集、战斗、生产、交易和积累资源。
+7. 玩家门户地图每 5 秒更新位置并展示开放时间、路线与收益倍率；当前内置内容仍只有 1 个开发服资源兑换点。
+8. 进入开放资源兑换区后，服务端间隔 2 秒进行两次位置采样。
+9. 系统读取 `Items`、`Food`、`DropSlot`，对当前内容中最多 51 种、且真实存在于授权目录的白名单资源的**全部数量**生成 30 秒报价；当前不能选择只出售一部分。
+10. 玩家确认后，Control API 以持久 run key 向 Native `inventory.consume` 发送一次完整快照消费命令；Production 不允许 RCON `/delitems` fallback。
+11. 只有 Native 逐行差值、完整 after 快照和聚合回读全部证明实际扣物与报价一致时，系统才在 SQLite 单事务内唯一增加战备券；明确失败不入账，`uncertain` 不重试并进入人工对账。当前能力仍为 experimental，真实持久化验收前 Production 闸门保持关闭。
+12. 处理中订单与兑换在页面可见时每 3 秒更新并在终态停止；报价实时倒计时，到期后客户端与服务端均拒绝提交。退款、取消、部分成功和人工核对显示不同处置提示。
+13. 玩家使用战备券继续购买补给，任务进度与奖励按冻结内容证据唯一结算，形成“采集/战斗 -> 资源出售 -> 战备采购”的循环。
+14. 周档结束后，管理员先运行默认 plan-only 的换档脚本；显式 `-Execute` 才会按持久步骤执行游戏备份、经济快照/复核、停服、新世界探针和赛季提交，脚本不会移动或删除旧世界。
 
-26 个统一 contract/integration 脚本已经覆盖身份、商城、发货、兑换、并发、故障边界、恢复、Windows 配置保留和换档客户端；真实游戏证据仍主要是早期一次商城发货与一次 5 个皮革 RCON 历史联调，不能替代当前 Native 持久化、完整周档和生产回调验收。
+30 个统一 contract/integration 脚本已经覆盖身份、商城、发货、兑换、版本化内容、内容投影原子性、可靠任务、经济仿真、并发、故障边界、恢复、Windows 配置保留和换档客户端；真实游戏证据仍主要是早期一次商城发货与一次 5 个皮革 RCON 历史联调，不能替代当前 Native 持久化、完整周档和生产回调验收。
 
 ## 当前已经具备的基础
 
@@ -44,9 +46,11 @@
 | --- | --- | --- |
 | 玩家入口 | 可选 Steam OpenID + 游戏内 8 位验证码、本周 PlayerUID 绑定、HttpOnly/SameSite Cookie、CSRF、Origin 白名单、用户/IP/并发限流 | 已实现；OpenID state、待绑定身份、会话和限流仍是进程内状态，正式域名回调待验收 |
 | 账户与钱包 | SQLite 事件库、双货币、不可负余额、幂等账本、退款与人工调账 | 单机基础可用 |
-| 商城 | 5 个硬编码商品、个人周限购、先扣款、PalDefender 逐物品结构化 receipt、确定失败退款、partial/`uncertain` 不重发 | 单机闭环已具备；真实 PalDefender 回执语义仍需按固定版本验收 |
-| 资源兑换 | 1 个固定兑换点、位置双采样、30 秒完整 Native 报价快照、约 21 种白名单资源、原子扣物与唯一入账 | 代码/假桥闭环完成；真实保存/重启/重登前保持 fail-closed |
-| 内容刷新 | 每个业务日按确定性种子对基础价格做 90%–110% 调整 | 只有价格变化，不是完整日轮换 |
+| 商城 | 10 个目录过滤的版本化商品候选、显式分类/标签/推荐位、个人周限购、可选全服库存、先扣款、逐物品结构化 receipt、旧 offer 拒绝 | 单机闭环与 100 路库存并发自动化已具备；真实 PalDefender 回执语义仍需按固定版本验收 |
+| 资源兑换 | 1 个内容定义兑换点、位置双采样、开放窗口/路线/倍率、30 秒完整 Native 报价快照、51 个目录过滤的白名单候选、原子扣物与唯一入账 | 代码/假桥闭环完成；第二个真实兑换区与真实保存/重启/重登仍未验收 |
+| 内容与轮换 | SQLite 草稿/diff/严格校验、不可变版本、current pointer 与完整商品投影同事务激活、发布/回滚、营业日/rules/hash 证据、90%–110% 日价格与旧 offer 拒绝 | 第 N 个商品故障、重启重试、20 次激活与回滚已有自动化；仍只有 1 个默认兑换区 |
+| 可靠任务 | 3 个日任务、3 个周任务；只使用成功兑换、指定 ItemID/价值、成功订单和货币消费；实例与奖励固定到内容证据 | 20 次重放、跨重启恢复和唯一钱包/积分奖励通过；不开放击杀/采集/死亡/PvP/热点自报事件 |
+| 玩家体验 | 5 步新手引导、活动显式领取、任务进度、3 秒终态轮询、报价倒计时、异常终态与下一步提示 | 前端代码/单测与服务端终态契约具备；手机、键盘、焦点和屏幕阅读器真实 E2E 未完成 |
 | 周换档 | 持久化阶段状态机、确定性 step key、默认 plan-only 受控客户端、经济快照/RPO/未决交易阻断、expiry/reward 幂等框架 | 自动化故障恢复与运维客户端已具备；三次真实演练仍未完成 |
 | Native | dev36 `inventory.consume.experimental` 已支持完整槽元数据、同 Tick 全单校验/回滚和安全清空普通静态槽位，Control API 已接入 | 未完成真实保存/重启/重登验证，不能提升为 stable |
 | 存档 | 游戏稳定快照、经济一致性快照、manifest/SHA-256、staging 复核与恢复后默认关门 | 缺少世界/经济各一次真实独立恢复和生产切换演练 |
@@ -66,9 +70,8 @@
 
 ```text
 quoted -> expired | cancelled | consuming
-consuming -> removed | definitively_failed | uncertain
-uncertain -> removed | definitively_failed | manual_review
-manual_review -> removed | definitively_failed
+consuming -> removed | failed | uncertain
+uncertain -> removed | failed
 removed -> credited -> settled
 ```
 
@@ -203,13 +206,13 @@ removed -> credited -> settled
 
 - [x] 单机阶段使用同一个 `extraction-commerce.db` 承载账户、钱包、订单、run、delivery evidence/receipt、PalDefender 发货 outbox、管理审计和赛季/换档调度，并为各组件登记版本化 migration。购买事务与 PalDefender command 接收仍是同库的两个事务，由持久 delivery/receipt 和确定性 key 恢复衔接，不能宣称跨步骤原子提交。
 - [x] 经济 run/evidence 已停止整文件 JSON 权威写入；PalDefender 发货命令已从 JSONL/内存权威迁移为 SQLite 命令投影和不可变事件。旧 JSONL 只在一次性事务导入时读取，成功后改名保留；冲突、篡改或导入失败会使启动失败。
-- [ ] 公告、游戏内通知和 save 等非经济命令审计仍使用追加式 JSONL；为其制定保留/归档策略，或在需要统一查询与多实例 worker 前迁移到相应持久存储。
+- [x] 公告、游戏内通知和 save 等非经济命令审计仍使用追加式 JSONL；现已登记完整通道注册表，活动文件在仍为权威期间只追加、不截断/轮转/自动删除，一致性经济快照按原字节生成带用途、权威级别、SHA-256 和保留参数的内层归档清单。未知、嵌套、半行、损坏或重解析 JSONL 会使快照 fail closed；归档只随整个快照进入 plan-only 保留候选，不能单独删除。需要统一查询或多实例 worker 时再迁移到相应持久存储。
 - [x] 玩家登录与会话撤销写审计；P0 可在重启后强制全部玩家重新登录。若未来持久化会话，只保存 token hash，不保存原始凭据。
 - [x] 提供一致性经济快照，覆盖 SQLite/WAL、命令状态、run、delivery、闸门和调度状态。
 - [x] 提供恢复到 staging、hash 校验、worldId/账本/未决交易复核后再切换的工具。
 - [x] 恢复后经济默认关闭，直到全部门禁重新通过。
 
-自动化证据：身份安全契约覆盖 token hash、进程重启失效、登录/撤销脱敏审计；delivery receipt/outbox harness 覆盖 100 路并发、容量、server+key 冲突、租约崩溃恢复、`dispatched` 不重发、死信、不可变事件、终态不可逆、JSONL 幂等迁移和迁移失败无部分写入；continuity harness 覆盖 SQLite 在线备份、命令与 side-state 一致性、manifest/hash/worldId/账本/未决状态复核、staging 恢复及恢复后双熔断和维护闸门默认关闭，并覆盖损坏、N-1 manifest/schema 兼容和多个故障注入点。
+自动化证据：身份安全契约覆盖 token hash、进程重启失效、登录/撤销脱敏审计；delivery receipt/outbox harness 覆盖 100 路并发、容量、server+key 冲突、租约崩溃恢复、`dispatched` 不重发、死信、不可变事件、终态不可逆、JSONL 幂等迁移和迁移失败无部分写入；continuity harness 覆盖 SQLite 在线备份、命令与 side-state 一致性、完整 JSONL 通道注册、活动文件零改写、归档内外双清单/hash、未知/半行/篡改 fail-closed、bundle 级 plan-only 保留、manifest/worldId/账本/未决状态复核、staging 恢复及恢复后双熔断和维护闸门默认关闭，并覆盖损坏、N-1 manifest/schema 兼容和多个故障注入点。
 
 仍未完成：世界备份与经济备份的真实独立恢复演练、从已发布 N-1 包执行迁移失败后的真实回退，以及 staging 人工复核后的生产切换尚未验收。因此下列验收标准仍按整体未完成处理。
 
@@ -261,11 +264,15 @@ removed -> credited -> settled
 
 ### P1-01 数据驱动的内容配置 `[DESIGN][BE][WEB]`
 
-- [ ] 将商品、价格、限购、可选的全服库存、回收目录、资源兑换点和任务从代码/单机配置迁到版本化内容定义；未配置全服库存时只执行个人限购。
-- [ ] 首发达到 10–20 个商品、50–100 个可售资源和至少 2 个实测资源兑换区。
-- [ ] 管理员可创建草稿、查看 diff、校验、原子发布和回滚到上一完整版本。
-- [ ] 分类、标签和推荐位使用显式字段，不再通过 SKU 字符串推断。
-- [ ] 区分“服务器库存”和“个人剩余限购”，修正玩家端文案。
+- [x] 将商品、价格、限购、可选的全服库存、回收目录、资源兑换点和任务迁到版本化内容定义；未配置全服库存时只执行个人限购。
+- [x] 内置方案 A 定义达到 10 个商品和 51 个可售资源候选；启用 `ExtractionMode` 时，启动初始化器在 HTTP 流量进入前校验本机授权目录、过滤不存在的 ItemID 并原子激活首版，目录缺失或非法会启动失败。
+- [ ] 增加并在真实 Palworld 坐标/开放边界中验收至少第 2 个资源兑换区；当前自动化只有 1 个默认区，不能用第二份 mock 配置代替实测。
+- [x] 管理员可创建草稿、查看 diff、严格校验、发布不可变版本并回滚 current pointer；控制台要求维护排空、revision、TOTP、审计原因、确认短语与幂等键。
+- [x] 发布与回滚把 current pointer 和完整商品投影放在同一 SQLite 事务；第 N 个商品注入故障时 pointer 与可见目录都保持整套旧版，重启后用原请求可安全重试。
+- [x] 分类、标签和推荐位使用显式字段，不再通过 SKU 字符串推断。
+- [x] 区分“全服剩余库存”和“个人本周剩余限购”；未配置全服库存时不显示虚假服务器库存，100 路并发不会超卖且确定退款会释放库存。
+
+尚未把本项整体标为完成：内容版本与完整商品投影的原子激活已有代码和自动化，但仍缺少第 2 个真实兑换区及其 Palworld 坐标/开放边界实测。运维发布后仍必须按运行手册核对版本证据再开闸。
 
 验收标准：
 
@@ -275,15 +282,18 @@ removed -> credited -> settled
 
 ### P1-02 真正的日轮换、任务与热点 `[DESIGN][BE][WEB][NATIVE]`
 
-- [ ] rotation 包含 `rulesVersion`、业务日唯一键、随机种子、content hash 和 current pointer。
-- [ ] 原子发布整套 offer；失败时继续展示上一完整版本，不出现半套新价格。
-- [ ] 初版任务只使用当前能可靠证明的事件：成功资源兑换、结算指定 ItemID 或价值、完成商城订单、消耗指定货币。
-- [ ] 击杀、采集、进入热点、死亡和 PvP 任务必须先接入权威 Native/PalDefender 事件，定义事件幂等键、来源和重放语义后再开放。
-- [ ] 增加至少 3 个日任务池、3 个周任务池；同一事件重复投递不能重复推进，同一奖励只能入账一次。
+- [x] rotation 包含 `rulesVersion`、业务日唯一键、确定性种子、content hash 和 current pointer；商品目录与任务实例携带对应服务端版本证据。
+- [x] 原子发布/回滚整套商品 offer；第 N 个商品失败时 current pointer 与可见目录继续保持上一完整版本，不出现半套新价格，重启重试和旧 offer 拒绝已有自动化。
+- [x] 初版任务只使用当前能可靠证明的事件：成功资源兑换、结算指定 ItemID 或价值、完成商城订单、消耗指定货币；失败、partial、`uncertain`、退款和客户端自报不推进。
+- [x] 当前任务 schema、校验器和玩家 API 未开放击杀、采集、进入热点、死亡和 PvP 事件；未来只有接入权威 Native/PalDefender 事件并定义幂等键、来源和重放语义后才能新增。
+- [x] 内置 3 个日任务、3 个周任务；实例冻结完整定义/奖励与内容证据，同一权威事件 20 次投递和跨重启重放不重复推进，钱包和积分奖励各最多一笔。
 - [ ] 每天轮换资源热点和开放资源兑换点；热点必须真实改变服务端收益、掉落或价格倍率，地图显示开放时间、路线和收益/风险倍率。
 - [ ] 任意资源兑换开放时段至少有一个可用兑换点；若所有兑换点关闭，服务端必须拒绝新报价并显示下一次开放时间。
 - [ ] 规则明确区域在报价期间关闭时允许原报价完成还是立即失效，并对关闭边界和活动报价做自动化测试。
-- [ ] 旧 offer 提交稳定返回 `OFFER_NOT_AVAILABLE`，重复刷新不会重复任务或奖励。
+- [x] 旧商城 offer 提交稳定返回 `OFFER_NOT_AVAILABLE`；重复刷新/事件重放不会重复创建任务实例或奖励。
+- [ ] 增加完整资源报价轮换黑盒：在内容 A 下报价、切换 current pointer 到 B 后结算必须返回 `QUOTE_CONTENT_CHANGED`，并证明 Native 未派发、背包/钱包/账本/run 均无扣物入账副作用；当前已有版本/hash 比较单测与服务接线契约，但尚未跨真实 pointer 执行该场景。
+
+当前服务端已能按内容定义计算兑换区开放状态、下一次开放时间、grace、热点和收益倍率，并把路线/倍率投影到地图与最终报价；但默认只有 1 个全天开放区，尚不能证明“每日轮换多个热点/开放区”和最后一个兑换点的完整边界，因此相关子项保持未完成。
 
 验收标准：
 
@@ -294,11 +304,14 @@ removed -> credited -> settled
 ### P1-03 经济平衡与反套利 `[DESIGN][DATA]`
 
 - [ ] 为每个可售物品按货币拆分组合商品的影子成本，建立“购买 → 拆包/制作/转换 → 回收”的完整有向图；发布前检测所有可达套利环，而不是只比较单品回收价与最低商品价。
-- [ ] 目录外物品默认不可售；按物品类别配置回收折价目标和风险缓冲，不用统一 50% 规则掩盖双货币或组合商品成本。
-- [ ] 对至少 100 个模拟玩家运行完整一周经济仿真。
-- [ ] 定义货币产出/消耗、余额中位数、头部余额、商品购买率和资源兑换收益目标区间。
+- [x] 目录外物品默认不可售；发布校验会按真实数量、结算取整和最高有效区域倍率阻断可证明的同币种“购买商品 → 直接回售发放物”正收益路径，并报告具体 SKU、ItemID、倍率和利润。跨币种、目录外发放物及缺少制作图的路径明确标为不可判定，不伪装成安全。
+- [ ] 按物品类别配置回收折价目标和风险缓冲，并把双币影子成本纳入发布决策；当前逐 ItemID 固定回收值和直接回售闸门不能替代该模型。
+- [x] 使用固定种子对 100 个模拟玩家运行 7 个完整业务日；输入、决策和输出可复现。
+- [x] 仿真输出逐币种产出/消耗、余额 P50/P95、商品购买率和资源兑换收益，并对照文档化的首发目标区间。
 - [ ] 正式配置取消开发服默认 300 战备券，改为教学任务或小额新手补贴。
 - [ ] 连续两个周档输出通胀、产销、热门商品和异常账户报告。
+
+直接回售闸门与一周仿真只是可证明的第一层保护；内容 schema 仍没有制作/加工配方、拆包损耗、玩家交易价格和双币影子汇率，不能勾选完整有向图或宣称已经消除所有套利。
 
 验收标准：
 
@@ -320,11 +333,11 @@ removed -> credited -> settled
 
 ### P1-05 玩家门户实时状态与异常体验 `[WEB][BE]`
 
-- [ ] 使用 SSE/WebSocket 或 2–5 秒有界轮询更新订单和资源兑换终态，终态后停止。
-- [ ] 报价显示实时倒计时，到期后自动禁用结算按钮。
-- [ ] 区分退款、取消、部分成功和人工核对；`uncertain` 明确提示不要重复提交。
-- [ ] 对维护、离线、版本不匹配、队列拥堵和会话过期给出明确下一步。
-- [ ] 增加首次登录、购买、前往资源兑换点、确认整单出售和账本查看的新手引导。
+- [x] 页面可见且存在处理中订单/资源兑换时每 3 秒有界轮询，所有记录进入终态后停止；没有把 `uncertain` 当成可自动重试状态。
+- [x] 报价显示秒级实时倒计时，到期或时间戳无效时 fail-closed 并自动禁用结算按钮，服务端同样拒绝过期报价。
+- [x] 区分退款、取消、部分成功和人工核对；`partial/uncertain` 明确提示不要重复购买或提交。
+- [x] 对维护、角色离线、版本不匹配、队列拥堵、旧 offer、兑换区关闭、全服售罄和会话过期给出明确下一步。
+- [x] 增加登录绑定、购买、前往资源兑换点、确认整单出售和账本查看的 5 步新手引导，完成状态来自真实会话、订单、位置/报价、兑换和账本。
 - [ ] 完成手机端、键盘、焦点和屏幕阅读器 E2E。
 
 验收标准：
@@ -334,6 +347,7 @@ removed -> credited -> settled
 
 ### P1-06 完整运营工作台 `[WEB][BE][OPS]`
 
+- [x] 增加版本化内容控制台：当前版本/完整 hash、草稿、revision 冲突恢复、JSON 编辑、diff、严格校验、不可变历史、发布和回滚；高风险操作显示维护/排空要求、确认短语、TOTP 与审计原因。
 - [ ] 展示全局订单、资源兑换、`uncertain`、outbox、闸门、世界、版本和备份状态。
 - [ ] 支持证据查看、人工对账、调账、换档阶段、审批和审计检索。
 - [ ] 高风险操作展示 before/after、确认短语和授权要求。
@@ -388,11 +402,13 @@ removed -> credited -> settled
 3. 分别完成世界备份与经济备份的真实恢复，再连续执行 3 次完整周换档；新赛季产生交易后验证系统拒绝自动回滚旧世界。
 4. 在正式 HTTPS 域名完成 Steam OpenID、Caddy 回调日志跳过、Cookie、代理头和重放黑盒验收；RCON `/send` 仍只在本机受限通道送达验证码。
 5. 由 5–10 名玩家运行完整 7 天，并由不同于实现者的人复核余额、重复发货、`uncertain` 对账和恢复证据。
-6. 上述 P0 外部证据通过后，再进入 P1 内容扩充、经济仿真和运营工作台。
+6. 上述 P0 外部证据通过后，再完成 P1 剩余的第二兑换区、完整套利图、真实指标和运营工作台；已落地的内容版本/投影原子性、可靠任务和仿真工具不能替代真实验收。
 
 ## 全局完成定义
 
-任何 TODO 只有同时满足以下条件才能勾选：
+子项前的 `[x]` 只表示该句所述的仓库实现已有对应代码和自动化证据，不表示整节完成，更不表示已经可对公网开放。包含真实 Palworld、生产域名、多人周档、独立恢复或外部复核的子项，只有取得对应外部证据后才能勾选；一个 P0/P1 章节只有其所有适用子项和验收标准都满足，才能标记为整体完成。
+
+整体完成还必须同时满足：
 
 - 代码、配置、数据迁移与回滚路径均已提交；
 - 单元、契约、集成/E2E 和相关故障注入自动通过；
@@ -403,17 +419,23 @@ removed -> credited -> settled
 
 ## 关键审计证据
 
-- 当前原型定位与公开服硬门槛：`extraction-mode/README.md:41-71`
+- 当前原型定位与公开服硬门槛：`extraction-mode/README.md` 的“当前可用边界”和“上线前仍然必须完成”章节
 - 旧版单次真实购买/RCON 皮革兑换仅作为历史开发证据，不能替代当前 Native 持久化验收：`extraction-mode/docs/05-实施阶段与验收.md`
-- 当前初始货币与唯一资源兑换点：`services/control-api/appsettings.json` 中的 `InitialMarketCoin`、`InitialSeasonVoucher` 与 `ExtractionZones`
-- 5 个硬编码商品与懒触发调价：`services/control-api/Infrastructure/ExtractionModeCoordinator.cs` 中的 `SeedProducts` 与 `EnsureDailyRotationAsync`
+- 当前初始货币与默认单一资源兑换点：`services/control-api/appsettings.json` 中的 `InitialMarketCoin`、`InitialSeasonVoucher` 与 `ExtractionZones`
+- 10 个商品、51 个可售资源、1 个目录过滤兑换区和 3 日/3 周任务的内置方案 A 内容：`services/control-api/Content/EconomyContentDefaults.cs`
+- 草稿、规范 hash、diff、严格校验、不可变版本、current pointer、发布/回滚和旧 offer 拒绝：`services/control-api/Content/EconomyContentModels.cs`、`EconomyContentDefinitionValidator.cs`、`SqliteEconomyContentStore.cs`、`EconomyContentRuntimeService.cs` 与 `EconomyContentEndpoints.cs`
+- 内容自动化：`tests/content-definitions/` 覆盖 20 次准备/发布、严格校验与重启；`tests/content-projection-atomicity/` 覆盖第 N 商品故障、pointer 与完整目录同事务、重启重试、20 次激活、回滚、旧 offer、全服库存与订单商品身份；`apps/console-web/src/features/content/` 覆盖管理员工作台与请求契约
+- 商品显式分类/标签/推荐位、个人/全服库存和内容证据冻结：`services/control-api/Extraction/ExtractionModels.cs`、`ExtractionCommerceService.cs` 与 `tests/economy-invariants/`
+- 可靠任务实例、权威事件、唯一钱包/积分奖励和恢复 worker：`services/control-api/Content/ReliableTaskRuntimeService.cs`、`SqliteReliableTaskStore.cs`、`ReliableTaskProjectionRecoveryWorker.cs` 与 `tests/reliable-tasks/`
+- 直接回售套利发布闸门和固定种子 100 玩家 × 7 日仿真：`services/control-api/Content/EconomyContentDefinitionValidator.cs`、`tests/economy-balance-guard/`、`tools/economy-simulator/` 与 `docs/economy-balance-guard.md`
 - `PlayerUID` 本周绑定、历史与双向唯一约束：`services/control-api/Extraction/JsonlExtractionRepository.cs`、`services/control-api/Infrastructure/ExtractionModeCoordinator.cs`
 - 当前 `run` 的报价/扣物/结算状态、revision、lease 与 CAS：`services/control-api/Infrastructure/ExtractionRunStore.cs`
 - 技术状态到玩家资源兑换文案的映射：`apps/player-web/src/runState.ts` 中的 `resourceExchangeStateLabel`
 - Native 完整快照扣物、持久化回执、内部关键区超时、唯一 credit 与保守恢复：`services/control-api/Infrastructure/ExtractionSettlementService.cs`、`services/control-api/Infrastructure/ExtractionNativeInventoryAdapter.cs`
+- Native 报价使用完整三容器规范快照 hash；显式 Development/RCON 兼容报价也绑定本次全部白名单行而不再使用静态 LootCatalog hash：`services/control-api/Infrastructure/ExtractionSettlementService.cs`
 - Native consume 当前仍为 experimental：`packages/contracts/bridge/inventory.consume.md`
 - 商城发货逐物品结构化 receipt、跨重启幂等与 partial/uncertain 对账：`services/control-api/Infrastructure/ExtractionDeliveryWorker.cs`、`services/control-api/Infrastructure/ExtractionDeliveryReceipts.cs`
 - 玩家门户会话只保存进程内 token hash，重启全部失效；封禁与异常登录审计持久化：`services/control-api/Infrastructure/PlayerPortalSessionRegistry.cs`、`services/control-api/Infrastructure/PlayerIdentitySecurity.cs`
 - Control API 管理 API 的 API Key/RBAC/TOTP 与持久审计：`services/control-api/Infrastructure/AdminSecurity.cs`、`services/control-api/Infrastructure/AdminAudit.cs`
-- 玩家端状态与刷新逻辑：`apps/player-web/src/Portal.tsx`、`apps/player-web/src/runState.ts` 与 `apps/player-web/src/api.ts`
+- 玩家端 5 步引导、任务、活动、3 秒轮询、报价倒计时和异常指引：`apps/player-web/src/Portal.tsx`、`liveStatus.ts`、`runState.ts`、`api.ts` 与 `apps/player-web/tests/`
 - 当前自动测试与 Windows GitHub Actions：`.github/workflows/ci.yml`、`tests/run-tests.ps1`、`tests/settlement-saga/`、`tests/contract/`、`tests/integration/`

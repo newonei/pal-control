@@ -19,6 +19,7 @@ Directory.CreateDirectory(root);
 try
 {
     await VerifyReceiptStoreAsync(Path.Combine(root, "receipt-store"));
+    await VerifyOrderOutcomeProjectionAsync(Path.Combine(root, "order-outcome-projection"));
     VerifyGrantedItemsParser();
     await VerifyGrantAdapterAsync(Path.Combine(root, "grant-adapter"));
     await VerifyQueueHardCapacityAsync(Path.Combine(root, "queue-capacity"));
@@ -49,6 +50,97 @@ finally
     {
         // Windows may briefly retain SQLite or event-log handles after process teardown.
     }
+}
+
+static async Task VerifyOrderOutcomeProjectionAsync(string directory)
+{
+    var store = new ExtractionDeliveryReceiptStore(directory);
+    var delivery = CreateDelivery(
+        "order-outcome-player",
+        [new ShopItemGrant("Partial_Item", 5)]);
+    var registration = await store.RegisterAsync(
+        delivery,
+        GameVersion,
+        AdapterVersion,
+        CancellationToken.None);
+    var acknowledgedAt = registration.Request.CreatedAt.AddSeconds(1);
+    var partialReceipt = new ExtractionDeliveryReceiptV1(
+        ExtractionDeliveryReceiptContract.SchemaVersion,
+        registration.Request.DeliveryId,
+        registration.Request.IdempotencyKey,
+        registration.Request.RequestHash,
+        registration.Request.ResultId,
+        registration.Request.ServerId,
+        registration.Request.PlayerUid,
+        registration.Request.WorldId,
+        registration.Request.GameVersion,
+        registration.Request.AdapterVersion,
+        registration.Request.CommandVersion,
+        acknowledgedAt,
+        [new ExtractionDeliveryReceiptItem(
+            "Partial_Item",
+            5,
+            2,
+            Guid.NewGuid(),
+            ExtractionDeliveryReceiptItemResult.Partial,
+            acknowledgedAt)],
+        ExtractionDeliveryReceiptOutcome.Partial,
+        acknowledgedAt);
+    await store.SaveReceiptAsync(partialReceipt, CancellationToken.None);
+
+    var now = DateTimeOffset.UtcNow;
+    var order = new ShopOrder(
+        delivery.OrderId,
+        Guid.NewGuid(),
+        Guid.NewGuid(),
+        delivery.ServerId,
+        delivery.PlayerIdentifier,
+        [new ShopOrderLine(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "PARTIAL-ITEM",
+            "Partial item",
+            1,
+            ExtractionCurrency.MarketCoin,
+            10,
+            10,
+            delivery.Items)],
+        [new ShopOrderCharge(ExtractionCurrency.MarketCoin, 10)],
+        ShopOrderState.DeliveryUncertain,
+        delivery.DeliveryId,
+        delivery.Attempt,
+        "purchase-outcome-projection-0001",
+        "delivery-receipts-harness",
+        "order outcome protocol",
+        now,
+        now,
+        delivery.PlayerUid,
+        delivery.WorldId);
+
+    var projected = await ExtractionModeEndpoints.OrderDtosAsync(
+        [order],
+        store,
+        CancellationToken.None);
+    var partial = JsonSerializer.SerializeToNode(projected.Single())!.AsObject();
+    Assert(partial["state"]?.GetValue<string>() == "partial" &&
+           partial["statusMessage"]?.GetValue<string>().Contains("部分物品到账", StringComparison.Ordinal) == true,
+        "A DeliveryUncertain order with a persisted Partial receipt was not projected as partial.");
+
+    var uncertain = JsonSerializer.SerializeToNode(
+        ExtractionModeEndpoints.OrderDto(order))!.AsObject();
+    var refunded = JsonSerializer.SerializeToNode(
+        ExtractionModeEndpoints.OrderDto(
+            order with { State = ShopOrderState.Refunded },
+            partialReceipt))!.AsObject();
+    var accepted = JsonSerializer.SerializeToNode(
+        ExtractionModeEndpoints.OrderDto(
+            order with { State = ShopOrderState.PendingDelivery }))!.AsObject();
+    Assert(uncertain["state"]?.GetValue<string>() == "uncertain",
+        "An uncertain order without a receipt did not remain uncertain.");
+    Assert(refunded["state"]?.GetValue<string>() == "refunded",
+        "A refunded order was confused with a cancelled order.");
+    Assert(accepted["state"]?.GetValue<string>() == "accepted",
+        "A newly created order without a receipt did not preserve the accepted DTO contract.");
 }
 
 static async Task VerifyReceiptStoreAsync(string directory)

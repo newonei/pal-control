@@ -174,7 +174,13 @@ public sealed record ShopProduct(
     long Revision,
     string UpdatedBy,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string Category = "general",
+    IReadOnlyList<string> Tags = null!,
+    int? FeaturedRank = null,
+    long? GlobalStock = null,
+    Guid? ContentVersionId = null,
+    string? ContentHash = null);
 
 public sealed record ShopProductDefinition(
     string Sku,
@@ -186,7 +192,42 @@ public sealed record ShopProductDefinition(
     int? PurchaseLimitPerSeason,
     bool Active,
     DateTimeOffset? AvailableFrom,
-    DateTimeOffset? AvailableUntil);
+    DateTimeOffset? AvailableUntil,
+    string Category = "general",
+    IReadOnlyList<string> Tags = null!,
+    int? FeaturedRank = null,
+    long? GlobalStock = null,
+    Guid? ContentVersionId = null,
+    string? ContentHash = null);
+
+/// <summary>
+/// Commits one immutable content version's complete shop projection together
+/// with the content-current pointer compare-and-swap.
+/// </summary>
+public sealed record ContentProductProjectionActivation(
+    string ServerId,
+    Guid VersionId,
+    long VersionNumber,
+    DateOnly BusinessDate,
+    string RulesVersion,
+    string ContentHash,
+    Guid? ExpectedCurrentVersionId,
+    string Action,
+    string Actor,
+    IReadOnlyList<ShopProductDefinition> Products);
+
+public sealed record ContentProductProjectionActivationResult(
+    Guid VersionId,
+    Guid? PreviousVersionId,
+    bool PointerChanged,
+    bool Replayed,
+    DateTimeOffset ActivatedAt,
+    IReadOnlyList<ShopProduct> Products);
+
+public interface IContentProductProjectionFaultInjector
+{
+    void ThrowAfterProjectedProduct(int productNumber, string sku);
+}
 
 public sealed record ShopPurchaseLineInput(string Sku, int Quantity);
 
@@ -200,7 +241,9 @@ public sealed record ShopPurchaseRequest(
     string Actor,
     string Reason,
     string? PlayerUid = null,
-    string? WorldId = null);
+    string? WorldId = null,
+    Guid? ExpectedContentVersionId = null,
+    string? ExpectedContentHash = null);
 
 public sealed record ShopOrderCharge(ExtractionCurrency Currency, long Amount);
 
@@ -213,7 +256,13 @@ public sealed record ShopOrderLine(
     ExtractionCurrency PriceCurrency,
     long UnitPrice,
     long LineTotal,
-    IReadOnlyList<ShopItemGrant> ItemGrants);
+    IReadOnlyList<ShopItemGrant> ItemGrants,
+    string Category = "general",
+    IReadOnlyList<string> Tags = null!,
+    int? FeaturedRank = null,
+    long? GlobalStock = null,
+    Guid? ContentVersionId = null,
+    string? ContentHash = null);
 
 public sealed record ShopOrder(
     Guid OrderId,

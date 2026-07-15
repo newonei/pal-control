@@ -51,6 +51,7 @@ export type Overview = {
 
 export type Product = {
   productId: string;
+  sku: string;
   name: string;
   description: string;
   category: string;
@@ -58,13 +59,26 @@ export type Product = {
   price: { currency: Currency; amount: number };
   deliverySummary: string;
   stockRemaining: number | null;
+  personalLimitRemaining: number | null;
+  serverStockRemaining: number | null;
   purchaseLimit: number | null;
+  globalStock: number | null;
   purchased: number;
   enabled: boolean;
   featured: boolean;
+  featuredRank: number | null;
+  contentVersionId: string;
+  contentHash: string;
 };
 
-export type Catalog = { revision: string; items: Product[] };
+export type Catalog = {
+  revision: string;
+  contentVersionId: string;
+  contentHash: string;
+  businessDate: string;
+  rulesVersion: string;
+  items: Product[];
+};
 
 export type Order = {
   orderId: string;
@@ -73,7 +87,7 @@ export type Order = {
   quantity: number;
   currency: Currency;
   totalAmount: number;
-  state: "accepted" | "pending" | "delivering" | "succeeded" | "failed" | "uncertain" | "cancelled" | "refunded";
+  state: "accepted" | "pending" | "delivering" | "succeeded" | "failed" | "partial" | "uncertain" | "cancelled" | "refunded";
   statusMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -105,6 +119,83 @@ export type RunList = {
   items: ExtractionRun[];
   settlementEnabled: boolean;
   reason: string | null;
+};
+
+export type NewPlayerActivity = {
+  activityId: string;
+  activityKey: string;
+  version: number;
+  state: "draft" | "published" | "closed";
+  title: string;
+  description: string;
+  rewards: { merchantCoin: number; weeklyTicket: number };
+  revision: number;
+  createdBy: string;
+  createdAt: string;
+  publishedSeasonId: string | null;
+  publishedWorldId: string | null;
+  publishedBy: string | null;
+  publishedAt: string | null;
+  closedBy: string | null;
+  closedAt: string | null;
+};
+
+export type NewPlayerActivityGrant = {
+  grantId: string;
+  activityId: string;
+  activityKey: string;
+  activityVersion: number;
+  seasonId: string;
+  worldId: string;
+  rewards: { merchantCoin: number; weeklyTicket: number };
+  balancesAfter: { merchantCoin: number; weeklyTicket: number };
+  claimedAt: string;
+};
+
+export type NewPlayerActivityAvailability = {
+  activity: NewPlayerActivity;
+  claimed: boolean;
+  grant: NewPlayerActivityGrant | null;
+};
+
+export type NewPlayerActivityClaim = {
+  activity: NewPlayerActivity;
+  grant: NewPlayerActivityGrant;
+  balances: { merchantCoin: number; weeklyTicket: number };
+  created: boolean;
+  idempotentReplay: boolean;
+};
+
+export type ReliableTask = {
+  instanceId: string;
+  cadence: "Daily" | "Weekly";
+  periodKey: string;
+  taskKey: string;
+  displayName: string;
+  description: string;
+  eventKind: string;
+  targetAmount: number;
+  progress: number;
+  completed: boolean;
+  completedAt: string | null;
+  rewardGranted: boolean;
+  reward: {
+    currency: "MarketCoin" | "SeasonVoucher";
+    amount: number;
+    rankingPoints: number;
+  };
+  contentVersionId: string;
+  contentHash: string;
+  rulesVersion: string;
+  rotationSeed: string;
+};
+
+export type ReliableTaskSnapshot = {
+  accountId: string;
+  seasonId: string;
+  serverId: string;
+  rankingPoints: number;
+  items: ReliableTask[];
 };
 
 export type ExtractionZone = {
@@ -181,9 +272,14 @@ export type ExtractionQuote = {
 };
 
 export class ApiClientError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiClientError";
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -237,6 +333,33 @@ export function getRuns() {
   return request<RunList>("/me/runs", { method: "GET" });
 }
 
+export function getNewPlayerActivities() {
+  return request<{ items: NewPlayerActivityAvailability[] }>(
+    "/me/new-player-activities",
+    { method: "GET" }
+  );
+}
+
+export function getReliableTasks() {
+  return request<ReliableTaskSnapshot>("/me/tasks", { method: "GET" });
+}
+
+export function claimNewPlayerActivity(
+  activityKey: string,
+  version: number,
+  idempotencyKey: string,
+  csrfToken: string
+) {
+  return request<NewPlayerActivityClaim>(
+    `/me/new-player-activities/${encodeURIComponent(activityKey)}/versions/${version}/claim`,
+    {
+      method: "POST",
+      idempotencyKey,
+      csrfToken
+    }
+  );
+}
+
 export async function getExtractionZones(): Promise<ExtractionZoneList> {
   const response = await request<ExtractionZoneList | ExtractionZoneMapResponse>(
     "/me/extraction-zones",
@@ -280,14 +403,20 @@ export async function getExtractionZones(): Promise<ExtractionZoneList> {
 }
 
 export function createOrder(
-  productId: string,
+  product: Product,
   quantity: number,
   idempotencyKey: string,
   csrfToken: string
 ) {
   return request<Order>("/me/orders", {
     method: "POST",
-    json: { productId, quantity },
+    json: {
+      productId: product.productId,
+      quantity,
+      contentVersionId: product.contentVersionId,
+      contentHash: product.contentHash,
+      sku: product.sku
+    },
     idempotencyKey,
     csrfToken
   });

@@ -174,7 +174,10 @@ public static class ExtractionModeEndpoints
                     ? null
                     : operationGate.AcquireOperation();
                 var products = await coordinator.ListProductsAsync(cancellationToken);
+                var content = await coordinator.GetCurrentContentAsync(cancellationToken);
                 Dictionary<Guid, int> purchasedByProduct = [];
+                Dictionary<Guid, long> globallyPurchasedByProduct = [];
+                Guid? seasonId = null;
                 if (!string.IsNullOrWhiteSpace(userId))
                 {
                     var context = operationLease is null
@@ -195,6 +198,18 @@ public static class ExtractionModeEndpoints
                         purchasedByProduct[line.ProductId] = checked(
                             purchasedByProduct.GetValueOrDefault(line.ProductId) + line.Quantity);
                     }
+                    seasonId = context.Season.SeasonId;
+                }
+                if (seasonId is Guid currentSeasonId)
+                {
+                    foreach (var product in products.Where(product => product.GlobalStock is not null))
+                    {
+                        globallyPurchasedByProduct[product.ProductId] =
+                            await coordinator.GetGlobalPurchasedQuantityAsync(
+                                currentSeasonId,
+                                product.Sku,
+                                cancellationToken);
+                    }
                 }
                 var revisionSource = string.Join('|', products.Select(product =>
                     $"{product.ProductId:N}:{product.Revision}:{product.Active}"));
@@ -203,9 +218,15 @@ public static class ExtractionModeEndpoints
                 return Results.Ok(new
                 {
                     revision,
+                    contentVersionId = content?.Version.VersionId,
+                    contentHash = content?.Version.ContentHash,
+                    businessDate = content?.Version.BusinessDate,
+                    rulesVersion = content?.Version.RulesVersion,
+                    rotation = content?.Rotation,
                     items = products.Select(product => ProductDto(
                         product,
-                        purchasedByProduct.GetValueOrDefault(product.ProductId))).ToArray()
+                        purchasedByProduct.GetValueOrDefault(product.ProductId),
+                        globallyPurchasedByProduct.GetValueOrDefault(product.ProductId))).ToArray()
                 });
             }
             catch (Exception exception)
@@ -217,6 +238,7 @@ public static class ExtractionModeEndpoints
         group.MapGet("/orders", async (
             string userId,
             ExtractionModeCoordinator coordinator,
+            ExtractionDeliveryReceiptStore deliveryReceipts,
             ExtractionOperationGate operationGate,
             CancellationToken cancellationToken) =>
         {
@@ -236,7 +258,10 @@ public static class ExtractionModeEndpoints
                     context.Season.SeasonId,
                     100,
                     cancellationToken);
-                return Results.Ok(new { items = orders.Select(OrderDto).ToArray() });
+                return Results.Ok(new
+                {
+                    items = await OrderDtosAsync(orders, deliveryReceipts, cancellationToken)
+                });
             }
             catch (Exception exception)
             {
@@ -408,7 +433,12 @@ public static class ExtractionModeEndpoints
                     request.UserId,
                     requireOnline: true,
                     cancellationToken);
-                var product = await coordinator.FindProductAsync(request.ProductId, cancellationToken);
+                var product = await coordinator.ResolveProductOfferAsync(
+                    request.ProductId,
+                    request.ContentVersionId,
+                    request.ContentHash,
+                    request.Sku,
+                    cancellationToken);
                 var purchase = await coordinator.PurchaseAsync(
                     context,
                     product,
@@ -931,13 +961,17 @@ public static class ExtractionModeEndpoints
         nextShopRefreshAt = nextRefreshAt
     };
 
-    internal static object ProductDto(ShopProduct product, int purchased) => new
+    internal static object ProductDto(
+        ShopProduct product,
+        int purchased,
+        long globallyPurchased = 0) => new
     {
         productId = product.ProductId,
+        sku = product.Sku,
         name = product.DisplayName,
         description = product.Description,
-        category = ProductCategory(product.Sku),
-        tags = ProductTags(product),
+        category = product.Category,
+        tags = product.Tags,
         price = new
         {
             currency = ExtractionModeCoordinator.ToClientCurrency(product.PriceCurrency),
@@ -948,16 +982,29 @@ public static class ExtractionModeEndpoints
         stockRemaining = product.PurchaseLimitPerSeason is int limit
             ? Math.Max(0, limit - purchased)
             : (int?)null,
+        personalLimitRemaining = product.PurchaseLimitPerSeason is int personalLimit
+            ? Math.Max(0, personalLimit - purchased)
+            : (int?)null,
+        serverStockRemaining = product.GlobalStock is long globalStock
+            ? Math.Max(0, globalStock - globallyPurchased)
+            : (long?)null,
         purchaseLimit = product.PurchaseLimitPerSeason,
+        globalStock = product.GlobalStock,
         purchased,
         enabled = product.Active,
-        featured = product.Sku is "STARTER-CAPTURE" or "STARTER-CROSSBOW"
+        featured = product.FeaturedRank is not null,
+        featuredRank = product.FeaturedRank,
+        contentVersionId = product.ContentVersionId,
+        contentHash = product.ContentHash
     };
 
-    internal static object OrderDto(ShopOrder order)
+    internal static object OrderDto(
+        ShopOrder order,
+        ExtractionDeliveryReceiptV1? deliveryReceipt = null)
     {
         var line = order.Lines.First();
         var charge = order.Charges.Single();
+        var state = OrderOutcome(order.State, deliveryReceipt?.Outcome);
         return new
         {
             orderId = order.OrderId,
@@ -966,20 +1013,33 @@ public static class ExtractionModeEndpoints
             quantity = line.Quantity,
             currency = ExtractionModeCoordinator.ToClientCurrency(charge.Currency),
             totalAmount = charge.Amount,
-            state = order.State switch
-            {
-                ShopOrderState.PendingDelivery => "accepted",
-                ShopOrderState.Dispatching => "delivering",
-                ShopOrderState.Delivered => "succeeded",
-                ShopOrderState.DeliveryFailed => "failed",
-                ShopOrderState.DeliveryUncertain => "uncertain",
-                ShopOrderState.Refunded => "cancelled",
-                _ => "pending"
-            },
-            statusMessage = OrderStatusMessage(order.State),
+            state,
+            statusMessage = OrderStatusMessage(order.State, deliveryReceipt?.Outcome),
             createdAt = order.CreatedAt,
             updatedAt = order.UpdatedAt
         };
+    }
+
+    internal static async Task<object[]> OrderDtosAsync(
+        IReadOnlyList<ShopOrder> orders,
+        ExtractionDeliveryReceiptStore deliveryReceipts,
+        CancellationToken cancellationToken)
+    {
+        var items = new object[orders.Count];
+        for (var index = 0; index < orders.Count; index++)
+        {
+            var order = orders[index];
+            ExtractionDeliveryReceiptV1? receipt = null;
+            if (order.State == ShopOrderState.DeliveryUncertain)
+            {
+                var registration = await deliveryReceipts.GetAsync(
+                    order.DeliveryId,
+                    cancellationToken);
+                receipt = registration?.Receipt;
+            }
+            items[index] = OrderDto(order, receipt);
+        }
+        return items;
     }
 
     internal static string LedgerReason(WalletLedgerEntry entry) =>
@@ -1055,12 +1115,32 @@ public static class ExtractionModeEndpoints
             : "基础价"
     ];
 
-    private static string? OrderStatusMessage(ShopOrderState state) => state switch
+    private static string OrderOutcome(
+        ShopOrderState state,
+        ExtractionDeliveryReceiptOutcome? receiptOutcome) => state switch
+    {
+        ShopOrderState.PendingDelivery => "accepted",
+        ShopOrderState.Dispatching => "delivering",
+        ShopOrderState.Delivered => "succeeded",
+        ShopOrderState.DeliveryFailed => "failed",
+        ShopOrderState.DeliveryUncertain
+            when receiptOutcome == ExtractionDeliveryReceiptOutcome.Partial => "partial",
+        ShopOrderState.DeliveryUncertain => "uncertain",
+        ShopOrderState.Refunded => "refunded",
+        _ => "pending"
+    };
+
+    private static string? OrderStatusMessage(
+        ShopOrderState state,
+        ExtractionDeliveryReceiptOutcome? receiptOutcome = null) => state switch
     {
         ShopOrderState.PendingDelivery => "订单已扣款，等待 PalDefender 发货。",
         ShopOrderState.Dispatching => "已提交游戏服，正在等待背包回读确认。",
         ShopOrderState.Delivered => "背包数量变化已确认。",
         ShopOrderState.DeliveryFailed => "游戏服明确拒绝发货，系统将按配置退款。",
+        ShopOrderState.DeliveryUncertain
+            when receiptOutcome == ExtractionDeliveryReceiptOutcome.Partial =>
+                "不可变回执确认仅部分物品到账，已停止自动重发和全额退款，请等待人工核对。",
         ShopOrderState.DeliveryUncertain => "发货结果不确定，已停止自动重试和退款。",
         ShopOrderState.Refunded => "订单已退款。",
         _ => null
@@ -1104,7 +1184,13 @@ public static class ExtractionModeEndpoints
             statusCode: StatusCodes.Status500InternalServerError)
     };
 
-    public sealed record CreateExtractionOrderRequest(string UserId, Guid ProductId, int Quantity);
+    public sealed record CreateExtractionOrderRequest(
+        string UserId,
+        Guid ProductId,
+        int Quantity,
+        Guid? ContentVersionId = null,
+        string? ContentHash = null,
+        string? Sku = null);
 
     public sealed record CreateExtractionQuoteRequest(string UserId);
 

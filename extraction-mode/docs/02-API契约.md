@@ -1,6 +1,6 @@
 # 02：API 契约
 
-本文定义玩法模块的目标契约。路径 `/extraction/v1` 属于新增玩家门户，不等同于现有 `/api/v1` 运营控制 API。
+当前权威玩家路由是 `/api/v1/player/*`，版本化内容运营路由是 `/api/v1/servers/{serverId}/economy-content/*`，并分别使用玩家 Cookie/CSRF 与管理员 API Key/RBAC。本文后半保留的 `/extraction/v1` 片段是早期目标模型说明，不是可调用路由；实现、OpenAPI 与客户端不应从这些历史示例反推当前路径。
 
 ## 当前开发服已落地接口
 
@@ -27,15 +27,42 @@
 | GET | `/api/v1/extraction/admin/rollover/preflight` | 停服前核对赛季到期时间、当前世界与目标周窗口 |
 | GET | `/api/v1/extraction/admin/rollover/readiness` | 检查未完成/不确定订单和资源兑换 |
 | POST | `/api/v1/extraction/admin/rollover/commit` | 核对当前物理世界后，首次绑定当前周档或关闭过期周档并创建新赛季；同 worldId 幂等 |
+| GET | `/api/v1/player/me/overview` | 当前登录玩家、本周绑定、双钱包与兑换统计 |
+| GET | `/api/v1/player/me/catalog` | 当前营业日完整内容证据、显式商品字段、个人剩余限购与可选全服库存 |
+| POST | `/api/v1/player/me/orders` | 使用 `productId/contentVersionId/contentHash/sku/quantity` 创建订单；旧 offer 返回 `OFFER_NOT_AVAILABLE` |
+| GET | `/api/v1/player/me/orders` | 本人订单；区分退款、取消、partial 与 uncertain |
+| GET | `/api/v1/player/me/ledger` | 本人资金流水 |
+| GET | `/api/v1/player/me/extraction-zones` | 本人位置、内容定义兑换区、开放状态、路线、下一开放时间与收益倍率 |
+| POST | `/api/v1/player/me/runs/quote` | 本人位置双采样、当前内容白名单与 30 秒整单报价 |
+| POST | `/api/v1/player/me/runs/{runId}/settle` | 本人报价结算；Cookie 身份、CSRF 与幂等键均必需 |
+| GET | `/api/v1/player/me/runs` | 本人资源兑换记录 |
+| GET | `/api/v1/player/me/new-player-activities` | 当前周世界已发布活动与本人领取状态 |
+| POST | `/api/v1/player/me/new-player-activities/{activityKey}/versions/{version}/claim` | 显式领取指定不可变活动版本 |
+| GET | `/api/v1/player/me/tasks` | 版本固定的日/周可靠任务、进度、奖励和积分 |
 
-`orders`、`runs/{id}/settle`、管理员调账都要求 `Idempotency-Key`。购买和资源兑换还会验证数据库真实可写、经济赛季 worldId 与 `GameUserSettings.ini`/活动存档目录/官方 REST world GUID 一致、当前周完整玩家 UID 绑定、对应 adapter 版本与能力、维护状态和队列容量；周窗口到期不会自动开空 worldId 赛季，而是保持写入关闭直到受控换档提交。控制台应分别读取 `capabilities.writes.purchase` 与 `capabilities.writes.resourceExchange`，不能用其中一个功能的状态推断另一个；`enabled=false` 时展示 `blockers[].code/message` 和 `circuit`，不应自行绕过服务端门禁。完整操作见 [Economy Safety Gate 运行手册](../../docs/runbooks/economy-safety-gate.md)。当前返回形状以 [前端 DTO](../../apps/console-web/src/features/extraction/api.ts) 与 [端点实现](../../services/control-api/Infrastructure/ExtractionModeEndpoints.cs) 为准；下文 `/extraction/v1` 是完成 Steam 登录、HTTPS、CSRF 和账户隔离后的正式玩家门户目标。
+`orders`、`runs/{id}/settle`、活动领取和管理员调账都要求 `Idempotency-Key`。购买和资源兑换还会验证数据库真实可写、经济赛季 worldId 与 `GameUserSettings.ini`/活动存档目录/官方 REST world GUID 一致、当前周完整玩家 UID 绑定、对应 adapter 版本与能力、维护状态和队列容量；周窗口到期不会自动开空 worldId 赛季，而是保持写入关闭直到受控换档提交。控制台应分别读取 `capabilities.writes.purchase` 与 `capabilities.writes.resourceExchange`，不能用其中一个功能的状态推断另一个；`enabled=false` 时展示 `blockers[].code/message` 和 `circuit`，不应自行绕过服务端门禁。完整操作见 [Economy Safety Gate 运行手册](../../docs/runbooks/economy-safety-gate.md)。当前返回形状以玩家/控制台 DTO、端点实现和 OpenAPI 为准。
+
+版本化内容管理的当前路由：
+
+| 方法 | 路径后缀 | 权限与语义 |
+| --- | --- | --- |
+| GET | `/current`、`/versions`、`/drafts`、`/drafts/{draftId}`、`/drafts/{draftId}/diff` | `Viewer`；只读当前指针、不可变历史、草稿与语义 diff |
+| POST | `/drafts` | `EconomyAdmin`；从指定完整版本复制草稿 |
+| PUT | `/drafts/{draftId}` | `EconomyAdmin`；`If-Match` 必须等于当前 revision |
+| POST | `/drafts/{draftId}/validate` | `EconomyAdmin`；使用当前授权目录和批准依赖严格校验 |
+| POST | `/drafts/{draftId}/publish` | 高风险 `EconomyAdmin`；要求维护/排空、`If-Match`、幂等键、TOTP、原因和 `PUBLISH ECONOMY CONTENT` |
+| POST | `/rollback` | 高风险 `EconomyAdmin`；要求维护/排空、预期 current version、幂等键、TOTP、原因和 `ROLLBACK ECONOMY CONTENT` |
+
+完整操作和激活失败边界见 [经济内容发布与回滚运行手册](../../docs/runbooks/economy-content-publishing.md)。
+
+发布和回滚先准备不可变版本，再把 current pointer、整套商品投影与激活记录放在同一 SQLite 事务中提交；第 N 个商品写入故障时事务整体回滚，读取与购买继续使用完整旧版。资源、兑换区和任务直接从 pointer 指向的完整定义解析，不存在逐项切换接口。
 
 ## 1. 公共规则
 
 - 玩家接口只接受 HTTPS，并使用服务端 Session Cookie；不在 URL、localStorage 或返回体中暴露上游 token。
-- 所有 POST 要求 `Idempotency-Key`，长度 8–128 个无控制字符。
-- 同一账户、同一 key、相同规范请求返回原资源；同 key 不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`。
-- 所有响应含 `requestId`；时间是 RFC 3339 UTC；金额和数量是 JSON 整数。
+- 订单、结算、活动领取和管理员经济写入等有经济副作用的 POST 要求 `Idempotency-Key`，长度 8–128 个无控制字符；无副作用的资源扫描报价不接收该键。
+- 同一账户、同一 key、相同规范请求返回原资源；当前订单与资源结算的同 key 不同请求返回 `409 IDEMPOTENCY_CONFLICT`。其他领域若使用不同稳定码，以 OpenAPI 和端点实现为准。
+- 错误响应使用 `ApiError` 的 `code`、`message`、`traceId`；成功 DTO 不承诺统一 `requestId`。时间是 RFC 3339 UTC；金额和数量是 JSON 整数。
 - 客户端不得提交价格、余额、PlayerUID、UserId、ItemID 或资源兑换总额作为权威值。
 - 写请求要求 CSRF header；购买和资源兑换按账户与 IP 限流。
 
@@ -43,11 +70,9 @@
 
 ```json
 {
-  "code": "PLAYER_NOT_IN_EXTRACTION_ZONE",
+  "code": "PLAYER_OUTSIDE_EXTRACTION_ZONE",
   "message": "当前玩家未通过资源兑换区连续位置校验。",
-  "requestId": "01J...",
-  "retryable": false,
-  "details": null
+  "traceId": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
 }
 ```
 
@@ -111,82 +136,93 @@
 
 ## 3. 商城
 
-### `GET /extraction/v1/shop`
+### 当前实现：`GET /api/v1/player/me/catalog`
 
 返回当前已发布 rotation 和 offer 快照：
 
 ```json
 {
-  "rotation": {
-    "businessDate": "2026-07-12",
-    "expiresAt": "2026-07-12T20:00:00Z",
-    "version": "sha256:..."
-  },
-  "offers": [
+  "revision": "7f1e...",
+  "businessDate": "2026-07-15",
+  "rulesVersion": "weekly-economy-v1",
+  "contentVersionId": "d0a32ce6-2263-4d3c-aa01-65955221dcba",
+  "contentHash": "a6b7...",
+  "rotation": { "algorithmVersion": 1, "seed": "19cb..." },
+  "items": [
     {
-      "id": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19",
+      "productId": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19",
+      "sku": "COARSE-AMMO",
       "name": "基础弹药箱",
       "description": "本周战备",
-      "currency": "supply_ticket",
-      "unitPrice": 80,
-      "grantQuantity": 50,
-      "remainingLimit": 3
+      "category": "弹药",
+      "tags": ["消耗品"],
+      "price": { "currency": "weeklyTicket", "amount": 80 },
+      "deliverySummary": "粗制弹药 ×100",
+      "personalLimitRemaining": 3,
+      "serverStockRemaining": null,
+      "contentVersionId": "d0a32ce6-2263-4d3c-aa01-65955221dcba",
+      "contentHash": "a6b7..."
     }
-  ],
-  "requestId": "01J..."
+  ]
 }
 ```
 
 不返回内部 Palworld ItemID，避免客户端伪造发货内容。
 
-### `POST /extraction/v1/orders`
+### 当前实现：`POST /api/v1/player/me/orders`
 
 Header：`Idempotency-Key: order-<uuid>`、CSRF token。
 
 ```json
 {
-  "lines": [
-    { "offerId": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19", "quantity": 1 }
-  ]
+  "productId": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19",
+  "contentVersionId": "d0a32ce6-2263-4d3c-aa01-65955221dcba",
+  "contentHash": "a6b7...",
+  "sku": "COARSE-AMMO",
+  "quantity": 1
 }
 ```
 
-服务端重新读取 offer、限购、绑定、在线状态和钱包；在一个事务中创建订单、扣款分录和发货 outbox。返回 `202 Accepted`：
+服务端重新读取当前内容 offer、个人/全服限购、绑定、在线状态和钱包；SQLite 先原子创建订单与扣款分录，随后由可恢复 worker 以确定性 key 注册 PalDefender command/receipt。两步不是同一事务。当前端点返回 `200` 的订单投影：
 
 ```json
 {
   "orderId": "2a3b9452-9e95-44cf-b94a-910cf9ca0cca",
-  "state": "funds_debited",
-  "total": { "currency": "supply_ticket", "amount": 80 },
-  "statusUrl": "/extraction/v1/orders/2a3b9452-9e95-44cf-b94a-910cf9ca0cca",
-  "requestId": "01J..."
+  "productId": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19",
+  "productName": "基础弹药箱",
+  "quantity": 1,
+  "currency": "weeklyTicket",
+  "totalAmount": 80,
+  "state": "pending"
 }
 ```
 
-MVP 一张订单只能使用一种货币，最多 10 行，每行数量 1–99，最终限制以商品为准。
+当前玩家端一次请求只购买一个商品，数量 1–99，最终还受个人周限购与可选全服库存约束。
 
-### `GET /extraction/v1/orders/{orderId}`
+### 当前实现：`GET /api/v1/player/me/orders`
 
-只有订单所有者可读。状态：
+只按玩家会话返回本人订单。对外状态：
 
-- `funds_debited`：扣款与 outbox 已提交；
-- `delivery_queued` / `delivery_dispatched`：等待游戏通道；
-- `fulfilled`：PalDefender 明确确认发放；
-- `failed_refunded`：派发前或明确失败，已产生反向分录；
-- `delivery_uncertain`：可能已发放，冻结人工对账，不能重复购买同一订单；
-- `manual_review`：自动证据不足。
+- `accepted/pending/delivering`：仍可能自动进入终态，玩家端有界轮询；
+- `succeeded`：完整发货回执已经证明；
+- `failed`：明确失败仍在完成确定性处置；
+- `refunded`：退款分录已经完成；
+- `cancelled`：订单取消，不会继续发货；
+- `partial`：只有部分物品被证明送达，必须人工对账；
+- `uncertain`：可能已发放，不能重复购买同一补给，必须人工对账。
 
 ```json
 {
   "orderId": "2a3b9452-9e95-44cf-b94a-910cf9ca0cca",
-  "state": "fulfilled",
-  "lines": [
-    { "name": "基础弹药箱", "quantity": 1, "grantedQuantity": 50 }
-  ],
-  "total": { "currency": "supply_ticket", "amount": 80 },
-  "createdAt": "2026-07-12T03:00:00Z",
-  "completedAt": "2026-07-12T03:00:01Z",
-  "requestId": "01J..."
+  "productId": "99dc09ee-fbea-49e5-b69b-9d3888fa6e19",
+  "productName": "基础弹药箱",
+  "quantity": 1,
+  "currency": "weeklyTicket",
+  "totalAmount": 80,
+  "state": "succeeded",
+  "statusMessage": null,
+  "createdAt": "2026-07-15T03:00:00Z",
+  "updatedAt": "2026-07-15T03:00:01Z"
 }
 ```
 
@@ -233,51 +269,42 @@ Header：`Idempotency-Key: quote-<uuid>`。请求体：
 
 不向客户端返回容器 ID、槽位或内部 ItemID。`totalAmount=0` 时可返回报价，但 commit 返回 `409 NOTHING_TO_EXTRACT`。
 
-### `POST /extraction/v1/extractions/{extractionId}/commit`
+### 当前实现：`POST /api/v1/player/me/runs/{runId}/settle`
 
-Header：新 `Idempotency-Key: extract-<uuid>`。
+Header：玩家 Session Cookie、允许的 `Origin`、`X-CSRF-Token` 和新 `Idempotency-Key`；没有请求体。管理员兼容路由另从 body 读取明确的 `userId`，不能由玩家调用。
 
-```json
-{ "snapshotHash": "sha256:..." }
-```
-
-服务端必须重新检查：所有权、报价未过期、赛季开放、玩家在线且仍在区域、背包快照完全一致。通过后创建消费 outbox，返回 `202`：
+服务端重新检查所有权、报价未过期、current 内容版本/hash 未改变、赛季开放、玩家在线且仍在区域、背包快照完全一致。通过后持久化 `Consuming`、lease、request hash 和 Native 请求，返回 `200` 当前 run 投影：
 
 ```json
 {
   "extractionId": "2b559ccb-8ae3-46a1-95f9-07fb3cd29445",
-  "state": "consume_queued",
-  "statusUrl": "/extraction/v1/extractions/2b559ccb-8ae3-46a1-95f9-07fb3cd29445",
+  "state": "consuming",
   "requestId": "01J..."
 }
 ```
 
-### `GET /extraction/v1/extractions/{extractionId}`
+### 当前实现：`GET /api/v1/player/me/runs`
 
-状态：`quoted/consume_queued/consuming/consume_uncertain/consumed/crediting/completed/rejected/manual_review`。
+状态就是当前 `ExtractionSettlementState`：`Quoted/Consuming/Removed/Credited/Settled/Failed/Uncertain/Expired/Cancelled`。
 
-只有 `completed` 表示扣物和入账均已证明。`consume_uncertain` 时 UI 必须显示“不要再次资源兑换或移动相关物品，等待对账”，不能提供“重试扣除”按钮。
+只有 `Settled` 表示扣物和入账均已证明。`Uncertain` 时 UI 必须显示“不要再次资源兑换或移动相关物品，等待对账”，不能提供“重试扣除”按钮。
 
 ## 5. 运营 API
 
-运营接口放在现有内网控制面或独立 `/api/v1/servers/{serverId}/extraction-admin` 路由，要求明确 RBAC；不与玩家 Cookie 共享认证。
+运营接口位于现有本机 `/api/v1/extraction/admin/*` 与 `/api/v1/servers/{serverId}/economy-content/*` 路由，要求明确 RBAC；不与玩家 Cookie 共享认证。
 
-建议契约：
+早期领域动作到当前路由的对应关系：
 
 | 方法和路径 | 权限 | 作用 |
 | --- | --- | --- |
-| `GET /status` | `extraction.read` | 当前赛季、世界身份、闸门、队列积压 |
-| `POST /gates` | `extraction.admin` | 关闭/开放购买与资源兑换，必须填 reason |
-| `POST /daily-refreshes/{businessDate}/prepare` | `shop.manage` | 生成草稿和 diff |
-| `POST /daily-refreshes/{businessDate}/publish` | `shop.publish` | 发布一次，幂等 |
-| `GET /reconciliation?state=uncertain` | `extraction.reconcile` | 查询不确定订单和资源兑换 |
-| `POST /orders/{id}/reconcile` | `extraction.reconcile` | 基于证据终结，不直接再次发货 |
-| `POST /extractions/{id}/reconcile` | `extraction.reconcile` | 标记已扣/未扣/人工处置并附证据 |
-| `POST /wallet-adjustments` | `wallet.adjust` | 追加调整分录；建议双人审批 |
-| `POST /rollovers/prepare` | `season.manage` | 换档预检，不改游戏 |
-| `POST /rollovers/{id}/execute` | `season.manage` | 执行受控换档 |
-| `GET /rollovers/{id}` | `season.read` | 查看阶段和证据 |
-| `POST /rollovers/{id}/abort` | `season.manage` | 仅在开放新赛季前回滚 |
+| `GET /api/v1/extraction/capabilities` | `Viewer` | 当前赛季、世界身份、写闸门与稳定 blocker |
+| `PUT /api/v1/extraction/admin/safety-gate/{feature}` | `EconomyHighRisk` | 关闭/开放购买或资源兑换，要求 TOTP/reason |
+| `POST .../economy-content/drafts`、`GET .../diff` | `EconomyAdmin`/`Viewer` | 从完整版本生成草稿并查看 diff |
+| `POST .../economy-content/drafts/{id}/publish` | `EconomyHighRisk` | 当前营业日发布一次，维护排空且幂等 |
+| `POST /api/v1/extraction/admin/orders/{id}/reconcile` | `EconomyHighRisk` | 基于证据终结，不直接再次发货 |
+| `POST /api/v1/extraction/admin/runs/{id}/reconcile` | `EconomyHighRisk` | 基于 Native 证据失败或唯一入账 |
+| `POST /api/v1/extraction/admin/wallet-adjustments` | `EconomyHighRisk` | 追加调整分录；正式服仍建议双人审批 |
+| `/api/v1/extraction/admin/rollover/*` | `SeasonAdmin/SeasonHighRisk` | 预检、维护、持久步骤、提交和状态查询 |
 
 所有运营 POST 同样使用幂等键和 reason；钱包调整、开放闸门、执行换档记录操作者与 IP。
 
@@ -345,24 +372,21 @@ Idempotency-Key: extraction:<runId>:consume:1
 
 | 错误码 | HTTP | 语义 |
 | --- | --- | --- |
-| `SEASON_NOT_OPEN` | 409 | 当前无开放周档 |
-| `ECONOMY_GATE_CLOSED` | 503 | 运营或健康熔断关闭写入 |
-| `PLAYER_NOT_BOUND` | 409 | 当前周档未绑定 |
-| `PLAYER_OFFLINE` | 409 | 游戏写入只支持在线玩家 |
-| `PLAYER_SESSION_CHANGED` | 409 | 报价后角色会话变化 |
-| `PLAYER_NOT_IN_EXTRACTION_ZONE` | 409 | 未通过连续位置校验 |
+| `SEASON_WORLD_UNBOUND` / `SEASON_WORLD_MISMATCH` | 423 | 当前周档未绑定真实世界，或当前世界不一致 |
+| `PURCHASE_CIRCUIT_OPEN` / `RESOURCE_EXCHANGE_CIRCUIT_OPEN` | 423 | 对应经济写闸门由运营熔断关闭 |
+| `PLAYER_BINDING_REQUIRED` | 409 | 当前周档未绑定完整 PlayerUID |
+| `PLAYER_NOT_ONLINE` | 409 | 游戏写入只支持在线玩家 |
+| `EXTRACTION_ZONE_CLOSED` | 409 | 当前报价对应兑换区已关闭且不在 grace 内 |
+| `PLAYER_OUTSIDE_EXTRACTION_ZONE` / `EXTRACTION_ZONE_NOT_STABLE` | 409 | 不在开放兑换区，或两次位置采样不稳定 |
 | `OFFER_NOT_AVAILABLE` | 409 | 商品下架、过期或未发布 |
-| `PURCHASE_LIMIT_EXCEEDED` | 409 | 超过日/周限购 |
+| `PURCHASE_LIMIT_EXCEEDED` | 409 | 超过个人周限购 |
 | `INSUFFICIENT_FUNDS` | 409 | 钱包不足 |
-| `IDEMPOTENCY_KEY_REUSED` | 409 | 同键不同请求 |
-| `QUOTE_EXPIRED` | 409 | 资源兑换报价过期 |
-| `INVENTORY_SNAPSHOT_CHANGED` | 412 | 背包与报价不一致 |
-| `NOTHING_TO_EXTRACT` | 409 | 当前允许容器中没有可出售的白名单资源 |
+| `IDEMPOTENCY_CONFLICT` | 409 | 同键不同请求，或 run 已绑定另一个结算键 |
+| `EXTRACTION_QUOTE_NOT_SETTLEABLE` | 409 | 报价已过期或不处于 `Quoted`；run 过期时持久化 `errorCode=QUOTE_EXPIRED` |
+| `QUOTE_CONTENT_CHANGED` | 409 | 报价后的 current 内容版本或 hash 已切换，必须重新扫描 |
+| `EXTRACTION_INVENTORY_CHANGED` | 409 | 背包与报价不一致，需重新扫描 |
+| `NO_SELLABLE_EXTRACTION_LOOT` | 422 | 当前允许容器中没有可出售的白名单资源 |
 | `NATIVE_ECONOMY_ADAPTER_NOT_CONNECTED` | 503 | Native Bridge 未连接 |
 | `NATIVE_INVENTORY_CONSUME_CAPABILITY_MISSING` | 503 | 未声明稳定 `inventory.consume`；experimental 不满足 |
-| `NATIVE_INVENTORY_CONSUME_EVIDENCE_INVALID` | 202 | 逐行、完整快照、聚合回读或持久化证据不足 |
-| `NATIVE_INVENTORY_CONSUME_TRANSPORT_UNCERTAIN` | 202 | 派发后传输中断，禁止自动重发 |
-| `DELIVERY_OUTCOME_UNCERTAIN` | 202 | 发货结果待对账；订单资源仍可查询 |
-| `CONSUME_OUTCOME_UNCERTAIN` | 202 | 扣物结果待对账，不入账 |
-| `VERSION_COMBINATION_UNAPPROVED` | 503 | 游戏、PalDefender 或 Native 精确版本组合未验收 |
-| `WORLD_IDENTITY_MISMATCH` | 503 | 运行世界与开放赛季不一致 |
+
+`NATIVE_INVENTORY_CONSUME_EVIDENCE_INVALID`、传输不确定和发货不确定不是上述端点的 HTTP 202 错误契约：请求可能返回 HTTP 200 的 run/order 投影，但状态保持 `Uncertain` 或对应发货待对账状态，并在投影中携带稳定 `errorCode`。客户端必须读取状态，禁止因 HTTP 成功就重发写入。

@@ -42,6 +42,7 @@ export type ExtractionOverview = {
 
 export type ShopProduct = {
   productId: string;
+  sku: string;
   name: string;
   description: string;
   category: string;
@@ -52,14 +53,24 @@ export type ShopProduct = {
   };
   deliverySummary: string;
   stockRemaining: number | null;
+  personalLimitRemaining: number | null;
+  serverStockRemaining: number | null;
   purchaseLimit: number | null;
+  globalStock: number | null;
   purchased: number;
   enabled: boolean;
   featured: boolean;
+  featuredRank: number | null;
+  contentVersionId: string;
+  contentHash: string;
 };
 
 export type ShopCatalog = {
   revision: string;
+  contentVersionId: string;
+  contentHash: string;
+  businessDate: string;
+  rulesVersion: string;
   items: ShopProduct[];
 };
 
@@ -69,8 +80,10 @@ export type ShopOrderState =
   | "delivering"
   | "succeeded"
   | "failed"
+  | "partial"
   | "uncertain"
-  | "cancelled";
+  | "cancelled"
+  | "refunded";
 
 export type ShopOrder = {
   orderId: string;
@@ -145,6 +158,9 @@ export type ExtractionQuote = {
 export type CreateShopOrderInput = {
   userId: string;
   productId: string;
+  sku: string;
+  contentVersionId: string;
+  contentHash: string;
   quantity: number;
   idempotencyKey: string;
 };
@@ -208,7 +224,10 @@ export async function createShopOrder(input: CreateShopOrderInput): Promise<Shop
     body: JSON.stringify({
       userId: input.userId,
       productId: input.productId,
-      quantity: input.quantity
+      quantity: input.quantity,
+      sku: input.sku,
+      contentVersionId: input.contentVersionId,
+      contentHash: input.contentHash
     })
   });
   if (!response.ok) throw new Error(await apiError(response, "提交商城订单失败"));

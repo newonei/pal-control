@@ -105,6 +105,19 @@ public interface IExtractionRepository : IPlayerIdentityBindingStore
         string actor,
         CancellationToken cancellationToken);
 
+    Task<ContentProductProjectionActivationResult> ActivateContentProductProjectionAsync(
+        ContentProductProjectionActivation activation,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns the quantity currently occupying a product's server-wide stock
+    /// for one weekly season. Refunded orders do not occupy stock.
+    /// </summary>
+    Task<long> GetGlobalPurchasedQuantityAsync(
+        Guid seasonId,
+        string sku,
+        CancellationToken cancellationToken);
+
     Task<ShopPurchaseResult> PurchaseAsync(
         ShopPurchaseRequest request,
         CancellationToken cancellationToken);

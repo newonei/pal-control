@@ -23,19 +23,21 @@
 | 路径 | 内容 | 说明 |
 | --- | --- | --- |
 | `README.md` | 项目介绍与使用教程 | 必须上传 |
-| `.gitignore` | 敏感文件与产物排除规则 | 必须上传 |
+| `.gitignore`、`.gitattributes`、`.gitleaks.toml` | 忽略、换行与密钥扫描规则 | 必须上传；扫描例外必须逐条可审计，不创建空白 ignore 文件 |
+| `.github/` | CI、Issue 与 PR 模板 | 必须上传；Actions 权限保持最小化 |
+| `LICENSE`、`SECURITY.md`、`CONTRIBUTING.md`、`THIRD_PARTY_NOTICES.md` | 许可、安全和协作治理 | 必须上传 |
 | `package.json`、`package-lock.json` | npm workspace 与依赖锁 | 必须上传，保证前端依赖可复现 |
 | `apps/*/src/`、`apps/*/public/` | 两个前端的源码与静态资源 | 上传；保留地图目录中的来源与许可证文件 |
 | `services/control-api/` | C# 源码、`.csproj`、安全默认配置 | 上传源码和 `appsettings.json`，不上传本地覆盖与 `data/` |
 | `mods/pal-control-native/` | Native MOD 源码与版本锁 | 上传源码、配置示例、模板和依赖锁，不上传 DLL |
 | `packages/contracts/` | OpenAPI 与 Bridge 契约 | 上传，但先统一许可证声明 |
 | `deploy/` | Windows/Caddy 脚本与示例配置 | 只上传不含域名、密码和 Token 的模板 |
-| `docs/`、`extraction-mode/docs/` | 架构、威胁模型、运维手册和脱敏界面预览 | 上传；`docs/images/` 只保留 README 引用且人工检查过的产品截图，移除机器路径、真实玩家、凭据和运行证据 |
+| `docs/`、`extraction-mode/README.md`、`extraction-mode/docs/`、`extraction-mode/scripts/` | 架构、玩法、换档脚本、运维手册和脱敏界面预览 | 上传；`docs/images/` 只保留 README 引用且人工检查过的产品截图，移除机器路径、真实玩家、凭据和运行证据 |
 | `tests/`、`tools/` | 隔离测试与开发工具源码 | 上传源码，不上传测试输出 |
 
 ## 不应上传
 
-### 任何情况下都不上传
+### 不得提交到 Git 源码树
 
 - `PalServer/`、`steamcmd/`、`Saved/`、`SaveGames/`；
 - `.sav` 世界和玩家存档、原生轮转备份、托管备份；
@@ -45,7 +47,7 @@
 - `services/control-api/data/` 下的 SQLite、JSONL、锁文件和审计日志；
 - `node_modules/`、`dist/`、`bin/`、`obj/`、`artifacts/`、`output/`、`.agent-build/`；
 - 本机 `third_party/`、CMake/xmake 中间目录和已生成 Solution；
-- `.dll`、`.exe`、`.pdb`、`.obj`、压缩包、日志、临时测试截图、真实服务器截图和崩溃转储；README 明确引用、已脱敏且位于 `docs/images/` 的产品界面预览除外；
+- `.dll`、`.exe`、`.pdb`、`.obj`、压缩包、日志、临时测试截图、真实服务器截图和崩溃转储；README 明确引用、已脱敏且位于 `docs/images/` 的产品界面预览除外。自行干净构建、完成扫描并附 SHA-256/来源清单的安装包或 ZIP 可以作为 GitHub Release asset，但仍不得提交进源码树；
 - SteamCMD 配置、缓存、日志、匿名用户数据和 depot manifest；
 - PalDefender 或 UE4SS 的第三方二进制副本。
 

@@ -467,9 +467,15 @@
 }
 
 .extraction-order-state.failed,
-.extraction-order-state.uncertain {
+.extraction-order-state.uncertain,
+.extraction-order-state.partial {
   color: #efa0a3;
   background: rgba(119, 50, 57, .25);
+}
+
+.extraction-order-state.refunded {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
 }
 
 .extraction-order-row strong,

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Extraction;
 
 namespace PalControl.ControlApi.Infrastructure;
@@ -14,6 +15,7 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
     private readonly ExtractionModeOptions _options;
     private readonly EconomySafetyOptions _safetyOptions;
     private readonly ILogger<ExtractionDeliveryWorker> _logger;
+    private readonly ReliableTaskRuntimeService? _reliableTasks;
 
     public ExtractionDeliveryWorker(
         ExtractionCommerceService commerce,
@@ -24,7 +26,8 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
         EconomySafetyGate economySafety,
         IOptions<ExtractionModeOptions> options,
         IOptions<EconomySafetyOptions> safetyOptions,
-        ILogger<ExtractionDeliveryWorker> logger)
+        ILogger<ExtractionDeliveryWorker> logger,
+        ReliableTaskRuntimeService? reliableTasks = null)
     {
         _commerce = commerce;
         _coordinator = coordinator;
@@ -35,6 +38,7 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
         _options = options.Value;
         _safetyOptions = safetyOptions.Value;
         _logger = logger;
+        _reliableTasks = reliableTasks;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -252,9 +256,29 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
         switch (receipt.Outcome)
         {
             case ExtractionDeliveryReceiptOutcome.Succeeded:
-                _ = await _commerce.MarkDeliveryDeliveredAsync(
+                var delivered = await _commerce.MarkDeliveryDeliveredAsync(
                     receipt.DeliveryId,
                     cancellationToken);
+                if (delivered.Order?.State == ShopOrderState.Delivered &&
+                    _reliableTasks is not null)
+                {
+                    try
+                    {
+                        _ = await _reliableTasks.RecordDeliveredOrderAsync(
+                            delivered.Order,
+                            cancellationToken);
+                    }
+                    catch (Exception exception)
+                    {
+                        // Successful item delivery is already durable; task
+                        // projection failure must not turn it into an uncertain
+                        // delivery or trigger a refund.
+                        _logger.LogError(
+                            exception,
+                            "Reliable tasks could not project delivered shop order {OrderId}.",
+                            delivered.Order.OrderId);
+                    }
+                }
                 break;
             case ExtractionDeliveryReceiptOutcome.Failed:
                 _ = await _commerce.MarkDeliveryFailedAsync(

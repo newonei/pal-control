@@ -2,7 +2,7 @@
 
 ## 0. 基线与资料来源
 
-本文基线日期为 2026-07-12，并于 2026-07-13 按 [ADR-0001：采用周世界资源经济服](../../docs/architecture/decisions/0001-weekly-world-resource-economy.md) 更新产品定位。能力判断优先级为：当前仓库代码与运行探针 > 当前仓库运行手册 > 上游版本化文档 > 设计假设。PalDefender 是第三方服务端插件，并非 Pocketpair 官方组件；它的端点以 [PalDefender REST API](https://ultimeit.github.io/PalDefender/zh/RESTAPI/)、[`/delitems` 与 `/clearinv` 命令文档](https://ultimeit.github.io/PalDefender/Commands/) 和仓库内 [PalDefender 集成运行手册](../../docs/runbooks/paldefender-integration.md) 为维护入口。Pal Control 的安全边界与命令语义见 [总体架构](../../docs/architecture/overview.md)、[命令模型](../../docs/api/command-model.md) 和 [存档中心运行手册](../../docs/runbooks/save-management.md)。
+本文基线日期为 2026-07-15，并按 [ADR-0001：采用周世界资源经济服](../../docs/architecture/decisions/0001-weekly-world-resource-economy.md) 更新产品定位。能力判断优先级为：当前仓库代码与运行探针 > 当前仓库运行手册 > 上游版本化文档 > 设计假设。PalDefender 是第三方服务端插件，并非 Pocketpair 官方组件；它的端点以 [PalDefender REST API](https://ultimeit.github.io/PalDefender/zh/RESTAPI/)、[`/delitems` 与 `/clearinv` 命令文档](https://ultimeit.github.io/PalDefender/Commands/) 和仓库内 [PalDefender 集成运行手册](../../docs/runbooks/paldefender-integration.md) 为维护入口。Pal Control 的安全边界与命令语义见 [总体架构](../../docs/architecture/overview.md)、[命令模型](../../docs/api/command-model.md) 和 [存档中心运行手册](../../docs/runbooks/save-management.md)。
 
 本文把“现有能力”和“目标能力”明确分开。出现 `尚未实现`、`新增` 或 `上线硬门槛` 的项目，不能仅凭本文档视为可用；必须通过 [实施阶段与验收](05-实施阶段与验收.md) 中的当前环境证据。
 
@@ -13,7 +13,7 @@
 正式服采用：
 
 - 周档：周一 `04:00` 至下周一 `03:30`，最后 30 分钟为结算维护期。
-- 日刷新：每天 `04:00`，刷新商城报价、限购、日任务和热点区域。
+- 日刷新：每天 `04:00`，刷新营业日内容、商城报价、日任务和热点区域；个人周限购只在新周档重置。
 - 世界：每周创建全新 Palworld 世界，旧世界只归档、不在线覆盖。
 - 永久层：账户、商域币、订单历史、违规记录和赛季成绩保存在数据库。
 - 周期层：PlayerUID、战备券、周限购、资源兑换统计和当前世界数据随周档重置。
@@ -24,12 +24,12 @@
 
 1. 玩家以 Steam 平台账户登录网页。
 2. 系统把平台 `UserId` 与当前世界 `PlayerUID` 绑定。
-3. 玩家用商域币或战备券购买当周物资。
+3. 玩家读取当前不可变内容版本，用商域币或战备券购买当周物资；提交必须携带匹配的版本 ID、hash 和 SKU。
 4. PalDefender 把物资发入当前在线角色的背包。
 5. 玩家在常驻周世界中自由采集、战斗、生产、交易和积累资源。
 6. 玩家携带任意来源的白名单资源进入指定资源兑换区，在网页申请整单报价。
 7. 服务端确认玩家位置和完整背包快照，通过 Native Bridge 的稳定 `inventory.consume` 能力在游戏线程内校验并回收报价中的全部合格资源。
-8. Native 返回数量、完整槽位前后快照、会话与持久化验收均通过后，数据库才增加战备券；周任务和赛季结算可发放少量商域币。
+8. Native 返回数量、完整槽位前后快照、会话与持久化验收均通过后，数据库才增加战备券；可靠日/周任务只按这些已持久化经济终态推进并唯一发奖。
 
 ```mermaid
 flowchart LR
@@ -48,17 +48,18 @@ flowchart LR
 
 | 货币 | 范围 | 主要来源 | 主要用途 |
 | --- | --- | --- | --- |
-| 商域币 `market_credit` | 永久 | 周任务、周排名、运营补偿；不直接按全部资源价值大量产出 | 基础战备和永久限购 |
-| 战备券 `supply_ticket` | 当前周档 | 成功出售白名单资源、日任务 | 当周武器消耗品、弹药、药品和补给 |
+| 商域币 `market_credit` | 永久 | 当前 3 个日任务、3 个周任务、管理员补偿和显式初始化；排名奖励尚未实现 | 基础战备商品 |
+| 战备券 `supply_ticket` | 当前周档 | 成功出售白名单资源、管理员补偿和显式初始化；当前任务不产出战备券 | 当周武器消耗品、弹药、药品和补给 |
 
-所有金额都是整数 `BIGINT`，不使用浮点数。商品买价与资源回收价分别配置；默认卖价不得高于同物品最低买价的 50%，避免“商城买入再兑换卖出”套利。可设置 `sellable=false` 完全禁止回收。
+所有金额都是整数 `BIGINT`，不使用浮点数。商品买价与资源回收价分别配置，目录外 ItemID 默认不可售。发布校验会按商品真实发放数量、资源结算取整和最高有效区域倍率，阻断可证明的同币种“商城买入并直接回售发放物”正收益路径；跨币种、制作、加工、拆包和玩家交易仍因缺少完整转换图而标记为不可判定，不能宣称已完成全局反套利。详见 [经济平衡与反套利保护](../../docs/economy-balance-guard.md)。
 
 ### 1.4 MVP 范围
 
 MVP 包含：
 
 - 单台 Palworld 服务器、单一当前周档。
-- 在线玩家身份绑定、钱包、账本、每日轮换商城。
+- 在线玩家身份绑定、钱包、账本、版本化每日商城和显式个人/全服库存。
+- 10 个目录过滤商品候选、51 个目录过滤可售资源候选，以及只接受权威经济终态的 3 日/3 周任务。
 - 物品商城发货。
 - 圆形资源兑换区、网页发起、整单资源兑换结算。
 - 日刷新和受控周换档。
@@ -92,6 +93,8 @@ MVP 不包含：
 - Native 不能验证全部请求槽位、实际扣除数量不等于请求、回读不完整、持久化证据缺失或连接结果不确定时，一律不入账且不自动重扣。
 - 存档中心只保存和备份，不会自动创建/切换新世界。
 - 当前已实现 Steam OpenID 与游戏内验证码双层绑定、HttpOnly Cookie、CSRF、Origin/限流和当前周 PlayerUID 绑定；Production/PublicSteam 强制官方 HTTPS OP 与精确 realm/return_to，但仍需在正式域名完成 TLS、代理回调、Cookie 和重放黑盒验收。
+- 当前已实现 SQLite 内容草稿、规范 hash、diff、严格依赖校验、不可变版本、current pointer、发布/回滚和旧 offer 拒绝；内置 10 个商品与 51 个资源候选均按本机授权目录过滤。current pointer 与完整商品投影在同一事务激活，第 N 个商品注入故障、重启重试、20 次激活和回滚均已自动通过。
+- 当前已实现 3 个日任务与 3 个周任务的持久实例、权威事件哈希、钱包/积分唯一奖励和恢复 worker；击杀、采集、进入热点、死亡和 PvP 未开放。
 - HTTP `202` 只表示持久接收；HTTP `200` 命令查询也必须结合命令状态判断，不能视为游戏操作一定完成。
 
 ## 3. 目标组件
@@ -144,7 +147,7 @@ account_id
 
 ## 5. 资源兑换区与报价
 
-MVP 使用配置化圆形区域：`map_x`、`map_y`、`radius`、开放时段。玩家请求报价时：
+MVP 使用内容版本中的圆形区域：`map_x`、`map_y`、`radius`、路线、开放时段、grace 和收益倍率。当前内置内容只有 1 个全天开放开发区，第二个真实区域和多区域开放边界仍待验收。玩家请求报价时：
 
 - PalDefender 必须在线、版本符合固定组合。
 - 玩家必须连续两次位置采样均在同一资源兑换区内，两次间隔至少 2 秒。
@@ -161,7 +164,7 @@ MVP 使用配置化圆形区域：`map_x`、`map_y`、`radius`、开放时段。
 - RCON 即使为诊断而启用，`25575` 也必须阻断所有远程入站且绝不做端口映射；`AdminPassword` 必须交给仅服务账户可读的 Secret Store 并定期轮换。
 - 玩家门户与运营控制台使用不同监听地址、不同认证和不同权限。
 - 玩家门户要求 HTTPS、`HttpOnly + Secure + SameSite=Lax` Cookie、CSRF token、登录与购买限流。
-- 商品价格、玩家 ID、余额、资源兑换价值全部由服务端计算；客户端只提交 offer ID、数量或 quote ID。
+- 商品价格、玩家 ID、余额、资源兑换价值全部由服务端计算；商城客户端只回传服务端给出的 `productId + contentVersionId + contentHash + SKU + quantity`，资源兑换只提交 quote/run ID，不能自定义价格、ItemID 或回收明细。
 - 所有游戏写操作在调用前持久化，调用后按状态机终结。
 - `uncertain` 不自动退款、不自动重发、不自动入账，进入人工或只读自动对账。
 - 网页不提交 ItemID、数量或槽位明细；服务端只从冻结的白名单报价构造 Native consume 请求，禁止按昵称定位玩家。

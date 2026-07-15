@@ -35,7 +35,9 @@ Invoke-RestMethod http://127.0.0.1:5180/api/v1/servers/local/capabilities -Heade
 - `command-audit.jsonl`：命令、幂等索引和追加式审计；
 - `command-queue.lock`：单实例独占 lease，防止两个进程同时派发。
 
-不要删除正在使用的事件日志，也不要同时启动两个指向同一目录的 Control API。备份时应先停止 Control API，再复制整个目录。
+不要删除正在使用的事件日志，也不要同时启动两个指向同一目录的 Control API。
+
+正式归档不要单独复制、截断或轮转这两个文件。它们已登记到统一 side-state 归档策略：活动文件在仍是权威期间只追加且无限期保留；经济一致性快照会把原字节副本连同通道用途、SHA-256 和保留策略写入 `command-side-state-archive.json`。归档与外层 SQLite 快照是不可拆分的 bundle，默认保留 60 天且至少 8 份，清理接口只列候选、不自动删除。只有没有可用 Control API 的应急取证才先停服务再复制整个目录；该原始副本不能替代经过 manifest 校验的恢复点。完整流程见[经济备份、恢复与持久化周换档手册](economy-continuity-and-weekly-rollover.md)。
 
 ## 支持范围
 

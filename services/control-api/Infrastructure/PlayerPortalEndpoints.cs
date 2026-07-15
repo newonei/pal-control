@@ -336,18 +336,28 @@ public static class PlayerPortalEndpoints
                         requireOnline: false,
                         cancellationToken);
                 var products = await coordinator.ListProductsAsync(cancellationToken);
+                var content = await coordinator.GetCurrentContentAsync(cancellationToken);
                 var orders = await coordinator.ListOrdersAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
                     1000,
                     cancellationToken);
                 Dictionary<Guid, int> purchasedByProduct = [];
+                Dictionary<Guid, long> globallyPurchasedByProduct = [];
                 foreach (var line in orders
                              .Where(order => order.State != ShopOrderState.Refunded)
                              .SelectMany(order => order.Lines))
                 {
                     purchasedByProduct[line.ProductId] = checked(
                         purchasedByProduct.GetValueOrDefault(line.ProductId) + line.Quantity);
+                }
+                foreach (var product in products.Where(product => product.GlobalStock is not null))
+                {
+                    globallyPurchasedByProduct[product.ProductId] =
+                        await coordinator.GetGlobalPurchasedQuantityAsync(
+                            context.Season.SeasonId,
+                            product.Sku,
+                            cancellationToken);
                 }
                 var revisionSource = string.Join('|', products.Select(product =>
                     $"{product.ProductId:N}:{product.Revision}:{product.Active}"));
@@ -356,9 +366,15 @@ public static class PlayerPortalEndpoints
                 return Results.Ok(new
                 {
                     revision,
+                    contentVersionId = content?.Version.VersionId,
+                    contentHash = content?.Version.ContentHash,
+                    businessDate = content?.Version.BusinessDate,
+                    rulesVersion = content?.Version.RulesVersion,
+                    rotation = content?.Rotation,
                     items = products.Select(product => ExtractionModeEndpoints.ProductDto(
                         product,
-                        purchasedByProduct.GetValueOrDefault(product.ProductId))).ToArray()
+                        purchasedByProduct.GetValueOrDefault(product.ProductId),
+                        globallyPurchasedByProduct.GetValueOrDefault(product.ProductId))).ToArray()
                 });
             }
             catch (Exception exception)
@@ -371,6 +387,7 @@ public static class PlayerPortalEndpoints
             HttpContext httpContext,
             PlayerPortalAuthenticationService authentication,
             ExtractionModeCoordinator coordinator,
+            ExtractionDeliveryReceiptStore deliveryReceipts,
             ExtractionOperationGate operationGate,
             CancellationToken cancellationToken) =>
         {
@@ -394,7 +411,10 @@ public static class PlayerPortalEndpoints
                     cancellationToken);
                 return Results.Ok(new
                 {
-                    items = orders.Select(ExtractionModeEndpoints.OrderDto).ToArray()
+                    items = await ExtractionModeEndpoints.OrderDtosAsync(
+                        orders,
+                        deliveryReceipts,
+                        cancellationToken)
                 });
             }
             catch (Exception exception)
@@ -517,8 +537,11 @@ public static class PlayerPortalEndpoints
                     session.UserId,
                     requireOnline: true,
                     cancellationToken);
-                var product = await coordinator.FindProductAsync(
+                var product = await coordinator.ResolveProductOfferAsync(
                     request.ProductId,
+                    request.ContentVersionId,
+                    request.ContentHash,
+                    request.Sku,
                     cancellationToken);
                 var purchase = await coordinator.PurchaseAsync(
                     context,
@@ -807,5 +830,10 @@ public static class PlayerPortalEndpoints
 
     public sealed record VerifyPlayerLoginCode(string? ChallengeId, string? Code);
 
-    public sealed record CreatePlayerPortalOrder(Guid ProductId, int Quantity);
+    public sealed record CreatePlayerPortalOrder(
+        Guid ProductId,
+        int Quantity,
+        Guid? ContentVersionId = null,
+        string? ContentHash = null,
+        string? Sku = null);
 }

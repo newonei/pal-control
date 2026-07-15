@@ -9,6 +9,7 @@ using System.Net;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Domain;
 using PalControl.ControlApi.Extraction;
 using PalControl.ControlApi.Infrastructure;
@@ -137,6 +138,14 @@ builder.Services.AddSingleton<IPlayerIdentityBindingStore>(services =>
 builder.Services.AddSingleton<IExtractionSettlementPersistence>(services =>
     services.GetRequiredService<SqliteExtractionRepository>());
 builder.Services.AddSingleton<ExtractionCommerceService>();
+builder.Services.AddSingleton<SqliteEconomyContentStore>();
+builder.Services.AddSingleton<IEconomyContentStore>(services =>
+    services.GetRequiredService<SqliteEconomyContentStore>());
+builder.Services.AddSingleton<EconomyContentRuntimeService>();
+builder.Services.AddHostedService<EconomyContentStartupInitializer>();
+builder.Services.AddSingleton<SqliteReliableTaskStore>();
+builder.Services.AddSingleton<IReliableTaskContentProvider, ReliableTaskContentProvider>();
+builder.Services.AddSingleton<ReliableTaskRuntimeService>();
 builder.Services.AddSingleton<ExtractionModeCoordinator>();
 builder.Services.AddSingleton<ExtractionDeliveryEvidenceStore>();
 builder.Services.AddSingleton<ExtractionDeliveryReceiptStore>();
@@ -252,6 +261,7 @@ builder.Services.AddSingleton<PlayerIdentitySecurityService>();
 builder.Services.AddSingleton<PlayerPortalTrafficGuard>();
 builder.Services.AddHostedService<ExtractionDeliveryWorker>();
 builder.Services.AddHostedService<ExtractionSettlementRecoveryWorker>();
+builder.Services.AddHostedService<ReliableTaskProjectionRecoveryWorker>();
 builder.Services.Configure<SaveManagementOptions>(
     builder.Configuration.GetSection("SaveManagement"));
 builder.Services.AddSingleton<SaveManagementService>();
@@ -401,6 +411,8 @@ api.MapPlayerIdentitySecurityEndpoints();
 api.MapEconomyContinuityEndpoints();
 api.MapEconomyObservabilityEndpoints();
 api.MapNewPlayerActivityAdminEndpoints();
+api.MapEconomyContentEndpoints();
+api.MapReliableTaskEndpoints();
 
 api.MapGet("/admin/session", (HttpContext context) => Results.Ok(new
 {

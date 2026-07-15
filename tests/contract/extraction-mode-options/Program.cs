@@ -9,7 +9,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "legacy-v1",
         InitialMarketCoin = 1_000,
-        InitialSeasonVoucher = 300
+        InitialSeasonVoucher = 300,
+        ExtractionZones = ValidZones()
     },
     expectedValid: true);
 Check(
@@ -19,7 +20,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "legacy-v1",
         InitialMarketCoin = 1_001,
-        InitialSeasonVoucher = 300
+        InitialSeasonVoucher = 300,
+        ExtractionZones = ValidZones()
     },
     expectedValid: false);
 Check(
@@ -29,7 +31,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "legacy-v1",
         InitialMarketCoin = 1_000,
-        InitialSeasonVoucher = 301
+        InitialSeasonVoucher = 301,
+        ExtractionZones = ValidZones()
     },
     expectedValid: false);
 Check(
@@ -39,7 +42,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "legacy-v1",
         InitialMarketCoin = 0,
-        InitialSeasonVoucher = 0
+        InitialSeasonVoucher = 0,
+        ExtractionZones = ValidZones()
     },
     expectedValid: false);
 Check(
@@ -49,7 +53,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "production-v1",
         InitialMarketCoin = 1,
-        InitialSeasonVoucher = 0
+        InitialSeasonVoucher = 0,
+        ExtractionZones = ValidZones()
     },
     expectedValid: false);
 Check(
@@ -59,7 +64,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "production-v1",
         InitialMarketCoin = 0,
-        InitialSeasonVoucher = 1
+        InitialSeasonVoucher = 1,
+        ExtractionZones = ValidZones()
     },
     expectedValid: false);
 Check(
@@ -69,7 +75,8 @@ Check(
         Enabled = true,
         BootstrapPolicyVersion = "production-v1",
         InitialMarketCoin = 0,
-        InitialSeasonVoucher = 0
+        InitialSeasonVoucher = 0,
+        ExtractionZones = ValidZones()
     },
     expectedValid: true);
 Check(
@@ -79,9 +86,21 @@ Check(
         Enabled = false,
         BootstrapPolicyVersion = "production-v1",
         InitialMarketCoin = 0,
-        InitialSeasonVoucher = 0
+        InitialSeasonVoucher = 0,
+        ExtractionZones = ValidZones()
     },
     expectedValid: true);
+Check(
+    "duplicate extraction-zone ids are rejected",
+    new ExtractionModeOptions
+    {
+        Enabled = false,
+        BootstrapPolicyVersion = "production-v1",
+        InitialMarketCoin = 0,
+        InitialSeasonVoucher = 0,
+        ExtractionZones = [new ExtractionZoneOptions(), new ExtractionZoneOptions()]
+    },
+    expectedValid: false);
 
 if (failures.Count > 0)
 {
@@ -93,8 +112,10 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: ExtractionModeOptions bootstrap policy contract (8 cases).");
+Console.WriteLine("PASS: ExtractionModeOptions bootstrap policy and zone contract (9 cases).");
 return 0;
+
+static IReadOnlyList<ExtractionZoneOptions> ValidZones() => [new ExtractionZoneOptions()];
 
 void Check(
     string name,

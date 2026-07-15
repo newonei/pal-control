@@ -13,6 +13,7 @@ await VerifyObservabilityMigrationSchemaGuardAsync(cancellationToken);
 await VerifySeasonJobsAsync(cancellationToken);
 await VerifyDeliveryEvidenceMigrationAsync(cancellationToken);
 await VerifyContinuitySnapshotAsync(cancellationToken);
+await VerifySharedDataRootArchiveAsync(cancellationToken);
 await VerifyCommandSideStateFailureClosedAsync(cancellationToken);
 Console.WriteLine(
     "PASS: rollover transactional fault recovery, unique expiry/reward ledger, consistent snapshot, queue/idempotency replay, staging restore, reconciliation and corruption checks.");
@@ -435,6 +436,35 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
                 state = "draft"
             }, new JsonSerializerOptions(JsonSerializerDefaults.Web)) + "\n",
             cancellationToken);
+        foreach (var sideStateName in new[]
+                 {
+                     "command-audit.jsonl",
+                     "in-game-notification-command-audit.jsonl",
+                     "save-command-audit.jsonl"
+                 })
+        {
+            var sideStateCommandId = Guid.NewGuid();
+            var sideStateHash = Hash(sideStateName);
+            await WriteCommandAuditAsync(
+                Path.Combine(commands, sideStateName),
+                [
+                    CommandEvent(sideStateCommandId, "accepted", sideStateName, sideStateHash),
+                    CommandEvent(sideStateCommandId, "succeeded", sideStateName, sideStateHash)
+                ],
+                cancellationToken);
+        }
+        await File.WriteAllTextAsync(
+            Path.Combine(commands, "in-game-notification-events.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                eventId = Guid.NewGuid(),
+                eventType = "created",
+                at = DateTimeOffset.UtcNow,
+                serverId = "local",
+                notificationId = Guid.NewGuid(),
+                state = "draft"
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web)) + "\n",
+            cancellationToken);
         const string world = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
         using var repository = new SqliteExtractionRepository(economy);
         var now = DateTimeOffset.UtcNow;
@@ -560,6 +590,12 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
                    recovered.ContentHash,
                 $"snapshot did not recover with the same idempotency key after {faultPoint}");
         }
+        var activeSideStateBeforeArchive = Directory
+            .EnumerateFiles(commands, "*.jsonl", SearchOption.TopDirectoryOnly)
+            .ToDictionary(
+                path => Path.GetFileName(path)!,
+                path => FileHash(path),
+                StringComparer.OrdinalIgnoreCase);
         var manifest = await continuity.CreateSnapshotAsync(
             "local", world, closed, 0,
             "weekly-rollover-step-economy-backup-0001",
@@ -573,8 +609,8 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
             "snapshot idempotency key created a duplicate backup");
         Assert(manifest.SqliteUserVersion == 1,
             "snapshot did not capture the versioned SQLite schema");
-        Assert(manifest.Files.Any(file => file.Role.Contains("append-audit-outbox", StringComparison.Ordinal)),
-            "snapshot omitted bounded command/outbox side state");
+        Assert(manifest.Files.Any(file => file.Role.Contains("jsonl-", StringComparison.Ordinal)),
+            "snapshot omitted registered command/outbox side state");
         Assert(manifest.Files.Any(file => string.Equals(
                 file.RelativePath,
                 "command-state/announcement-events.jsonl",
@@ -583,10 +619,67 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
         Assert(manifest.Files.Count(file =>
                 file.RelativePath.EndsWith("extraction-commerce.db", StringComparison.OrdinalIgnoreCase)) == 1,
             "nested command/economy roots duplicated the authoritative SQLite database as side state");
+        var archiveManifestEntry = manifest.Files.Single(file => string.Equals(
+            file.Role,
+            CommandSideStateArchiveService.ManifestRole,
+            StringComparison.Ordinal));
+        var archivedCommandRoot = Path.GetDirectoryName(Path.Combine(
+            backups,
+            "local",
+            manifest.BackupId,
+            archiveManifestEntry.RelativePath))!;
+        var sideStateArchive = new CommandSideStateArchiveService().Verify(archivedCommandRoot);
+        Assert(sideStateArchive.RetentionDays == 60 &&
+               sideStateArchive.MinimumRetainedArchives == 8 &&
+               sideStateArchive.ArchiveMode == CommandSideStateArchiveService.ArchiveMode &&
+               sideStateArchive.ActiveLogMutationPolicy ==
+                   CommandSideStateArchiveService.ActiveLogMutationPolicy,
+            "command side-state archive did not freeze the inherited retention and no-mutation policy");
+        var requiredActiveChannels = new[]
+        {
+            "announcement-state",
+            "announcement-delivery",
+            "in-game-notification-state",
+            "in-game-notification-delivery",
+            "save-command-delivery"
+        };
+        Assert(requiredActiveChannels.All(channel => sideStateArchive.Files.Any(file =>
+                file.Channel == channel &&
+                file.Authority == "non-economic-authoritative" &&
+                file.Present && file.Bytes > 0 && file.Sha256?.Length == 64)),
+            "command side-state archive omitted a registered non-economic authoritative channel");
+        foreach (var archived in sideStateArchive.Files.Where(file => file.Present))
+        {
+            Assert(activeSideStateBeforeArchive.TryGetValue(
+                       archived.RelativePath,
+                       out var activeHashBeforeArchive) &&
+                   activeHashBeforeArchive == FileHash(Path.Combine(commands, archived.RelativePath)),
+                $"archiving mutated the active side-state log for {archived.Channel}");
+            Assert(FileHash(Path.Combine(commands, archived.RelativePath)) ==
+                   FileHash(Path.Combine(archivedCommandRoot, archived.RelativePath)),
+                $"archiving changed active side-state bytes for {archived.Channel}");
+        }
         Assert(manifest.PendingTransactions.All(item => item.Kind != "command_outbox"),
             "terminal command state was incorrectly classified as pending");
         Assert(continuity.VerifySnapshot("local", manifest.BackupId).ContentHash == manifest.ContentHash,
             "fresh snapshot verification changed the content hash");
+        var archivedAnnouncementPath = Path.Combine(
+            archivedCommandRoot,
+            "announcement-events.jsonl");
+        var archivedAnnouncementBytes = await File.ReadAllBytesAsync(
+            archivedAnnouncementPath,
+            cancellationToken);
+        await File.AppendAllTextAsync(
+            archivedAnnouncementPath,
+            "{\"eventId\":\"00000000-0000-0000-0000-000000000000\"}\n",
+            cancellationToken);
+        AssertThrows<InvalidDataException>(
+            () => continuity.VerifySnapshot("local", manifest.BackupId),
+            "tampered command side-state archive passed outer and inner SHA-256 verification");
+        await File.WriteAllBytesAsync(
+            archivedAnnouncementPath,
+            archivedAnnouncementBytes,
+            cancellationToken);
         var manifestPath = Path.Combine(backups, "local", manifest.BackupId, "manifest.json");
         var manifestBytes = await File.ReadAllBytesAsync(manifestPath, cancellationToken);
         var manifestJsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
@@ -707,6 +800,49 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
         Assert(continuity.PlanRetention(DateTimeOffset.UtcNow).Count == 0,
             "retention planner proposed deleting a fresh protected backup");
 
+        var retentionBackups = Path.Combine(root, "retention-backups");
+        var retentionContinuity = new EconomyContinuityService(
+            new EconomyContinuityOptions
+            {
+                BackupRoot = retentionBackups,
+                StagingRoot = Path.Combine(root, "retention-staging"),
+                RetentionDays = 7,
+                MinimumRetainedBackups = 2,
+                MinimumFreeSpaceBytes = 16_777_216,
+                CapacitySafetyPercent = 100,
+                RpoMinutes = 15,
+                TargetRtoMinutes = 60
+            },
+            economy,
+            commands,
+            root,
+            new FixedTimeProvider(DateTimeOffset.UtcNow.AddDays(-8)));
+        for (var index = 0; index < 3; index++)
+        {
+            _ = await retentionContinuity.CreateSnapshotAsync(
+                "local",
+                world,
+                closed,
+                0,
+                $"side-state-retention-{index}",
+                cancellationToken);
+        }
+        var retentionCandidates = retentionContinuity.PlanRetention(DateTimeOffset.UtcNow);
+        Assert(retentionCandidates.Count == 1,
+            "side-state archive retention did not preserve the newest minimum bundle count");
+        var retainedCandidate = retentionContinuity.VerifySnapshot(
+            "local",
+            retentionCandidates.Single().BackupId);
+        Assert(retainedCandidate.Files.Any(file => string.Equals(
+                   file.Role,
+                   CommandSideStateArchiveService.ManifestRole,
+                   StringComparison.Ordinal)) &&
+               Directory.Exists(Path.Combine(
+                   retentionBackups,
+                   "local",
+                   retentionCandidates.Single().BackupId)),
+            "retention planning separated a JSONL archive from its outer snapshot or deleted it automatically");
+
         var database = Path.Combine(
             backups, "local", manifest.BackupId, "economy-state", "extraction-commerce.db");
         await using (var stream = new FileStream(database, FileMode.Open, FileAccess.Write, FileShare.None))
@@ -718,6 +854,93 @@ static async Task VerifyContinuitySnapshotAsync(CancellationToken cancellationTo
         AssertThrows<InvalidDataException>(
             () => continuity.VerifySnapshot("local", manifest.BackupId),
             "corrupt snapshot passed SHA-256/integrity verification");
+    });
+}
+
+static async Task VerifySharedDataRootArchiveAsync(CancellationToken cancellationToken)
+{
+    await WithDirectoryAsync(async root =>
+    {
+        var data = Path.Combine(root, "data");
+        var backups = Path.Combine(root, "backups");
+        var staging = Path.Combine(root, "staging");
+        Directory.CreateDirectory(data);
+        const string world = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+        using var repository = new SqliteExtractionRepository(data);
+        var now = DateTimeOffset.UtcNow;
+        _ = await repository.UpsertSeasonAsync(
+            null,
+            new ExtractionSeasonDefinition(
+                "local",
+                "week-shared-root",
+                "Shared Root Week",
+                world,
+                now.AddDays(-1),
+                now.AddDays(6),
+                ExtractionSeasonState.Active),
+            null,
+            cancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(data, "announcement-events.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                eventId = Guid.NewGuid(),
+                eventType = "created",
+                at = now,
+                serverId = "local",
+                announcementId = Guid.NewGuid(),
+                state = "draft"
+            }) + "\n",
+            cancellationToken);
+        var continuity = new EconomyContinuityService(
+            new EconomyContinuityOptions
+            {
+                BackupRoot = backups,
+                StagingRoot = staging,
+                RetentionDays = 60,
+                MinimumRetainedBackups = 8,
+                MinimumFreeSpaceBytes = 16_777_216,
+                CapacitySafetyPercent = 100,
+                RpoMinutes = 15,
+                TargetRtoMinutes = 60
+            },
+            data,
+            data,
+            root,
+            TimeProvider.System);
+        var closed = new ExtractionOperationGateState(
+            true,
+            "shared data root archive",
+            "test",
+            now);
+        var manifest = await continuity.CreateSnapshotAsync(
+            "local",
+            world,
+            closed,
+            0,
+            "shared-data-root-snapshot",
+            cancellationToken);
+        var archiveEntry = manifest.Files.Single(file => string.Equals(
+            file.Role,
+            CommandSideStateArchiveService.ManifestRole,
+            StringComparison.Ordinal));
+        Assert(archiveEntry.RelativePath ==
+               $"economy-state/{CommandSideStateArchiveService.ManifestFileName}",
+            "shared command/economy root did not place the JSONL archive manifest beside economy state");
+        Assert(continuity.VerifySnapshot("local", manifest.BackupId).ContentHash ==
+               manifest.ContentHash,
+            "shared command/economy root snapshot did not verify");
+        var restored = await continuity.RestoreToStagingAsync(
+            "local",
+            manifest.BackupId,
+            world,
+            cancellationToken);
+        Assert(restored.CommandReplayValid && restored.CommandIdempotencyValid &&
+               File.Exists(Path.Combine(
+                   restored.StagingDirectory,
+                   "economy-state",
+                   CommandSideStateArchiveService.ManifestFileName)),
+            "shared command/economy root did not restore and verify its JSONL archive");
     });
 }
 
@@ -794,6 +1017,39 @@ static async Task VerifyCommandSideStateFailureClosedAsync(CancellationToken can
             "paldefender-command-audit.jsonl");
         Assert(FileHash(backedUpCommand) == FileHash(stagedCommand),
             "staging restore changed the durable command queue bytes");
+
+        var unregistered = Path.Combine(commands, "unregistered-side-state.jsonl");
+        await File.WriteAllTextAsync(
+            unregistered,
+            JsonSerializer.Serialize(new { eventId = Guid.NewGuid() }) + "\n",
+            cancellationToken);
+        await AssertThrowsAsync<InvalidDataException>(() => continuity.CreateSnapshotAsync(
+            "local",
+            world,
+            closed,
+            0,
+            "unregistered-side-state-snapshot",
+            cancellationToken), "snapshot silently archived an unregistered JSONL channel");
+        File.Delete(unregistered);
+        Assert(!Directory.EnumerateDirectories(backups, ".partial-*", SearchOption.AllDirectories).Any(),
+            "unregistered JSONL failure left a partial snapshot");
+
+        var nestedSideStateDirectory = Path.Combine(commands, "nested");
+        Directory.CreateDirectory(nestedSideStateDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(nestedSideStateDirectory, "announcement-events.jsonl"),
+            JsonSerializer.Serialize(new { eventId = Guid.NewGuid() }) + "\n",
+            cancellationToken);
+        await AssertThrowsAsync<InvalidDataException>(() => continuity.CreateSnapshotAsync(
+            "local",
+            world,
+            closed,
+            0,
+            "nested-side-state-snapshot",
+            cancellationToken), "snapshot treated a nested JSONL as a registered root channel");
+        Directory.Delete(nestedSideStateDirectory, recursive: true);
+        Assert(!Directory.EnumerateDirectories(backups, ".partial-*", SearchOption.AllDirectories).Any(),
+            "nested JSONL failure left a partial snapshot");
 
         var conflictingCommand = Guid.NewGuid();
         await WriteCommandAuditAsync(
@@ -1071,6 +1327,11 @@ static async Task AssertThrowsAsync<TException>(Func<Task> action, string messag
         return;
     }
     throw new InvalidOperationException(message);
+}
+
+sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+{
+    public override DateTimeOffset GetUtcNow() => value;
 }
 
 sealed class InjectedFaultException : Exception

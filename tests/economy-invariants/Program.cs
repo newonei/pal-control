@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -15,11 +16,109 @@ VerifyZoneGeometryAndValidation();
 VerifyWhitelistSnapshotHash();
 await VerifyWalletConservationAndIdempotencyAsync(cancellationToken);
 await VerifyConcurrentPurchaseLimitsAndReplaysAsync(cancellationToken);
+await VerifyConcurrentGlobalStockAndRefundReplenishmentAsync(cancellationToken);
+await VerifyOfferEvidenceAtCommitAsync(cancellationToken);
 await VerifyDomainAndDatabaseUniquenessAsync(cancellationToken);
 await VerifyLegacyJsonlMigrationAsync(cancellationToken);
 
 Console.WriteLine(
-    "PASS: price, zone, hash, wallet conservation, 100-way concurrency, limits, replay, migration, and uniqueness checks.");
+    "PASS: price, zone, hash, wallet conservation, 100-way concurrency, personal/global stock limits, refund replenishment, replay, migration, and uniqueness checks.");
+
+static async Task VerifyOfferEvidenceAtCommitAsync(CancellationToken cancellationToken)
+{
+    await WithStoreDirectoryAsync(async directory =>
+    {
+        using var repository = new SqliteExtractionRepository(directory);
+        var (season, account) = await CreateSeasonAndAccountAsync(
+            repository,
+            "offer-commit",
+            cancellationToken);
+        _ = await repository.AdjustWalletAsync(
+            WalletRequest(account.AccountId, season.SeasonId, 1_000, "offer-credit", "offer-credit"),
+            cancellationToken);
+
+        var offeredVersionId = Guid.NewGuid();
+        var replacementVersionId = Guid.NewGuid();
+        var offeredHash = new string('a', 64);
+        var replacementHash = new string('b', 64);
+        _ = await repository.UpsertProductAsync(
+            Product("VERSIONED-OFFER", 100, 10) with
+            {
+                ContentVersionId = offeredVersionId,
+                ContentHash = offeredHash
+            },
+            null,
+            "content-test",
+            cancellationToken);
+
+        WriteContentPointer(
+            directory,
+            (offeredVersionId, offeredHash),
+            (replacementVersionId, replacementHash),
+            replacementVersionId);
+        var request = PurchaseRequest(
+            account.AccountId,
+            season.SeasonId,
+            "VERSIONED-OFFER",
+            1,
+            "stale-offer-purchase") with
+        {
+            ExpectedContentVersionId = offeredVersionId,
+            ExpectedContentHash = offeredHash
+        };
+        var stale = await repository.PurchaseAsync(request, cancellationToken);
+        Assert(!stale.Created && stale.ErrorCode == "OFFER_NOT_AVAILABLE",
+            "A stale content offer was committed after the current pointer changed.");
+        var unchanged = await repository.GetWalletAsync(
+            account.AccountId,
+            season.SeasonId,
+            cancellationToken);
+        Assert(unchanged.MarketCoin.Balance == 1_000,
+            "A rejected stale offer changed the wallet balance.");
+
+        WriteContentPointer(
+            directory,
+            (offeredVersionId, offeredHash),
+            (replacementVersionId, replacementHash),
+            offeredVersionId);
+        var committed = await repository.PurchaseAsync(
+            request with { IdempotencyKey = "current-offer-purchase" },
+            cancellationToken);
+        Assert(committed.Created && committed.Order?.Lines.Single().ContentVersionId == offeredVersionId,
+            "The current content offer did not commit with frozen version evidence.");
+    });
+}
+
+static void WriteContentPointer(
+    string directory,
+    (Guid VersionId, string Hash) first,
+    (Guid VersionId, string Hash) second,
+    Guid currentVersionId)
+{
+    using var connection = OpenDatabase(Path.Combine(directory, "extraction-commerce.db"));
+    using var command = connection.CreateCommand();
+    command.CommandText = """
+        CREATE TABLE IF NOT EXISTS content_versions (
+            version_id TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS content_current (
+            server_id TEXT PRIMARY KEY,
+            version_id TEXT NOT NULL
+        );
+        INSERT OR REPLACE INTO content_versions (version_id, content_hash)
+        VALUES ($firstId, $firstHash), ($secondId, $secondHash);
+        INSERT INTO content_current (server_id, version_id)
+        VALUES ('local', $currentId)
+        ON CONFLICT(server_id) DO UPDATE SET version_id = excluded.version_id;
+        """;
+    command.Parameters.AddWithValue("$firstId", first.VersionId.ToString("D"));
+    command.Parameters.AddWithValue("$firstHash", first.Hash);
+    command.Parameters.AddWithValue("$secondId", second.VersionId.ToString("D"));
+    command.Parameters.AddWithValue("$secondHash", second.Hash);
+    command.Parameters.AddWithValue("$currentId", currentVersionId.ToString("D"));
+    command.ExecuteNonQuery();
+}
 
 static async Task VerifyDailyPriceRotationAsync(CancellationToken cancellationToken)
 {
@@ -127,16 +226,24 @@ static void VerifyZoneGeometryAndValidation()
     var findZone = RequireMethod(
         typeof(ExtractionSettlementService),
         "FindZone",
+        BindingFlags.Static | BindingFlags.NonPublic);
+    var getRuntimeZones = RequireMethod(
+        typeof(ExtractionSettlementService),
+        "GetRuntimeZones",
         BindingFlags.Instance | BindingFlags.NonPublic);
+    var runtimeZones = getRuntimeZones.Invoke(
+        service,
+        [null, DateTimeOffset.UtcNow, false])
+        ?? throw new InvalidOperationException("Production runtime-zone projection returned null.");
 
     var boundary = new ExtractionLivePlayer("steam_boundary", "Boundary", true, null, 13, 24);
     var outside = boundary with { MapX = 13.0001 };
     var missing = boundary with { MapX = null };
-    Assert(ReferenceEquals(findZone.Invoke(service, [boundary]), zone),
+    Assert(findZone.Invoke(null, [boundary, runtimeZones]) is not null,
         "A point exactly on the circular zone boundary was rejected.");
-    Assert(findZone.Invoke(service, [outside]) is null,
+    Assert(findZone.Invoke(null, [outside, runtimeZones]) is null,
         "A point outside the circular zone boundary was accepted.");
-    Assert(findZone.Invoke(service, [missing]) is null,
+    Assert(findZone.Invoke(null, [missing, runtimeZones]) is null,
         "A player without a complete position matched an extraction zone.");
 
     var world = ExtractionCoordinateTransform.ToWorld(new ExtractionMapPoint(10, 20));
@@ -171,11 +278,16 @@ static void VerifyWhitelistSnapshotHash()
     {
         ["Leather"] = 6
     };
+    var quotedItemIds = new[] { "Leather", "Bone" };
 
-    var first = InvokeHash(hashMethod, firstTotals);
-    var reordered = InvokeHash(hashMethod, reorderedTotals);
-    var unknown = InvokeHash(hashMethod, withUnknownItem);
-    var changed = InvokeHash(hashMethod, changedWhitelistItem);
+    var first = InvokeHash(hashMethod, firstTotals, quotedItemIds);
+    var reordered = InvokeHash(hashMethod, reorderedTotals, quotedItemIds);
+    var unknown = InvokeHash(hashMethod, withUnknownItem, quotedItemIds);
+    var dynamicAllowlist = InvokeHash(
+        hashMethod,
+        withUnknownItem,
+        quotedItemIds.Append("NotWhitelisted"));
+    var changed = InvokeHash(hashMethod, changedWhitelistItem, quotedItemIds);
     Assert(first.Length == 64 && first.All(character =>
             char.IsAsciiDigit(character) || character is >= 'a' and <= 'f'),
         "Snapshot hash is not lowercase SHA-256 hexadecimal.");
@@ -183,6 +295,8 @@ static void VerifyWhitelistSnapshotHash()
         "Snapshot hash changed with dictionary order or item-id casing.");
     Assert(first == unknown,
         "A non-whitelisted inventory item changed the settlement snapshot hash.");
+    Assert(first != dynamicAllowlist,
+        "A resource added to the published allow-list was omitted from the settlement snapshot hash.");
     Assert(first != changed,
         "Changing a whitelisted inventory quantity did not change the snapshot hash.");
 }
@@ -396,6 +510,163 @@ static async Task VerifyConcurrentPurchaseLimitsAndReplaysAsync(
     });
 }
 
+static async Task VerifyConcurrentGlobalStockAndRefundReplenishmentAsync(
+    CancellationToken cancellationToken)
+{
+    await WithStoreDirectoryAsync(async directory =>
+    {
+        using var repository = new SqliteExtractionRepository(directory);
+        var (season, firstAccount) = await CreateSeasonAndAccountAsync(
+            repository,
+            "global-stock",
+            cancellationToken);
+        var accounts = new List<ExtractionAccount> { firstAccount };
+        for (var index = 1; index < 100; index++)
+        {
+            accounts.Add(await repository.GetOrCreateAccountAsync(
+                "steam",
+                $"steam_global_stock_{index:000}",
+                $"Global Stock {index:000}",
+                cancellationToken));
+        }
+        for (var index = 0; index < accounts.Count; index++)
+        {
+            var seed = await repository.AdjustWalletAsync(
+                WalletRequest(
+                    accounts[index].AccountId,
+                    season.SeasonId,
+                    100,
+                    $"global-stock-seed-{index:000}",
+                    $"global-stock-seed-{index:000}"),
+                cancellationToken);
+            Assert(seed.Created, $"Global-stock wallet seed {index} was not created.");
+        }
+
+        const int stock = 13;
+        var definition = Product("GLOBAL-STOCK-ITEM", 10, null) with
+        {
+            Category = "resources",
+            Tags = ["weekly", "featured"],
+            FeaturedRank = 2,
+            GlobalStock = stock,
+            ContentVersionId = Guid.Parse("22222222-2222-2222-2222-222222222229"),
+            ContentHash = new string('a', 64)
+        };
+        var product = await repository.UpsertProductAsync(
+            definition,
+            null,
+            "test",
+            cancellationToken);
+
+        var purchases = await Task.WhenAll(accounts.Select((account, index) =>
+            repository.PurchaseAsync(
+                PurchaseRequest(
+                    account.AccountId,
+                    season.SeasonId,
+                    product.Sku,
+                    1,
+                    $"global-stock-purchase-{index:000}"),
+                cancellationToken)));
+        Assert(purchases.Count(result => result.Created) == stock,
+            "100 concurrent server-wide-stock purchases did not stop exactly at stock capacity.");
+        Assert(purchases.Count(result => result.ErrorCode == "GLOBAL_STOCK_EXCEEDED") == 100 - stock,
+            "Concurrent server-wide-stock failures were not stable.");
+        Assert(await repository.GetGlobalPurchasedQuantityAsync(
+                   season.SeasonId,
+                   product.Sku,
+                   cancellationToken) == stock,
+            "The server-wide purchased projection did not equal committed stock occupancy.");
+
+        var successful = purchases.First(result => result.Created);
+        var frozenLine = successful.Order?.Lines.Single()
+            ?? throw new InvalidOperationException("A successful global-stock order has no line.");
+        Assert(frozenLine.Category == product.Category &&
+               frozenLine.Tags.SequenceEqual(product.Tags) &&
+               frozenLine.FeaturedRank == product.FeaturedRank &&
+               frozenLine.GlobalStock == product.GlobalStock &&
+               frozenLine.ContentVersionId == product.ContentVersionId &&
+               frozenLine.ContentHash == product.ContentHash,
+            "The order line did not freeze all product content evidence.");
+
+        var walletSnapshots = await Task.WhenAll(accounts.Select(account =>
+            repository.GetWalletAsync(account.AccountId, season.SeasonId, cancellationToken)));
+        Assert(walletSnapshots.Sum(snapshot => snapshot.MarketCoin.Balance) == 10_000 - stock * 10,
+            "Global-stock purchases did not conserve the aggregate wallet balance.");
+
+        var failedDelivery = await repository.MarkDeliveryOutcomeAsync(
+            successful.Order!.DeliveryId,
+            ShopDeliveryState.Failed,
+            "TEST_FAILURE",
+            "refund replenishment fixture",
+            cancellationToken);
+        Assert(failedDelivery.Updated, "The global-stock refund fixture could not fail its delivery.");
+        var refund = await repository.RefundFailedOrderAsync(
+            successful.Order.OrderId,
+            "global-stock-refund-0001",
+            "economy-invariants",
+            "refund replenishment fixture",
+            cancellationToken);
+        Assert(refund.Created &&
+               await repository.GetGlobalPurchasedQuantityAsync(
+                   season.SeasonId,
+                   product.Sku,
+                   cancellationToken) == stock - 1,
+            "Refunding a failed order did not replenish one unit of global stock.");
+
+        var replacementIndex = Array.FindIndex(purchases, result => !result.Created);
+        Assert(replacementIndex >= 0, "The global-stock fixture produced no rejected buyer.");
+        var replacement = await repository.PurchaseAsync(
+            PurchaseRequest(
+                accounts[replacementIndex].AccountId,
+                season.SeasonId,
+                product.Sku,
+                1,
+                "global-stock-replacement-0001"),
+            cancellationToken);
+        Assert(replacement.Created &&
+               await repository.GetGlobalPurchasedQuantityAsync(
+                   season.SeasonId,
+                   product.Sku,
+                   cancellationToken) == stock,
+            "A replenished global-stock unit could not be purchased exactly once.");
+
+        var updatedProduct = await repository.UpsertProductAsync(
+            definition with
+            {
+                Category = "rotated-resources",
+                Tags = ["rotated"],
+                FeaturedRank = null,
+                ContentVersionId = Guid.Parse("22222222-2222-2222-2222-222222222230"),
+                ContentHash = new string('b', 64)
+            },
+            product.Revision,
+            "test-content-publish",
+            cancellationToken);
+        var frozenOrder = await repository.GetOrderAsync(successful.Order.OrderId, cancellationToken);
+        var reloadedLine = frozenOrder?.Lines.Single()
+            ?? throw new InvalidOperationException("The frozen evidence order disappeared.");
+        Assert(updatedProduct.ContentVersionId != reloadedLine.ContentVersionId &&
+               reloadedLine.Category == frozenLine.Category &&
+               reloadedLine.Tags.SequenceEqual(frozenLine.Tags) &&
+               reloadedLine.FeaturedRank == frozenLine.FeaturedRank &&
+               reloadedLine.GlobalStock == frozenLine.GlobalStock &&
+               reloadedLine.ContentHash == frozenLine.ContentHash,
+            "Publishing a later product definition rewrote historical order evidence.");
+
+        walletSnapshots = await Task.WhenAll(accounts.Select(account =>
+            repository.GetWalletAsync(account.AccountId, season.SeasonId, cancellationToken)));
+        Assert(walletSnapshots.Sum(snapshot => snapshot.MarketCoin.Balance) == 10_000 - stock * 10,
+            "Refund replenishment changed aggregate money without changing occupied stock.");
+        var orders = await repository.ListOrdersAsync(null, season.SeasonId, 1_000, cancellationToken);
+        Assert(orders.Count == stock + 1 &&
+               orders.Count(order => order.State == ShopOrderState.Refunded) == 1 &&
+               orders.Where(order => order.State != ShopOrderState.Refunded)
+                   .SelectMany(order => order.Lines)
+                   .Sum(line => line.Quantity) == stock,
+            "Orders, refunded stock, and active global-stock occupancy diverged.");
+    });
+}
+
 static async Task VerifyDomainAndDatabaseUniquenessAsync(
     CancellationToken cancellationToken)
 {
@@ -547,7 +818,9 @@ static async Task VerifyLegacyJsonlMigrationAsync(CancellationToken cancellation
         }
 
         var sourceDatabase = Path.Combine(sourceDirectory, "extraction-commerce.db");
-        var payloads = ReadEventPayloads(sourceDatabase);
+        var payloads = ReadEventPayloads(sourceDatabase)
+            .Select(RemoveProductContentEvidence)
+            .ToList();
         Assert(payloads.Count >= 5, "Migration fixture did not contain the expected event history.");
         var legacyPath = Path.Combine(targetDirectory, "extraction-commerce-events.jsonl");
         File.WriteAllLines(legacyPath, payloads, new UTF8Encoding(false));
@@ -569,6 +842,24 @@ static async Task VerifyLegacyJsonlMigrationAsync(CancellationToken cancellation
                    order?.OrderId == expectedOrderId &&
                    product?.Sku == "MIGRATION-ITEM",
                 "Legacy JSONL migration did not rebuild the full economy projection.");
+            var migratedProduct = product
+                ?? throw new InvalidOperationException("The migrated legacy product disappeared.");
+            var legacyLine = order?.Lines.Single()
+                ?? throw new InvalidOperationException("The migrated legacy order has no line.");
+            Assert(migratedProduct.Tags.Count == 0 &&
+                   migratedProduct.GlobalStock is null &&
+                   migratedProduct.ContentVersionId is null &&
+                   migratedProduct.ContentHash is null &&
+                   legacyLine.Tags.Count == 0 &&
+                   legacyLine.GlobalStock is null &&
+                   legacyLine.ContentVersionId is null &&
+                   legacyLine.ContentHash is null,
+                "Legacy product events did not receive safe defaults for new content evidence fields.");
+            Assert(await migrated.GetGlobalPurchasedQuantityAsync(
+                       expectedSeasonId,
+                       migratedProduct.Sku,
+                       cancellationToken) == 2,
+                "The global purchased projection did not rebuild from a legacy order event.");
 
             var replay = await migrated.PurchaseAsync(purchaseRequest, cancellationToken);
             Assert(!replay.Created && !replay.IdempotencyConflict &&
@@ -675,6 +966,35 @@ static IReadOnlyList<string> ReadEventPayloads(string databasePath)
     return payloads;
 }
 
+static string RemoveProductContentEvidence(string payload)
+{
+    var root = JsonNode.Parse(payload)?.AsObject()
+        ?? throw new InvalidDataException("An economy event payload is not a JSON object.");
+    RemoveEvidence(root["product"] as JsonObject);
+    if (root["order"]?["lines"] is JsonArray lines)
+    {
+        foreach (var line in lines.OfType<JsonObject>())
+        {
+            RemoveEvidence(line);
+        }
+    }
+    return root.ToJsonString();
+
+    static void RemoveEvidence(JsonObject? value)
+    {
+        if (value is null)
+        {
+            return;
+        }
+        _ = value.Remove("category");
+        _ = value.Remove("tags");
+        _ = value.Remove("featuredRank");
+        _ = value.Remove("globalStock");
+        _ = value.Remove("contentVersionId");
+        _ = value.Remove("contentHash");
+    }
+}
+
 static SqliteConnection OpenDatabase(string databasePath)
 {
     var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -701,8 +1021,11 @@ static async Task InvokePrivateTaskAsync(
     await task;
 }
 
-static string InvokeHash(MethodInfo method, IReadOnlyDictionary<string, long> totals) =>
-    method.Invoke(null, [totals]) as string
+static string InvokeHash(
+    MethodInfo method,
+    IReadOnlyDictionary<string, long> totals,
+    IEnumerable<string> quotedItemIds) =>
+    method.Invoke(null, [totals, quotedItemIds]) as string
     ?? throw new InvalidOperationException("Production snapshot hashing returned null.");
 
 static async Task AssertThrowsAsync<TException>(

@@ -5,24 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
-# Do not let an ignored developer appsettings.Local.json accidentally enable a
-# production player portal in unrelated smoke processes. The dedicated player
-# economy smoke explicitly overrides this on its command line in Development.
-$env:PlayerPortal__Enabled = "false"
-
-# Integration APIs require an authenticated, attributable administrator. The
-# test-only loopback principal is explicit, process-scoped, and rejected unless
-# Security:DevelopmentMode is true. Production examples never enable it.
-$env:Security__AdminAuthentication__Enabled = "true"
-$env:Security__AdminAuthentication__EnableLoopbackDevelopmentPrincipal = "true"
-$env:Security__AdminAuthentication__DevelopmentPrincipalSubject = "integration-test"
-$env:Security__AdminAuthentication__Principals__0__Subject = "integration-test"
-$env:Security__AdminAuthentication__Principals__0__ApiKeySha256 = `
-    "87052f5138109134ec8e8b25a5e18545e39c90244679e52b6c40c364cb671060"
-$env:Security__AdminAuthentication__Principals__0__Roles__0 = "Owner"
-$env:Security__AdminAuthentication__Principals__0__TotpSecretBase32 = `
-    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+. (Join-Path $PSScriptRoot "integration\helpers\test-api-environment.ps1")
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $hostExecutable = (Get-Process -Id $PID).Path
@@ -44,6 +27,10 @@ $integrationTests = @(
     "tests\integration\native-settlement-smoke.ps1",
     "tests\integration\delivery-receipts-smoke.ps1",
     "tests\integration\economy-invariants-smoke.ps1",
+    "tests\integration\content-definitions-smoke.ps1",
+    "tests\integration\content-projection-atomicity-smoke.ps1",
+    "tests\integration\economy-balance-guard-smoke.ps1",
+    "tests\integration\reliable-tasks-smoke.ps1",
     "tests\integration\identity-binding-smoke.ps1",
     "tests\integration\admin-auth-smoke.ps1",
     "tests\integration\control-api-boundary-smoke.ps1",

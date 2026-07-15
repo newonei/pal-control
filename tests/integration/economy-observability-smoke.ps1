@@ -105,6 +105,7 @@ function Remove-TestTree([string] $path) {
 }
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "helpers\synthetic-resource-catalog.ps1")
 $serviceRoot = Join-Path $repositoryRoot "services\control-api"
 $project = Join-Path $serviceRoot "PalControl.ControlApi.csproj"
 $testRoot = Join-Path $env:TEMP (
@@ -150,6 +151,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Control API Release build failed with exit code $LASTEXITCODE."
     }
+    Write-SyntheticResourceCatalog $buildRoot
 
     $arguments = @(
         (Join-Path $buildRoot "PalControl.ControlApi.dll"),

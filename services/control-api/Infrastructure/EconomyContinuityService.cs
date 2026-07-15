@@ -134,9 +134,10 @@ public enum EconomyContinuityFaultPoint
 
 /// <summary>
 /// Creates one recoverable point-in-time bundle for the authoritative economy
-/// SQLite database plus bounded legacy/command side state that has not yet
-/// migrated into SQLite. SQLite's online backup API includes committed WAL
-/// frames; the checkpoint frame counts are retained as evidence in the manifest.
+/// SQLite database plus registered legacy/command side state that has not yet
+/// migrated into SQLite. Non-economic JSONL channels receive a nested immutable
+/// archive manifest. SQLite's online backup API includes committed WAL frames;
+/// the checkpoint frame counts are retained as evidence in the outer manifest.
 /// </summary>
 public sealed class EconomyContinuityService
 {
@@ -155,6 +156,7 @@ public sealed class EconomyContinuityService
     private readonly string _stagingRoot;
     private readonly TimeProvider _timeProvider;
     private readonly Action<EconomyContinuityFaultPoint>? _faultInjector;
+    private readonly CommandSideStateArchiveService _commandSideStateArchive = new();
 
     public EconomyContinuityService(
         IOptions<EconomyContinuityOptions> options,
@@ -363,6 +365,22 @@ public sealed class EconomyContinuityService
                         rolePrefix: "command-outbox-audit",
                         excludedSubtree: commandExcludedSubtree);
                 }
+                var archivedCommandRoot = PathsEqual(
+                    _commandDataDirectory,
+                    _economyDataDirectory)
+                        ? economyTarget
+                        : commandTarget;
+                _commandSideStateArchive.CreateManifest(
+                    archivedCommandRoot,
+                    now,
+                    _options.RetentionDays,
+                    _options.MinimumRetainedBackups);
+                files.Add(FileEntry(
+                    partialRoot,
+                    Path.Combine(
+                        archivedCommandRoot,
+                        CommandSideStateArchiveService.ManifestFileName),
+                    CommandSideStateArchiveService.ManifestRole));
                 _faultInjector?.Invoke(EconomyContinuityFaultPoint.AfterCommandSideStateCopy);
                 var commandSourceAfter = CaptureStableSideState(
                     _commandDataDirectory,
@@ -1302,6 +1320,10 @@ public sealed class EconomyContinuityService
         name.Contains(".partial-", StringComparison.OrdinalIgnoreCase) ||
         name.EndsWith("-shm", StringComparison.OrdinalIgnoreCase) ||
         name.EndsWith("-wal", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(
+            name,
+            CommandSideStateArchiveService.ManifestFileName,
+            StringComparison.OrdinalIgnoreCase) ||
         (excludeMainDatabase &&
          string.Equals(name, "extraction-commerce.db", StringComparison.OrdinalIgnoreCase));
 
@@ -1368,7 +1390,8 @@ public sealed class EconomyContinuityService
         name.Contains("scheduler", StringComparison.OrdinalIgnoreCase) ||
         name.Contains("rotation", StringComparison.OrdinalIgnoreCase) ? "scheduler" :
         name.Contains("evidence", StringComparison.OrdinalIgnoreCase) ? "delivery-evidence" :
-        name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ? "append-audit-outbox" :
+        name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)
+            ? CommandSideStateArchiveService.ClassifyJsonLines(name) :
         "state";
 
     private static CommandSideStateVerification ValidateCommandSideState(string root)
@@ -1606,9 +1629,43 @@ public sealed class EconomyContinuityService
             throw new InvalidDataException(
                 "The economy snapshot failed schema, foreign-key, or ledger projection validation.");
         }
-        var commandRoot = Directory.Exists(Path.Combine(root, "command-state"))
-            ? Path.Combine(root, "command-state")
-            : Path.Combine(root, "economy-state");
+        var archiveManifestFiles = manifest.Files
+            .Where(file => string.Equals(
+                file.Role,
+                CommandSideStateArchiveService.ManifestRole,
+                StringComparison.Ordinal))
+            .ToArray();
+        if (archiveManifestFiles.Length > 1)
+        {
+            throw new InvalidDataException(
+                "The economy snapshot contains multiple command side-state archive manifests.");
+        }
+        var commandRoot = archiveManifestFiles.Length == 1 &&
+            archiveManifestFiles[0].RelativePath.StartsWith(
+                "economy-state/",
+                StringComparison.Ordinal)
+                ? Path.Combine(root, "economy-state")
+                : Directory.Exists(Path.Combine(root, "command-state"))
+                    ? Path.Combine(root, "command-state")
+                    : Path.Combine(root, "economy-state");
+        if (archiveManifestFiles.Length == 1)
+        {
+            var expectedRelativePath = Path.GetRelativePath(
+                    root,
+                    Path.Combine(
+                        commandRoot,
+                        CommandSideStateArchiveService.ManifestFileName))
+                .Replace('\\', '/');
+            if (!string.Equals(
+                    archiveManifestFiles[0].RelativePath,
+                    expectedRelativePath,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The command side-state archive manifest is outside its frozen command-state root.");
+            }
+            _ = new CommandSideStateArchiveService().Verify(commandRoot);
+        }
         var commandReplay = ValidateCommandSideState(commandRoot);
         if (!commandReplay.ReplayValid || !commandReplay.IdempotencyValid)
         {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AdminAccessGate } from "../features/auth/AdminAccessGate";
 import { AnnouncementBoard } from "../features/announcements/AnnouncementBoard";
 import { ServerConfigurationPanel } from "../features/configuration/ServerConfigurationPanel";
+import { ContentManagement } from "../features/content/ContentManagement";
 import { DashboardOverview } from "../features/dashboard/DashboardOverview";
 import { ExtractionCenter } from "../features/extraction";
 import { LivePlayerMap } from "../features/map/LivePlayerMap";
@@ -31,6 +32,7 @@ type NavKey =
   | "dashboard"
   | "players"
   | "extraction"
+  | "content"
   | "operations"
   | "directory"
   | "announcements"
@@ -45,6 +47,7 @@ const navigation: Array<{ key: NavKey; label: string; glyph: string; group: stri
   { key: "extraction", label: "资源经济", glyph: "兑", group: "玩家运营" },
   { key: "operations", label: "奖励与管理", glyph: "奖", group: "玩家运营" },
   { key: "directory", label: "公会与封禁", glyph: "会", group: "玩家运营" },
+  { key: "content", label: "内容版本", glyph: "版", group: "内容运营" },
   { key: "announcements", label: "公告中心", glyph: "公", group: "内容运营" },
   { key: "map", label: "实时地图", glyph: "图", group: "内容运营" },
   { key: "saves", label: "存档管理", glyph: "档", group: "服务器" },
@@ -165,6 +168,7 @@ function ConsoleApp() {
       />;
     }
     if (activeNav === "directory") return <PalDefenderDirectory connected={pdConnected} />;
+    if (activeNav === "content") return <ContentManagement serverId={capabilities?.serverId ?? "local"} />;
     if (activeNav === "announcements") {
       return <AnnouncementBoard
         restConnected={capabilities?.officialRestConnected ?? false}

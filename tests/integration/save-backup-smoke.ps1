@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$env:PlayerPortal__Enabled = "false"
+. (Join-Path $PSScriptRoot "helpers\test-api-environment.ps1")
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)

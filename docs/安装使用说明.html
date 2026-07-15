@@ -125,7 +125,7 @@
       <tbody>
         <tr><td>操作系统</td><td>64 位 Windows 10、Windows 11 或 Windows Server</td></tr>
         <tr><td>Palworld 服务端</td><td>已经安装，并能正常启动进入世界</td></tr>
-        <tr><td>白名单资源目录</td><td>基础管理台不需要；启用玩家门户、商城或资源兑换前，管理员必须自行提供经授权的 <code>&lt;安装目录&gt;\Resources\palworld-resource-catalog.json</code>（源码运行时对应 <code>services/control-api/Resources</code>）。公开安装包因再分发授权未闭环而不包含它</td></tr>
+        <tr><td>白名单资源目录</td><td>基础管理台不需要；启用玩家门户、商城或资源兑换前，管理员必须自行提供经授权的 <code>&lt;安装目录&gt;\Resources\palworld-resource-catalog.json</code>（源码运行时对应 <code>services/control-api/Resources</code>）。公开安装包因再分发授权未闭环而不包含它，也不内置生成脚本</td></tr>
         <tr><td>权限</td><td>幻兽商域采用当前用户安装，通常不需要管理员权限</td></tr>
         <tr><td>网络</td><td>管理台默认只在本机 <code>127.0.0.1:5180</code> 打开</td></tr>
       </tbody>
@@ -185,6 +185,10 @@
     <div class="warning">玩家门户、PalDefender、RCON 和 Native 写能力默认关闭。这是安全设计，不是安装失败。当前资源兑换在 Native 持久化证据未通过时会保持只读；不要为了“全部变绿”而直接开放端口、伪造能力或跳过版本检查。</div>
     <p>公网 Steam 登录的完整配置不是安装向导默认开启项。请按 GitHub 仓库中的 <a href="https://github.com/newonei/pal-control/blob/main/docs/player-portal/01-%E9%83%A8%E7%BD%B2%E6%89%8B%E5%86%8C.md">玩家门户部署手册</a> 配置域名、TLS、Caddy、Steam OpenID、PalDefender REST、经授权的白名单资源目录和仅回环可达的 RCON 密码文件，再执行验收清单。发布包只附带本说明，不包含仓库的完整运行手册。OpenID 只证明 Steam 身份；游戏内验证码成功并确认本周 <code>worldId + PlayerUID</code> 后才会建立正式会话。</p>
     <div class="warning"><strong>资源经济前置条件：</strong>公开安装包不包含 <code>palworld-resource-catalog.json</code>。缺少管理员自行提供的经授权目录时，基础管理页仍可使用，但玩家绑定、商城初始化和白名单资源兑换会保持不可用；不要从不明来源下载或重新分发游戏数据快照。</div>
+    <p>若已审查并接受目录工具引用的外部数据条款，请从 <a href="https://github.com/newonei/pal-control">GitHub 源码仓库</a>取得 <code>tools/catalogs/update-palworld-resource-catalog.ps1</code>，在仓库根目录运行：</p>
+    <pre><code>.\tools\catalogs\update-palworld-resource-catalog.ps1 `
+  -OutputPath "$env:LOCALAPPDATA\Programs\PalControl\Resources\palworld-resource-catalog.json"</code></pre>
+    <p>若安装时修改过目录，请把 <code>-OutputPath</code> 换成实际的 <code>&lt;安装目录&gt;\Resources\palworld-resource-catalog.json</code>。也可放入自行取得授权且符合 schema 的快照。该文件只留在服务器本机；生成成功后再启用 <code>ExtractionMode</code>，否则 Control API 会按安全设计拒绝启动。</p>
 
     <h2>七、常见问题</h2>
     <details open>

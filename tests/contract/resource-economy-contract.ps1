@@ -3,6 +3,9 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $settlementPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\ExtractionSettlementService.cs"
+$contentDefaultsPath = Join-Path $repositoryRoot `
+    "services\control-api\Content\EconomyContentDefaults.cs"
+$programPath = Join-Path $repositoryRoot "services\control-api\Program.cs"
 $resourceCatalogPath = Join-Path $repositoryRoot `
     "services\control-api\Resources\palworld-resource-catalog.json"
 $approvedItemIdsPath = Join-Path $PSScriptRoot `
@@ -52,16 +55,16 @@ function Get-OpenApiSchemaBlock([string] $document, [string] $schemaName) {
 
 $utf8 = [Text.UTF8Encoding]::new($false)
 $source = [IO.File]::ReadAllText($settlementPath, $utf8)
-$catalogMarker =
-    "private static readonly IReadOnlyDictionary<string, LootDefinition> LootCatalog"
-$catalogStart = $source.IndexOf($catalogMarker, [StringComparison]::Ordinal)
-Assert-Contract ($catalogStart -ge 0) "LootCatalog declaration is missing."
-$catalogEnd = $source.IndexOf("        };", $catalogStart, [StringComparison]::Ordinal)
-Assert-Contract ($catalogEnd -gt $catalogStart) "LootCatalog terminator is missing."
-$catalogBlock = $source.Substring($catalogStart, $catalogEnd - $catalogStart)
+$contentDefaults = [IO.File]::ReadAllText($contentDefaultsPath, $utf8)
+$catalogMarker = "var resources = new (string Id, string Category, long Value)[]"
+$catalogStart = $contentDefaults.IndexOf($catalogMarker, [StringComparison]::Ordinal)
+Assert-Contract ($catalogStart -ge 0) "Scheme A default resource declaration is missing."
+$catalogEnd = $contentDefaults.IndexOf("        };", $catalogStart, [StringComparison]::Ordinal)
+Assert-Contract ($catalogEnd -gt $catalogStart) "Scheme A default resource terminator is missing."
+$catalogBlock = $contentDefaults.Substring($catalogStart, $catalogEnd - $catalogStart)
 
 $entryPattern =
-    '(?m)^\s*\["(?<id>[^"]+)"\]\s*=\s*new\("(?<name>(?:[^"\\]|\\.)*)",\s*(?<value>\d+)\),?\s*$'
+    '\("(?<id>[^"]+)",\s*"(?<category>(?:[^"\\]|\\.)*)",\s*(?<value>\d+)\)'
 $matches = [regex]::Matches($catalogBlock, $entryPattern)
 Assert-Contract ($matches.Count -gt 0) "the sellable resource whitelist is empty."
 Assert-Contract ($matches.Count -le 500) `
@@ -99,13 +102,13 @@ $whitelistIds = [Collections.Generic.HashSet[string]]::new(
 $totalUnitValue = 0L
 foreach ($match in $matches) {
     $itemId = $match.Groups["id"].Value
-    $displayName = $match.Groups["name"].Value
+    $category = $match.Groups["category"].Value
     $unitValue = [int64]$match.Groups["value"].Value
 
     Assert-Contract ($whitelistIds.Add($itemId)) `
         "duplicate item id '$itemId' (case-insensitive)."
-    Assert-Contract (-not [string]::IsNullOrWhiteSpace($displayName)) `
-        "item '$itemId' has no display name."
+    Assert-Contract (-not [string]::IsNullOrWhiteSpace($category)) `
+        "item '$itemId' has no content category."
     Assert-Contract ($unitValue -gt 0 -and $unitValue -le 1000000) `
         "item '$itemId' has unsafe unit value '$unitValue'."
     Assert-Contract ($approvedItemIds.Contains($itemId)) `
@@ -122,23 +125,51 @@ Assert-Contract ($whitelistIds.Count -eq $approvedItemIds.Count) `
 $singleline = [Text.RegularExpressions.RegexOptions]::Singleline
 Assert-Contract ([regex]::IsMatch(
         $source,
-        '\.Where\(\s*item\s*=>\s*item\.Value\s*>\s*0\s*&&\s*LootCatalog\.ContainsKey\(item\.Key\)\s*\)',
+        'var\s+runtimeContent\s*=\s*_content\s+is\s+null\s*\?\s*null\s*:\s*await\s+_content\.GetCurrentAsync',
         $singleline)) `
-    "quote generation no longer filters positive inventory through LootCatalog."
+    "production quote generation no longer loads the published content version."
+Assert-Contract ([regex]::IsMatch(
+        $source,
+        'var\s+sellableResources\s*=\s*runtimeContent\s+is\s+null\s*\?\s*LootCatalog[\s\S]*?:\s*runtimeContent\.Resources\.Values[\s\S]*?resource\.ExchangeZoneIds\.Contains',
+        $singleline)) `
+    "published resources are not scoped to the active exchange zone, or the legacy catalog escaped its null-runtime fallback."
+Assert-Contract ([regex]::IsMatch(
+        $source,
+        '\.Where\(\s*item\s*=>\s*item\.Value\s*>\s*0\s*&&\s*sellableResources\.ContainsKey\(item\.Key\)\s*\)',
+        $singleline)) `
+    "quote generation no longer filters positive inventory through the published sell allow-list."
 Assert-Contract ([regex]::IsMatch(
         $source,
         'foreach\s*\(\s*var containerName in new\[\]\s*\{\s*"Items"\s*,\s*"Food"\s*,\s*"DropSlot"\s*\}\s*\)',
         $singleline)) `
     "inventory aggregation no longer covers Items, Food and DropSlot."
 Assert-Contract ($source.IndexOf(
-        "checked(item.Value * definition.UnitValue)",
+        "checked(item.Value * effectiveUnitValue)",
         [StringComparison]::Ordinal) -ge 0) `
     "quote totals are no longer overflow-checked."
-Assert-Contract ([regex]::IsMatch(
-        $source,
-        'HashSnapshot[\s\S]*?LootCatalog\.Keys\s*\.OrderBy',
-        $singleline)) `
-    "inventory snapshot hashing is no longer scoped to the whitelist."
+Assert-ContainsOrdinal $source `
+    "nativeSnapshot?.SnapshotHash ?? HashSnapshot(" `
+    "production Native snapshot evidence is no longer frozen into the quote."
+Assert-ContainsOrdinal $source `
+    "lines.Select(line => line.ItemId)" `
+    "the development quote snapshot is not bound to every quoted Scheme A allow-list item."
+Assert-ContainsOrdinal $source `
+    "existing.Items.Select(line => line.ItemId)" `
+    "settlement no longer verifies the exact allow-list item set frozen into the quote."
+Assert-ContainsOrdinal $source `
+    "EconomyContentEvidence.MatchesCurrent(" `
+    "settlement no longer compares frozen quote evidence with the current content version."
+Assert-ContainsOrdinal $source `
+    '"QUOTE_CONTENT_CHANGED"' `
+    "a quote crossing a content rotation no longer fails with a stable error code."
+
+$programSource = [IO.File]::ReadAllText($programPath, $utf8)
+Assert-ContainsOrdinal $programSource "AddSingleton<SqliteEconomyContentStore>()" `
+    "the durable economy-content store is not registered."
+Assert-ContainsOrdinal $programSource "AddSingleton<EconomyContentRuntimeService>()" `
+    "the published economy-content runtime is not registered in production DI."
+Assert-ContainsOrdinal $programSource "AddHostedService<EconomyContentStartupInitializer>()" `
+    "an enabled fresh installation still waits for a player request before bootstrapping Scheme A content."
 
 $coordinatorSource = [IO.File]::ReadAllText($coordinatorPath, $utf8)
 Assert-ContainsOrdinal $coordinatorSource `
@@ -183,6 +214,43 @@ Assert-ContainsOrdinal $adminSource "resourceExchange = new" `
 $openApi = [IO.File]::ReadAllText($openApiPath, $utf8)
 Assert-ContainsOrdinal $openApi "  /extraction/capabilities:" `
     "OpenAPI does not expose the extraction capability compatibility path."
+foreach ($contentPath in @(
+        "  /servers/{serverId}/economy-content/current:",
+        "  /servers/{serverId}/economy-content/drafts:",
+        "  /servers/{serverId}/economy-content/drafts/{draftId}/publish:",
+        "  /servers/{serverId}/economy-content/rollback:")) {
+    Assert-ContainsOrdinal $openApi $contentPath `
+        "OpenAPI does not expose the versioned content path '$contentPath'."
+}
+Assert-ContainsOrdinal $openApi "OFFER_NOT_AVAILABLE" `
+    "OpenAPI does not document fail-closed stale shop offers."
+$catalogSchema = Get-OpenApiSchemaBlock $openApi "ExtractionCatalog"
+foreach ($field in @(
+        "contentVersionId", "contentHash", "businessDate", "rulesVersion", "rotation")) {
+    Assert-Contract ([regex]::IsMatch(
+            $catalogSchema,
+            "(?m)^        - $field\s*$")) `
+        "OpenAPI ExtractionCatalog does not require '$field'."
+}
+$productSchema = Get-OpenApiSchemaBlock $openApi "ExtractionShopProduct"
+foreach ($field in @(
+        "sku", "personalLimitRemaining", "serverStockRemaining",
+        "globalStock", "contentVersionId", "contentHash")) {
+    Assert-Contract ([regex]::IsMatch(
+            $productSchema,
+            "(?m)^        - $field\s*$")) `
+        "OpenAPI ExtractionShopProduct does not require '$field'."
+}
+foreach ($requestSchemaName in @(
+        "CreateExtractionOrderRequest", "CreatePlayerPortalOrderRequest")) {
+    $requestSchema = Get-OpenApiSchemaBlock $openApi $requestSchemaName
+    foreach ($field in @("sku", "contentVersionId", "contentHash")) {
+        Assert-Contract ([regex]::IsMatch(
+                $requestSchema,
+                "(?m)^\s+required:\s*\[[^\]]*\b$field\b[^\]]*\]\s*$")) `
+            "OpenAPI $requestSchemaName does not require '$field'."
+    }
+}
 $capabilitiesSchema = Get-OpenApiSchemaBlock $openApi "ExtractionCapabilities"
 foreach ($field in @("gameplayMode", "readReady", "maintenance", "writes", "evaluatedAt")) {
     Assert-Contract ([regex]::IsMatch(

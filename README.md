@@ -30,6 +30,12 @@
 
 ![Pal Control 管理控制台仪表盘](docs/images/admin-dashboard.png)
 
+### 版本化内容管理
+
+演示响应显示 10 个商品、51 个资源、1 个兑换区和 6 个任务，并展示校验警告、版本差异、不可变版本历史及高风险发布入口。
+
+![Pal Control 方案 A 版本化内容管理、校验与发布](docs/images/content-management.png)
+
 ### 在线玩家地图
 
 ![Pal Control 在线玩家地图](docs/images/live-map.png)
@@ -68,16 +74,19 @@
 - **服务器配置**：搜索并分类编辑 `PalWorldSettings.ini`，提供输入校验、差异预览、危险项确认和保存前备份。
 - **存档中心**：请求官方保存、复制稳定快照、生成逐文件 SHA-256 清单并复核完整性；不提供恢复、删除、上传或原始 `.sav` 编辑。
 - **资源经济状态**：查看永久商域币、每周战备券、商品价格与个人限购、订单发货和资源兑换状态；调账、人工对账与周换档已有受保护 API/脚本，完整证据审批运营工作台仍列在 TODO。
+- **版本化内容管理**：在维护模式下从已发布版本创建草稿，保存完整 JSON、查看语义 diff、执行严格校验，并以不可变版本和 content hash 发布或回滚；高风险切换要求 TOTP、审计原因、确认短语、幂等键和结算排空。
+- **经济平衡工具**：发布前阻断可证明的同币种直接回售套利，并提供固定种子 100 玩家 × 7 业务日仿真和目标区间报告；制作/加工/拆包/跨币种的完整套利图仍列在 TODO。
 - **接口与审计**：展示 PalDefender 白名单能力、运维命令和追加式审计记录；需要异步游戏副作用的命令使用持久化队列与最终回执。
 
 ### 玩家门户
 
 - **Steam + 本周角色双层登录**：公网 Steam 服先经官方 OpenID 证明平台身份，再由在线角色接收 8 位游戏内验证码绑定当前 `worldId + PlayerUID`；可信好友服才可显式使用仅验证码 fallback，网页不收集 Steam 或游戏密码。
-- **双币钱包与战备商城**：查看永久商域币、周战备券、商品库存与个人限购，在线购买并跟踪发货状态。
+- **双币钱包与战备商城**：查看永久商域币、周战备券、显式商品分类/标签/推荐位、个人周限购与可选全服库存，在线购买并跟踪发货状态；旧内容版本的 offer 会被稳定拒绝。
 - **新玩家活动**：服务端支持按周世界发布不可变活动版本；玩家显式领取后，双钱包奖励、两条账本和领取记录在同一事务提交，同一版本只能领取一次。
+- **可靠任务与新手引导**：首页提供 5 步真实状态引导；日/周任务只累计服务端可复核的兑换、指定资源/价值、成功订单和货币消费事件，事件与奖励均可幂等重放。
 - **订单与资金流水**：只允许玩家查询自己的订单、退款/不确定状态以及购买、活动和资源兑换形成的账本记录。
-- **个人兑换点地图**：只返回当前登录玩家的位置、资源兑换点范围、距离和路线提示，不暴露其他玩家坐标。
-- **资源报价与兑换**：扫描允许容器中的白名单资源，生成限时整单报价，确认扣物后入账并保留兑换记录。
+- **个人兑换点地图**：只返回当前登录玩家的位置、资源兑换点范围、开放时间、距离、路线和收益倍率，不暴露其他玩家坐标。
+- **资源报价与兑换**：扫描允许容器中的白名单资源，生成带实时倒计时的限时整单报价，确认扣物后入账并保留兑换记录；处理中订单/兑换使用页面可见时的 3 秒有界轮询，终态后停止。
 
 ### 服务端与安全
 
@@ -106,10 +115,10 @@
 | 背包/帕鲁精细工具、顶部横幅、客户端浮层 | 精确版本 UE4SS Native MOD |
 | 玩家登录与本周角色绑定 | Player Portal、PalDefender REST 提供的在线 PlayerUID、经授权的本机白名单资源目录，以及本机受限 RCON `/send` 验证码通道；公网服还需 Steam OpenID/HTTPS |
 | 商城发货 | Player Portal、PalDefender 结构化发货回执与 Economy Safety Gate |
-| 商城/兑换初始化 | 管理员提供经授权的资源目录快照，并放在 `services/control-api/Resources/palworld-resource-catalog.json`；公开发行物不含该外部数据快照 |
+| 商城/兑换初始化 | 在启用 `ExtractionMode` 前，管理员先生成经授权的资源目录快照并放在 `services/control-api/Resources/palworld-resource-catalog.json`；公开发行物不含该外部数据快照 |
 | 资源兑换 | Player Portal、PalDefender 在线角色定位、精确版本 Native MOD、稳定 `inventory.consume` 持久化能力与周世界门禁 |
 
-默认配置中 **PalDefender、RCON 和玩家门户全部关闭**；Windows 安装器与生产样例还会把 `ExtractionMode` 关闭、初始双币设为 0。首次启动只能验证基础 Web/API；完整运营能力需要按本文配置外部服务。界面会依据服务端 capabilities 自动禁用未满足条件的写操作。
+默认配置中 **PalDefender、RCON 和玩家门户全部关闭**；Windows 安装器与生产样例还会把 `ExtractionMode` 关闭、初始双币设为 0。此时没有本地资源目录也能启动基础 Web/API。启用 `ExtractionMode` 后，Control API 会在接受 HTTP 流量前校验目录并原子初始化首个内容版本；目录缺失或非法会让启动失败，不会伪装成“已启用但没有内容”。完整运营能力仍需要按本文配置外部服务，界面会依据服务端 capabilities 禁用未满足条件的写操作。
 
 ## 架构
 
@@ -176,7 +185,7 @@ pal-control/
 
 ### 普通用户：使用 Windows 安装包
 
-发布目录中的 `幻兽商域-Setup-*.exe` 是 Windows x64 安装程序，自带 .NET 运行时和已经构建好的网页，不需要安装 Node.js、npm 或 .NET SDK。
+从 [GitHub Releases](https://github.com/newonei/pal-control/releases) 下载的 `幻兽商域-Setup-*.exe` 是 Windows x64 安装程序，自带 .NET 运行时和已经构建好的网页，不需要安装 Node.js、npm 或 .NET SDK。若 Releases 尚未提供安装程序，请按下方“从源代码运行”构建，不要从第三方网盘下载安装包。
 
 1. 双击安装程序并按提示完成安装。
 2. 从开始菜单打开“配置幻兽商域”，选择现有的 Palworld Dedicated Server 目录并填写服务器管理员密码。
@@ -185,11 +194,27 @@ pal-control/
 
 完整分步说明见 [普通用户安装与使用教程](docs/安装使用说明.html)。玩家门户、PalDefender、RCON 和 Native MOD 属于进阶功能，默认保持关闭；确认版本和安全边界后再逐项启用。
 
+公开安装包不包含外部游戏数据目录，也不内置目录生成脚本。要启用方案 A，请从本仓库取得并审查 `tools/catalogs/update-palworld-resource-catalog.ps1` 及其外部数据条款，然后在仓库根目录生成到安装位置，例如：
+
+```powershell
+.\tools\catalogs\update-palworld-resource-catalog.ps1 `
+  -OutputPath "$env:LOCALAPPDATA\Programs\PalControl\Resources\palworld-resource-catalog.json"
+```
+
+也可以在同一路径放入自行取得授权且符合 schema 的目录快照。生成文件仅留在服务器本机，不要提交或重新分发。
+
 开发者可运行 `deploy/windows/build-release.ps1` 重新生成便携 ZIP 和安装程序。
 
 ### 开发者：从源代码运行
 
 以下命令均从仓库根目录 `pal-control` 执行。
+
+### 0. 获取源码
+
+```powershell
+git clone https://github.com/newonei/pal-control.git
+Set-Location .\pal-control
+```
 
 ### 1. 安装依赖
 
@@ -231,7 +256,13 @@ Copy-Item `
 
 只验证 Web/API 外壳时可以不启动 PalServer；依赖真实游戏数据的页面会显示离线或降级状态。
 
-资源经济初始化还需要 `services/control-api/Resources/palworld-resource-catalog.json`。商品初始化、资源报价以及玩家登录后的本周世界绑定/账户上下文都会读取它；缺少目录时基础管理台仍可启动，但商城与玩家绑定会保持不可用。该生成快照因外部数据再分发授权尚未闭环而被刻意排除；只有在你确认 Paldeck、PalCalc、BWIKI 和底层游戏数据条款允许当前用途后，才可在本机运行 `tools/catalogs/update-palworld-resource-catalog.ps1` 或把经授权的替代快照放在上述精确路径。不要使用 `git add -f` 上传本机生成结果。
+开源仓库刻意不包含 `services/control-api/Resources/palworld-resource-catalog.json`，因为外部数据再分发授权尚未闭环。准备启用方案 A 前，先确认 Paldeck、PalCalc、BWIKI 和底层游戏数据条款允许当前用途，再在仓库根目录运行以下命令，或把经授权的替代快照放在同一精确路径：
+
+```powershell
+.\tools\catalogs\update-palworld-resource-catalog.ps1
+```
+
+随后再把 `ExtractionMode:Enabled` 改为 `true` 并启动 Control API。启动初始化器会在 HTTP 流量进入前校验目录、按真实存在的 ItemID 生成并原子激活首个内容版本；目录缺失或非法会直接启动失败。只验证基础管理台时可以保持 `ExtractionMode:Enabled=false`。不要使用 `git add -f` 上传本机生成目录。
 
 ### 3. 启动 Control API
 
@@ -272,9 +303,10 @@ npm run dev:player
 
 | 服务 | 地址 | 是否允许公网直连 |
 | --- | --- | --- |
-| 管理台 | `http://127.0.0.1:5173` | 否 |
-| 玩家门户开发服务器 | `http://127.0.0.1:5175` | 否 |
-| Control API | `http://127.0.0.1:5180` | 否 |
+| 安装包管理台 / Control API | `http://127.0.0.1:5180/` | 否 |
+| 安装包玩家页 | `http://127.0.0.1:5180/player/` | 否 |
+| 源码管理台 Vite 开发服务器 | `http://127.0.0.1:5173` | 否 |
+| 源码玩家门户 Vite 开发服务器 | `http://127.0.0.1:5175` | 否 |
 | Palworld 官方 REST | `http://127.0.0.1:8212` | 否 |
 | PalDefender REST | `http://127.0.0.1:17993` | 否 |
 | 本机 RCON | `127.0.0.1:25575` | 否，禁止端口映射 |
@@ -301,6 +333,8 @@ npm run dev:player
 
 PalDefender 的安装、Token 文件、版本和权限边界见 [PalDefender 集成运行手册](docs/runbooks/paldefender-integration.md)。
 
+经济内容不要直接改运行数据库或旧的 `SeedProducts` 兼容路径。草稿、diff、严格校验、维护排空、发布、失败重放与回滚步骤见 [经济内容发布与回滚运行手册](docs/runbooks/economy-content-publishing.md)。
+
 ### 使用玩家商城
 
 本地联调时，在 `appsettings.Local.json` 中启用玩家门户，显式使用 `AuthenticationMode: "TrustedGameCode"`，将 `CookieSecure` 临时设为 `false`，并只加入开发地址 `http://127.0.0.1:5175`。这只是可信好友服 fallback，不是 Steam 网站身份验证。公网 Steam 部署必须使用 `AuthenticationMode: "OpenIdThenGameCode"`、`PublicSteam: true`、安全 Cookie、官方 `https://steamcommunity.com/openid/` 和固定 HTTPS realm/return_to；Production 启动校验会拒绝降级配置。完整示例见 [玩家门户部署与安全资料](docs/player-portal/README.md)。
@@ -315,9 +349,11 @@ PalDefender 的安装、Token 文件、版本和权限边界见 [PalDefender 集
 
 不要让玩家输入游戏密码，也不要让其把验证码发给他人。
 
+完整的活动领取、可靠任务、购买、兑换、异常终态和 5 步引导说明见 [玩家使用教程](docs/player-portal/05-玩家使用教程.md)。
+
 ### 使用周世界资源经济模式
 
-当前闭环允许出售本周世界允许容器中的任意白名单资源：报价冻结完整背包快照，确认后由 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。当前 Native 能力仍标记为实验性，因此写闸门会保持关闭，直到固定版本上的真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
+当前闭环允许出售本周世界允许容器中的任意白名单资源：内置方案 A 内容列出 10 个商品候选和 51 个可售资源候选。启用 `ExtractionMode` 后，Control API 在启动阶段按本机授权资源目录中真实存在的 ItemID 生成并原子激活首个内容版本，完成后才接受 HTTP 流量。内容版本冻结商品、个人/全服库存、兑换区、任务、营业日、规则版本和 hash；价格每天确定性调整到基础价的 90%–110%，旧 offer 不能跨版本提交。报价冻结完整背包快照，确认后由 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。当前默认内容仍只有 1 个兑换区，两个真实兑换区验收、完整反套利和真实多人周档尚未完成。Native 能力也仍标记为实验性，因此写闸门会保持关闭，直到固定版本上的真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
 
 只读检查和周换档入口：
 
@@ -351,7 +387,7 @@ dotnet publish .\services\control-api\PalControl.ControlApi.csproj `
 
 ## 测试
 
-统一测试入口当前运行 11 个 contract 与 15 个 integration 脚本，并包含前端单元测试、方案 A 契约、Steam OpenID、玩家经济安全 E2E、Windows 配置保留、结算状态机、SQLite outbox、连续性和经济不变量 harness。它们使用本地 fake 与临时目录，不会连接真实 Palworld 服务端：
+统一测试入口当前运行 11 个 contract 与 19 个 integration 脚本，并包含前端单元测试、方案 A 契约、Steam OpenID、玩家经济安全 E2E、Windows 配置保留、结算状态机、SQLite outbox、连续性、版本化内容、内容投影原子性、可靠任务和经济不变量 harness。它们使用本地 fake、合成资源目录与临时目录，不会连接真实 Palworld 服务端，也不依赖本机被忽略的授权目录：
 
 ```powershell
 npm run lint:openapi
@@ -360,7 +396,7 @@ npm run test:contract
 npm run test:integration
 ```
 
-Windows GitHub Actions 会执行 Gitleaks、`npm ci`、两个前端构建、Control API/Bridge smoke/.NET 测试 harness 的 Release 构建和统一测试。结算 harness 已覆盖旧数据兼容、lease/CAS、终态不可倒退、SQLite 原子入账、队列背压、1000 并发唯一 credit 和崩溃恢复；发货 harness 覆盖 SQLite PalDefender outbox 的 100 路并发、server+key 唯一、租约恢复、dead-letter、事件不可变、终态不可重开、`dispatched` 不重发及旧 JSONL fail-closed 迁移；Steam/玩家经济黑盒覆盖 state/nonce、Origin、CSRF、IDOR、账号/世界绑定、商城、发货、Native 兑换、唯一入账和退出。能力测试还验证购买与资源兑换闸门独立关闭。上述自动测试不替代正式域名 Steam 回调、真实 Palworld/Native 保存重启、重新登录及完整周档演练。
+Windows GitHub Actions 会执行 Gitleaks、`npm ci`、两个前端构建、Control API/Bridge smoke/.NET 测试 harness 的 Release 构建和统一测试。结算 harness 已覆盖旧数据兼容、lease/CAS、终态不可倒退、SQLite 原子入账、队列背压、1000 并发唯一 credit 和崩溃恢复；发货 harness 覆盖 SQLite PalDefender outbox 的 100 路并发、server+key 唯一、租约恢复、dead-letter、事件不可变、终态不可重开、`dispatched` 不重发及旧 JSONL fail-closed 迁移。Steam/玩家经济黑盒覆盖 state/nonce、Origin、CSRF、IDOR、账号/世界绑定、商城、发货，以及仅用于隔离测试的 development-RCON 扣物兼容路径、唯一入账和退出；独立的 Native settlement harness 覆盖 Native 报价快照、精确扣物证据、持久化故障和重启幂等。能力测试还验证购买与资源兑换闸门独立关闭。上述自动测试不替代正式域名 Steam 回调、真实 Palworld/Native 保存重启、重新登录及完整周档演练。
 
 ## 数据与安全边界
 
@@ -380,7 +416,10 @@ Windows GitHub Actions 会执行 Gitleaks、`npm ci`、两个前端构建、Cont
 - [ADR-0002：Steam OpenID 与当前周角色绑定](docs/architecture/decisions/0002-steam-openid-and-world-binding.md)
 - [MOD 能力与接口维护手册](docs/MOD能力与接口维护手册.md)
 - [玩家门户部署与安全资料](docs/player-portal/README.md)
+- [玩家使用教程](docs/player-portal/05-玩家使用教程.md)
 - [PalDefender 集成运行手册](docs/runbooks/paldefender-integration.md)
+- [经济内容发布与回滚运行手册](docs/runbooks/economy-content-publishing.md)
+- [经济平衡与反套利保护](docs/economy-balance-guard.md)
 - [存档中心运行手册](docs/runbooks/save-management.md)
 - [公告发布运行手册](docs/runbooks/announcement-publishing.md)
 - [幻兽商域模式设计](extraction-mode/README.md)

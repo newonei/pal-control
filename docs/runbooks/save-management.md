@@ -30,6 +30,8 @@ v1 明确不提供恢复、删除、上传、在线覆盖或原始 `.sav` 字段
 
 生产环境建议使用绝对路径，例如 `C:\\ProgramData\\PalControl\\backups\\savegames`。`BackupRoot` 必须位于活动世界目录之外；不要将其设为 `Pal/Saved/SaveGames`、某个世界目录或其子目录。命令事件目录同样应使用持久化绝对路径。
 
+`CommandPersistence:DataDirectory/save-command-audit.jsonl` 在迁移到其他权威存储前只允许追加，不允许截断、原地压缩、轮转或自动删除。经济一致性快照会把它作为 `save-command-delivery` 通道原字节归档，并在 `command-side-state-archive.json` 记录 SHA-256、权威级别和继承的 bundle 保留策略；未知或损坏 JSONL 会让快照 fail closed。归档只能随整个经济快照进入 plan-only 清理候选，不能单独删除。详见[经济备份、恢复与持久化周换档手册](economy-continuity-and-weekly-rollover.md)。
+
 ## 操作与判定
 
 1. 打开管理台“存档”页面，确认“存档链路就绪”以及进程路径、服务器名称和 World GUID 三项校验全部通过。

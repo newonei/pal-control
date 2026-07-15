@@ -6,10 +6,11 @@ Run all isolated integration tests sequentially from the repository root:
 npm run test:integration
 ```
 
-Use `npm test` to run the player-web Node tests plus the contract and
-integration suites. The smoke tests require Windows PowerShell, .NET 10,
-Python 3, and restored NuGet dependencies. They use only local fakes and
-disposable temporary directories; no live Palworld server is contacted.
+Use `npm test` to run both console-web and player-web Node tests plus the
+contract and integration suites. The smoke tests require Windows PowerShell,
+.NET 10, Python 3, and restored NuGet dependencies. They use only local fakes,
+synthetic resource catalogs and disposable temporary directories; no live
+Palworld server or ignored local game-data catalog is contacted.
 
 The Control API boundary smoke test starts the Release executable on a random
 loopback port. It verifies read readiness while disabled PalDefender/RCON keep
@@ -69,6 +70,34 @@ no-resend behavior, and fail-closed one-time JSONL migration:
 .\tests\integration\delivery-receipts-smoke.ps1
 ```
 
+The economy-invariants smoke verifies wallet conservation, price and zone
+evidence, 100-way personal/global stock concurrency, refund replenishment,
+replay, migration and uniqueness constraints:
+
+```powershell
+.\tests\integration\economy-invariants-smoke.ps1
+```
+
+The versioned-content tests cover strict validation, canonical hashing,
+semantic diff, 20-day publication/restart persistence, fail-closed stale
+offers, and atomic product projection + current-pointer CAS across injected
+publish and rollback failures:
+
+```powershell
+.\tests\integration\content-definitions-smoke.ps1
+.\tests\integration\content-projection-atomicity-smoke.ps1
+```
+
+The economy-balance guard runs a deterministic 100-player x 7-day simulation
+and rejects direct same-currency resale arbitrage. The reliable-task smoke
+proves six version-pinned daily/weekly tasks, authoritative event gating,
+20-way replay, unique wallet/ranking rewards and restart recovery:
+
+```powershell
+.\tests\integration\economy-balance-guard-smoke.ps1
+.\tests\integration\reliable-tasks-smoke.ps1
+```
+
 The identity-binding smoke test exercises the production SQLite repository and
 its physical uniqueness constraints. It verifies Steam account isolation,
 server-observed complete PlayerUID binding, forged identity rejection, weekly
@@ -82,9 +111,11 @@ restart persistence:
 The player economy security smoke starts the Release Control API plus local
 official-REST, PalDefender and Source-RCON protocol fakes. It exercises login
 codes, Origin and CSRF enforcement, identity/IDOR isolation, strict one-time
-initial world binding with restart persistence, catalog purchase, receipt-backed
-delivery, resource exchange, wallet credit, idempotent replay, session revocation,
-the adapter-neutral settlement status endpoint and its deprecated alias:
+initial world binding with restart persistence, published catalog evidence,
+fail-closed stale-offer rejection, evidence-bound catalog purchase,
+receipt-backed delivery, resource exchange, wallet credit, idempotent replay,
+session revocation, the adapter-neutral settlement status endpoint and its
+deprecated alias:
 
 ```powershell
 .\tests\integration\player-economy-security-smoke.ps1
@@ -125,10 +156,20 @@ harness and a loopback fake-Control-API test for the production PowerShell
 client. It covers default plan-only behavior, explicit rejection of old-world
 deletion, deterministic step keys, managed game backup plus economy
 snapshot/verify/stage, every-phase crash and lost-response recovery, credential
-redaction, and fail-closed pending/RPO/world/version blockers:
+redaction, registered non-economic JSONL byte-for-byte archives, nested manifest
+hashes, unknown/partial/tampered JSONL rejection, bundle-level plan-only
+retention, and fail-closed pending/RPO/world/version blockers:
 
 ```powershell
 .\tests\integration\continuity-rollover-smoke.ps1
+```
+
+The new-player activity smoke covers immutable versions, current-world
+identity isolation, atomic dual-wallet claims, replay conflicts, uniqueness
+and restart persistence:
+
+```powershell
+.\tests\integration\new-player-activity-smoke.ps1
 ```
 
 The isolated integration infrastructure uses deterministic local fakes:

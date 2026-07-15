@@ -22,10 +22,10 @@ public sealed class ExtractionModeOptions
     public int SettlementQueueCapacity { get; init; } = 32;
     public int SettlementWorkerCount { get; init; } = 4;
     public int SettlementQueueOperationTimeoutSeconds { get; init; } = 180;
-    public IReadOnlyList<ExtractionZoneOptions> ExtractionZones { get; init; } =
-    [
-        new ExtractionZoneOptions()
-    ];
+    // Keep this empty in code. ConfigurationBinder appends configured collection
+    // entries to an existing default collection, which used to create a phantom
+    // duplicate of the appsettings.json development zone at runtime.
+    public IReadOnlyList<ExtractionZoneOptions> ExtractionZones { get; init; } = [];
 
     public bool IsValid(out string? error)
     {
@@ -113,6 +113,14 @@ public sealed class ExtractionModeOptions
         if (ExtractionZones.Count == 0 || ExtractionZones.Any(zone => !zone.IsValid()))
         {
             error = "At least one valid extraction zone is required.";
+            return false;
+        }
+        var duplicateZoneId = ExtractionZones
+            .GroupBy(zone => zone.Id, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1)?.Key;
+        if (duplicateZoneId is not null)
+        {
+            error = $"ExtractionMode:ExtractionZones contains duplicate zone id '{duplicateZoneId}'.";
             return false;
         }
         error = null;

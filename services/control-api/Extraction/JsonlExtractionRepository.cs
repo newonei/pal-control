@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Infrastructure;
 
 namespace PalControl.ControlApi.Extraction;
@@ -32,6 +33,7 @@ public sealed partial class SqliteExtractionRepository :
     private readonly Dictionary<string, StoredIdempotency> _idempotency = new(StringComparer.Ordinal);
     private readonly HashSet<Guid> _eventIds = [];
     private readonly TimeProvider _timeProvider;
+    private readonly IContentProductProjectionFaultInjector? _contentProjectionFaultInjector;
     private readonly string _databasePath;
     private readonly string _legacyEventPath;
     private readonly string _authoritativeMarkerPath;
@@ -40,10 +42,14 @@ public sealed partial class SqliteExtractionRepository :
     private volatile bool _isReady;
     private bool _disposed;
 
-    public SqliteExtractionRepository(string dataDirectory, TimeProvider? timeProvider = null)
+    public SqliteExtractionRepository(
+        string dataDirectory,
+        TimeProvider? timeProvider = null,
+        IContentProductProjectionFaultInjector? contentProjectionFaultInjector = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _contentProjectionFaultInjector = contentProjectionFaultInjector;
         var fullDataDirectory = Path.GetFullPath(dataDirectory);
         Directory.CreateDirectory(fullDataDirectory);
         _databasePath = Path.Combine(fullDataDirectory, "extraction-commerce.db");
@@ -1209,9 +1215,246 @@ public sealed partial class SqliteExtractionRepository :
                 checked((existing?.Revision ?? 0) + 1),
                 normalizedActor,
                 existing?.CreatedAt ?? now,
-                now);
+                now,
+                normalized.Category,
+                normalized.Tags.ToArray(),
+                normalized.FeaturedRank,
+                normalized.GlobalStock,
+                normalized.ContentVersionId,
+                normalized.ContentHash);
             await AppendAndApplyAsync(NewEvent("product.upserted", now, product: product), cancellationToken);
             return CloneProduct(product);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ContentProductProjectionActivationResult> ActivateContentProductProjectionAsync(
+        ContentProductProjectionActivation activation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(activation);
+        var serverId = NormalizeRequired(activation.ServerId, 64, nameof(activation.ServerId));
+        if (activation.VersionId == Guid.Empty)
+        {
+            throw new ArgumentException("Content version id cannot be empty.", nameof(activation));
+        }
+        if (activation.ExpectedCurrentVersionId == Guid.Empty)
+        {
+            throw new ArgumentException("Expected current version id cannot be empty.", nameof(activation));
+        }
+        if (activation.VersionNumber <= 0)
+        {
+            throw new ArgumentException("Content version number must be positive.", nameof(activation));
+        }
+        var contentHash = NormalizeRequired(
+            activation.ContentHash,
+            64,
+            nameof(activation.ContentHash)).ToLowerInvariant();
+        if (contentHash.Length != 64 || contentHash.Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new ArgumentException(
+                "Content hash must be a 64-character SHA-256 hexadecimal value.",
+                nameof(activation));
+        }
+        var rulesVersion = NormalizeRequired(
+            activation.RulesVersion,
+            128,
+            nameof(activation.RulesVersion));
+        var action = NormalizeRequired(activation.Action, 16, nameof(activation.Action)).ToLowerInvariant();
+        if (action is not ("publish" or "rollback"))
+        {
+            throw new ArgumentException("Content activation action must be publish or rollback.", nameof(activation));
+        }
+        var actor = NormalizeRequired(activation.Actor, 128, nameof(activation.Actor));
+        if (activation.Products is null || activation.Products.Count == 0)
+        {
+            throw new ArgumentException("A content projection must contain at least one product.", nameof(activation));
+        }
+        var definitions = activation.Products
+            .Select(NormalizeProductDefinition)
+            .Select(definition => definition with { ContentHash = contentHash })
+            .OrderBy(definition => definition.Sku, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (definitions.Select(definition => definition.Sku)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count() != definitions.Length)
+        {
+            throw new ArgumentException("A content projection cannot contain duplicate SKUs.", nameof(activation));
+        }
+        if (definitions.Any(definition =>
+                definition.ContentVersionId != activation.VersionId ||
+                !string.Equals(definition.ContentHash, contentHash, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "Every projected product must carry the target content version id and hash.",
+                nameof(activation));
+        }
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            cancellationToken.ThrowIfCancellationRequested();
+            var now = UtcNow();
+            var targetSkus = definitions
+                .Select(definition => definition.Sku)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var projected = new List<ShopProduct>(definitions.Length + _products.Count);
+            foreach (var definition in definitions)
+            {
+                _products.TryGetValue(definition.Sku, out var existing);
+                projected.Add(CreateProjectedProduct(existing, definition, actor, now));
+            }
+            foreach (var retired in _products.Values
+                         .Where(product => product.Active && !targetSkus.Contains(product.Sku))
+                         .OrderBy(product => product.Sku, StringComparer.OrdinalIgnoreCase))
+            {
+                projected.Add(CreateProjectedProduct(
+                    retired,
+                    new ShopProductDefinition(
+                        retired.Sku,
+                        retired.DisplayName,
+                        retired.Description,
+                        retired.PriceCurrency,
+                        retired.UnitPrice,
+                        retired.ItemGrants,
+                        retired.PurchaseLimitPerSeason,
+                        false,
+                        retired.AvailableFrom,
+                        retired.AvailableUntil,
+                        retired.Category,
+                        retired.Tags,
+                        retired.FeaturedRank,
+                        retired.GlobalStock,
+                        activation.VersionId,
+                        contentHash),
+                    actor,
+                    now));
+            }
+
+            var changedProducts = projected
+                .Where(projectedProduct =>
+                    !_products.TryGetValue(projectedProduct.Sku, out var existing) ||
+                    !ProductProjectionMatches(existing, projectedProduct))
+                .ToArray();
+            var storeEvents = changedProducts
+                .Select(product => NewEvent("content.product-projected", now, product: product))
+                .ToArray();
+
+            await using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync(CancellationToken.None);
+            await using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;";
+                await pragma.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            await VerifyContentProjectionTargetAsync(
+                connection,
+                transaction,
+                serverId,
+                activation.VersionId,
+                activation.VersionNumber,
+                activation.BusinessDate,
+                rulesVersion,
+                contentHash,
+                definitions,
+                CancellationToken.None);
+            var currentVersionId = await ReadCurrentContentVersionIdAsync(
+                connection,
+                transaction,
+                serverId,
+                CancellationToken.None);
+            if (currentVersionId != activation.ExpectedCurrentVersionId &&
+                currentVersionId != activation.VersionId)
+            {
+                throw new ContentStoreException(
+                    "CONTENT_POINTER_CONFLICT",
+                    "The current content pointer changed before the complete product projection could be activated.");
+            }
+
+            for (var index = 0; index < storeEvents.Length; index++)
+            {
+                var storeEvent = storeEvents[index];
+                var payload = JsonSerializer.Serialize(storeEvent, JsonOptions);
+                await using var command = CreateInsertCommand(connection, transaction, storeEvent, payload);
+                await command.ExecuteNonQueryAsync(CancellationToken.None);
+                _contentProjectionFaultInjector?.ThrowAfterProjectedProduct(
+                    index + 1,
+                    changedProducts[index].Sku);
+            }
+
+            var pointerChanged = currentVersionId != activation.VersionId;
+            if (pointerChanged)
+            {
+                await CompareAndSwapContentPointerAsync(
+                    connection,
+                    transaction,
+                    serverId,
+                    activation.VersionId,
+                    activation.ExpectedCurrentVersionId,
+                    now,
+                    CancellationToken.None);
+                await InsertContentProjectionActivationAsync(
+                    connection,
+                    transaction,
+                    serverId,
+                    currentVersionId,
+                    activation.VersionId,
+                    action,
+                    actor,
+                    now,
+                    CancellationToken.None);
+            }
+            await transaction.CommitAsync(CancellationToken.None);
+            try
+            {
+                foreach (var storeEvent in storeEvents)
+                {
+                    ApplyEvent(storeEvent);
+                }
+                EnsureAuthoritativeMarker();
+            }
+            catch
+            {
+                // The SQLite commit is already authoritative. Fail closed so
+                // no request can observe stale in-memory state; restart will
+                // replay the complete committed event batch before readiness.
+                _isReady = false;
+                throw;
+            }
+            return new ContentProductProjectionActivationResult(
+                activation.VersionId,
+                currentVersionId,
+                pointerChanged,
+                !pointerChanged && storeEvents.Length == 0,
+                now,
+                projected.Select(CloneProduct).ToArray());
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<long> GetGlobalPurchasedQuantityAsync(
+        Guid seasonId,
+        string sku,
+        CancellationToken cancellationToken)
+    {
+        if (seasonId == Guid.Empty)
+        {
+            throw new ArgumentException("Season id cannot be empty.", nameof(seasonId));
+        }
+        var normalizedSku = NormalizeSku(sku);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            RequireSeason(seasonId);
+            return GetGlobalPurchasedQuantity(seasonId, normalizedSku);
         }
         finally
         {
@@ -1287,6 +1530,17 @@ public sealed partial class SqliteExtractionRepository :
                 {
                     return PurchaseFailure("PRODUCT_NOT_AVAILABLE", $"Shop product '{product.Sku}' is not available.");
                 }
+                if (normalized.ExpectedContentVersionId is Guid expectedVersionId &&
+                    (product.ContentVersionId != expectedVersionId ||
+                     !string.Equals(
+                         product.ContentHash,
+                         normalized.ExpectedContentHash,
+                         StringComparison.Ordinal)))
+                {
+                    return PurchaseFailure(
+                        "OFFER_NOT_AVAILABLE",
+                        "The economy content changed before the purchase was committed; refresh the catalog.");
+                }
 
                 if (product.PurchaseLimitPerSeason is int limit)
                 {
@@ -1302,6 +1556,18 @@ public sealed partial class SqliteExtractionRepository :
                         return PurchaseFailure(
                             "PURCHASE_LIMIT_EXCEEDED",
                             $"Shop product '{product.Sku}' exceeds its per-season purchase limit of {limit}.");
+                    }
+                }
+                if (product.GlobalStock is long globalStock)
+                {
+                    var globallyPurchased = GetGlobalPurchasedQuantity(
+                        normalized.SeasonId,
+                        product.Sku);
+                    if (globallyPurchased + requestedLine.Quantity > globalStock)
+                    {
+                        return PurchaseFailure(
+                            "GLOBAL_STOCK_EXCEEDED",
+                            $"Shop product '{product.Sku}' exceeds its server-wide stock of {globalStock} for this season.");
                     }
                 }
                 products.Add((product, requestedLine.Quantity));
@@ -1329,7 +1595,13 @@ public sealed partial class SqliteExtractionRepository :
                         entry.Product.PriceCurrency,
                         entry.Product.UnitPrice,
                         lineTotal,
-                        entry.Product.ItemGrants.ToArray()));
+                        entry.Product.ItemGrants.ToArray(),
+                        entry.Product.Category,
+                        entry.Product.Tags.ToArray(),
+                        entry.Product.FeaturedRank,
+                        entry.Product.GlobalStock,
+                        entry.Product.ContentVersionId,
+                        entry.Product.ContentHash));
                 }
             }
             catch (OverflowException)
@@ -1423,7 +1695,7 @@ public sealed partial class SqliteExtractionRepository :
                 "shop-order",
                 orderId,
                 now);
-            await AppendAndApplyAsync(
+            var committed = await AppendAndApplyAsync(
                 NewEvent(
                     "purchase.committed",
                     now,
@@ -1432,7 +1704,19 @@ public sealed partial class SqliteExtractionRepository :
                     order: order,
                     delivery: delivery,
                     idempotency: idempotency),
-                cancellationToken);
+                cancellationToken,
+                normalized.ExpectedContentVersionId is Guid expectedContentVersionId
+                    ? new ContentOfferExpectation(
+                        normalized.ServerId,
+                        expectedContentVersionId,
+                        normalized.ExpectedContentHash!)
+                    : null);
+            if (!committed)
+            {
+                return PurchaseFailure(
+                    "OFFER_NOT_AVAILABLE",
+                    "The economy content changed before the purchase was committed; refresh the catalog.");
+            }
             return new ShopPurchaseResult(CloneOrder(order), workItem, true, false, null, null);
         }
         finally
@@ -2008,6 +2292,15 @@ public sealed partial class SqliteExtractionRepository :
         CloneBalance(GetBalance(accountId, ExtractionCurrency.MarketCoin, null)),
         CloneBalance(GetBalance(accountId, ExtractionCurrency.SeasonVoucher, seasonId)));
 
+    private long GetGlobalPurchasedQuantity(Guid seasonId, string sku) =>
+        _orders.Values
+            .Where(order =>
+                order.SeasonId == seasonId &&
+                order.State != ShopOrderState.Refunded)
+            .SelectMany(order => order.Lines)
+            .Where(line => string.Equals(line.Sku, sku, StringComparison.OrdinalIgnoreCase))
+            .Sum(line => (long)line.Quantity);
+
     private WalletBalance GetBalance(
         Guid accountId,
         ExtractionCurrency currency,
@@ -2105,6 +2398,16 @@ public sealed partial class SqliteExtractionRepository :
         {
             throw new ArgumentException("Purchase limit must be positive when supplied.", nameof(definition));
         }
+        if (definition.GlobalStock is <= 0 or > MaximumWebSafeInteger)
+        {
+            throw new ArgumentException(
+                "Global stock must be positive and within the exact integer range supported by the web console when supplied.",
+                nameof(definition));
+        }
+        if (definition.FeaturedRank is <= 0)
+        {
+            throw new ArgumentException("Featured rank must be positive when supplied.", nameof(definition));
+        }
         if (definition.AvailableFrom is not null &&
             definition.AvailableUntil is not null &&
             definition.AvailableUntil <= definition.AvailableFrom)
@@ -2134,6 +2437,39 @@ public sealed partial class SqliteExtractionRepository :
             }
             mergedGrants[itemId] = checked(mergedGrants.GetValueOrDefault(itemId) + grant.Quantity);
         }
+
+        var category = string.IsNullOrWhiteSpace(definition.Category)
+            ? "general"
+            : NormalizeRequired(definition.Category, 64, nameof(definition.Category));
+        var contentHash = string.IsNullOrWhiteSpace(definition.ContentHash)
+            ? null
+            : NormalizeRequired(definition.ContentHash, 128, nameof(definition.ContentHash));
+        if ((definition.ContentVersionId is null) != (contentHash is null))
+        {
+            throw new ArgumentException(
+                "Content version id and content hash must either both be supplied or both be absent for legacy products.",
+                nameof(definition));
+        }
+        if (definition.ContentVersionId == Guid.Empty)
+        {
+            throw new ArgumentException("Content version id cannot be empty when supplied.", nameof(definition));
+        }
+        if (contentHash is not null &&
+            (contentHash.Length != 64 || contentHash.Any(character => !Uri.IsHexDigit(character))))
+        {
+            throw new ArgumentException(
+                "Content hash must be a 64-character SHA-256 hexadecimal value when supplied.",
+                nameof(definition));
+        }
+        var tags = (definition.Tags ?? [])
+            .Select(tag => NormalizeRequired(tag, 64, "tag"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (tags.Length > 20)
+        {
+            throw new ArgumentException("A product cannot contain more than 20 tags.", nameof(definition));
+        }
         return definition with
         {
             Sku = NormalizeSku(definition.Sku),
@@ -2142,7 +2478,10 @@ public sealed partial class SqliteExtractionRepository :
             ItemGrants = mergedGrants
                 .OrderBy(item => item.Key, StringComparer.Ordinal)
                 .Select(item => new ShopItemGrant(item.Key, item.Value))
-                .ToArray()
+                .ToArray(),
+            Category = category,
+            Tags = tags,
+            ContentHash = contentHash
         };
     }
 
@@ -2191,6 +2530,26 @@ public sealed partial class SqliteExtractionRepository :
                 "A purchase target must include both PlayerUID and worldId, or neither for legacy data.",
                 nameof(request));
         }
+        var expectedContentHash = string.IsNullOrWhiteSpace(request.ExpectedContentHash)
+            ? null
+            : request.ExpectedContentHash.Trim().ToLowerInvariant();
+        if ((request.ExpectedContentVersionId is null) != (expectedContentHash is null))
+        {
+            throw new ArgumentException(
+                "Expected content version id and hash must either both be supplied or both be absent.",
+                nameof(request));
+        }
+        if (request.ExpectedContentVersionId == Guid.Empty)
+        {
+            throw new ArgumentException("Expected content version id cannot be empty.", nameof(request));
+        }
+        if (expectedContentHash is not null &&
+            (expectedContentHash.Length != 64 || expectedContentHash.Any(character => !Uri.IsHexDigit(character))))
+        {
+            throw new ArgumentException(
+                "Expected content hash must be a 64-character SHA-256 hexadecimal value.",
+                nameof(request));
+        }
         return request with
         {
             ServerId = NormalizeRequired(request.ServerId, 64, nameof(request.ServerId)),
@@ -2203,7 +2562,8 @@ public sealed partial class SqliteExtractionRepository :
             Actor = NormalizeRequired(request.Actor, 128, nameof(request.Actor)),
             Reason = NormalizeRequired(request.Reason, 512, nameof(request.Reason)),
             PlayerUid = playerUid,
-            WorldId = worldId
+            WorldId = worldId,
+            ExpectedContentHash = expectedContentHash
         };
     }
 
@@ -2251,6 +2611,11 @@ public sealed partial class SqliteExtractionRepository :
             writer.WriteEndObject();
         }
         writer.WriteEndArray();
+        if (request.ExpectedContentVersionId is Guid expectedContentVersionId)
+        {
+            writer.WriteString("expectedContentVersionId", expectedContentVersionId);
+            writer.WriteString("expectedContentHash", request.ExpectedContentHash);
+        }
         writer.WriteEndObject();
         writer.Flush();
         return Sha256(buffer.WrittenSpan);
@@ -2272,7 +2637,241 @@ public sealed partial class SqliteExtractionRepository :
     private static string Sha256(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-    private async Task AppendAndApplyAsync(StoreEvent storeEvent, CancellationToken cancellationToken)
+    private static ShopProduct CreateProjectedProduct(
+        ShopProduct? existing,
+        ShopProductDefinition definition,
+        string actor,
+        DateTimeOffset now)
+    {
+        var candidate = new ShopProduct(
+            existing?.ProductId ?? Guid.NewGuid(),
+            definition.Sku,
+            definition.DisplayName,
+            definition.Description,
+            definition.PriceCurrency,
+            definition.UnitPrice,
+            definition.ItemGrants.ToArray(),
+            definition.PurchaseLimitPerSeason,
+            definition.Active,
+            definition.AvailableFrom?.ToUniversalTime(),
+            definition.AvailableUntil?.ToUniversalTime(),
+            checked((existing?.Revision ?? 0) + 1),
+            actor,
+            existing?.CreatedAt ?? now,
+            now,
+            definition.Category,
+            definition.Tags.ToArray(),
+            definition.FeaturedRank,
+            definition.GlobalStock,
+            definition.ContentVersionId,
+            definition.ContentHash);
+        return existing is not null && ProductProjectionMatches(existing, candidate)
+            ? CloneProduct(existing)
+            : candidate;
+    }
+
+    private static bool ProductProjectionMatches(ShopProduct left, ShopProduct right) =>
+        left.ProductId == right.ProductId &&
+        string.Equals(left.Sku, right.Sku, StringComparison.OrdinalIgnoreCase) &&
+        left.DisplayName == right.DisplayName &&
+        left.Description == right.Description &&
+        left.PriceCurrency == right.PriceCurrency &&
+        left.UnitPrice == right.UnitPrice &&
+        left.ItemGrants.SequenceEqual(right.ItemGrants) &&
+        left.PurchaseLimitPerSeason == right.PurchaseLimitPerSeason &&
+        left.Active == right.Active &&
+        left.AvailableFrom == right.AvailableFrom &&
+        left.AvailableUntil == right.AvailableUntil &&
+        left.Category == right.Category &&
+        left.Tags.SequenceEqual(right.Tags, StringComparer.Ordinal) &&
+        left.FeaturedRank == right.FeaturedRank &&
+        left.GlobalStock == right.GlobalStock &&
+        left.ContentVersionId == right.ContentVersionId &&
+        string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal);
+
+    private static async Task VerifyContentProjectionTargetAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string serverId,
+        Guid versionId,
+        long versionNumber,
+        DateOnly businessDate,
+        string rulesVersion,
+        string contentHash,
+        IReadOnlyList<ShopProductDefinition> actualProducts,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT server_id, version_number, business_date, rules_version, content_hash,
+                   document_json, source_draft_id, published_by, published_at
+            FROM content_versions
+            WHERE version_id = $versionId;
+            """;
+        command.Parameters.AddWithValue("$versionId", versionId.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new ContentStoreException(
+                "CONTENT_VERSION_NOT_FOUND",
+                "The product projection target content version does not exist.");
+        }
+        if (!string.Equals(reader.GetString(0), serverId, StringComparison.OrdinalIgnoreCase) ||
+            reader.GetInt64(1) != versionNumber ||
+            !string.Equals(
+                reader.GetString(2),
+                businessDate.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+                StringComparison.Ordinal) ||
+            !string.Equals(reader.GetString(3), rulesVersion, StringComparison.Ordinal) ||
+            !string.Equals(reader.GetString(4), contentHash, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The requested product projection identity does not match its immutable content version.");
+        }
+        var definition = JsonSerializer.Deserialize<EconomyContentDefinition>(
+            reader.GetString(5),
+            EconomyContentJson.Options)
+            ?? throw new InvalidDataException(
+                "The immutable content version contains an empty definition.");
+        if (!Guid.TryParse(reader.GetString(6), out var sourceDraftId) ||
+            sourceDraftId == Guid.Empty ||
+            !DateTimeOffset.TryParse(
+                reader.GetString(8),
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind,
+                out var publishedAt))
+        {
+            throw new InvalidDataException(
+                "The immutable content version contains invalid publication identity fields.");
+        }
+        var targetVersion = new EconomyContentVersion(
+            versionId,
+            serverId,
+            versionNumber,
+            businessDate,
+            rulesVersion,
+            contentHash,
+            definition,
+            sourceDraftId,
+            reader.GetString(7),
+            publishedAt);
+        var expectedProducts = EconomyContentProductProjection.Create(targetVersion);
+        if (expectedProducts.Count != actualProducts.Count ||
+            !expectedProducts.Zip(actualProducts)
+                .All(pair => EconomyContentProductProjection.Matches(pair.First, pair.Second)))
+        {
+            throw new InvalidDataException(
+                "The requested product projection does not match the immutable content document.");
+        }
+    }
+
+    private static async Task<Guid?> ReadCurrentContentVersionIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string serverId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT version_id
+            FROM content_current
+            WHERE server_id = $serverId COLLATE NOCASE;
+            """;
+        command.Parameters.AddWithValue("$serverId", serverId);
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        if (value is null || value is DBNull)
+        {
+            return null;
+        }
+        return Guid.TryParse(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture), out var versionId) &&
+               versionId != Guid.Empty
+            ? versionId
+            : throw new InvalidDataException("The current content pointer contains an invalid version id.");
+    }
+
+    private static async Task CompareAndSwapContentPointerAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string serverId,
+        Guid versionId,
+        Guid? expectedCurrentVersionId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        if (expectedCurrentVersionId is null)
+        {
+            command.CommandText = """
+                INSERT INTO content_current (server_id, version_id, updated_at)
+                SELECT $serverId, $versionId, $updatedAt
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM content_current WHERE server_id = $serverId COLLATE NOCASE);
+                """;
+        }
+        else
+        {
+            command.CommandText = """
+                UPDATE content_current
+                SET version_id = $versionId,
+                    updated_at = $updatedAt
+                WHERE server_id = $serverId COLLATE NOCASE
+                  AND version_id = $expectedVersionId;
+                """;
+            command.Parameters.AddWithValue(
+                "$expectedVersionId",
+                expectedCurrentVersionId.Value.ToString("D"));
+        }
+        command.Parameters.AddWithValue("$serverId", serverId);
+        command.Parameters.AddWithValue("$versionId", versionId.ToString("D"));
+        command.Parameters.AddWithValue("$updatedAt", now.ToString("O"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new ContentStoreException(
+                "CONTENT_POINTER_CONFLICT",
+                "The content pointer compare-and-swap failed during product projection activation.");
+        }
+    }
+
+    private static async Task InsertContentProjectionActivationAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string serverId,
+        Guid? previousVersionId,
+        Guid versionId,
+        string action,
+        string actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO content_activations (
+                activation_id, server_id, previous_version_id, version_id,
+                reason, actor, activated_at)
+            VALUES (
+                $activationId, $serverId, $previousVersionId, $versionId,
+                $reason, $actor, $activatedAt);
+            """;
+        command.Parameters.AddWithValue("$activationId", Guid.NewGuid().ToString("D"));
+        command.Parameters.AddWithValue("$serverId", serverId);
+        command.Parameters.AddWithValue(
+            "$previousVersionId",
+            previousVersionId is Guid previous ? previous.ToString("D") : DBNull.Value);
+        command.Parameters.AddWithValue("$versionId", versionId.ToString("D"));
+        command.Parameters.AddWithValue("$reason", action);
+        command.Parameters.AddWithValue("$actor", actor);
+        command.Parameters.AddWithValue("$activatedAt", now.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task<bool> AppendAndApplyAsync(
+        StoreEvent storeEvent,
+        CancellationToken cancellationToken,
+        ContentOfferExpectation? offerExpectation = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var payload = JsonSerializer.Serialize(storeEvent, JsonOptions);
@@ -2280,7 +2879,16 @@ public sealed partial class SqliteExtractionRepository :
         {
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(CancellationToken.None);
-            await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            if (offerExpectation is not null && !await IsCurrentOfferAsync(
+                    connection,
+                    transaction,
+                    offerExpectation,
+                    CancellationToken.None))
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                return false;
+            }
             await using var command = CreateInsertCommand(connection, transaction, storeEvent, payload);
             await command.ExecuteNonQueryAsync(CancellationToken.None);
             await transaction.CommitAsync(CancellationToken.None);
@@ -2292,6 +2900,29 @@ public sealed partial class SqliteExtractionRepository :
             throw;
         }
         ApplyEvent(storeEvent);
+        return true;
+    }
+
+    private static async Task<bool> IsCurrentOfferAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ContentOfferExpectation expectation,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT current.version_id, versions.content_hash
+            FROM content_current AS current
+            JOIN content_versions AS versions ON versions.version_id = current.version_id
+            WHERE current.server_id = $serverId COLLATE NOCASE;
+            """;
+        command.Parameters.AddWithValue("$serverId", expectation.ServerId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) &&
+               Guid.TryParse(reader.GetString(0), out var versionId) &&
+               versionId == expectation.VersionId &&
+               string.Equals(reader.GetString(1), expectation.ContentHash, StringComparison.Ordinal);
     }
 
     private void LoadEvents()
@@ -3234,12 +3865,25 @@ public sealed partial class SqliteExtractionRepository :
 
     private static ShopProduct CloneProduct(ShopProduct product) => product with
     {
-        ItemGrants = product.ItemGrants.ToArray()
+        ItemGrants = product.ItemGrants.ToArray(),
+        Category = string.IsNullOrWhiteSpace(product.Category) ? "legacy" : product.Category,
+        Tags = product.Tags?.ToArray() ?? [],
+        ContentHash = string.IsNullOrWhiteSpace(product.ContentHash)
+            ? null
+            : product.ContentHash
     };
 
     private static ShopOrder CloneOrder(ShopOrder order) => order with
     {
-        Lines = order.Lines.Select(line => line with { ItemGrants = line.ItemGrants.ToArray() }).ToArray(),
+        Lines = order.Lines.Select(line => line with
+        {
+            ItemGrants = line.ItemGrants.ToArray(),
+            Category = string.IsNullOrWhiteSpace(line.Category) ? "legacy" : line.Category,
+            Tags = line.Tags?.ToArray() ?? [],
+            ContentHash = string.IsNullOrWhiteSpace(line.ContentHash)
+                ? null
+                : line.ContentHash
+        }).ToArray(),
         Charges = order.Charges.ToArray()
     };
 
@@ -3264,6 +3908,11 @@ public sealed partial class SqliteExtractionRepository :
         string message,
         ShopOrder? order = null) =>
         new(order is null ? null : CloneOrder(order), [], false, false, code, message);
+
+    private sealed record ContentOfferExpectation(
+        string ServerId,
+        Guid VersionId,
+        string ContentHash);
 
     private sealed record StoredIdempotency(
         string Scope,

@@ -9,14 +9,17 @@ import {
   verifyCode
 } from "./api";
 
-type Props = { onAuthenticated: (session: PlayerSession) => void };
+type Props = {
+  initialMessage?: string | null;
+  onAuthenticated: (session: PlayerSession) => void;
+};
 
-export function Login({ onAuthenticated }: Props) {
+export function Login({ initialMessage, onAuthenticated }: Props) {
   const [userId, setUserId] = useState("");
   const [challenge, setChallenge] = useState<CodeChallenge | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(initialMessage ?? null);
   const [authentication, setAuthentication] = useState<PlayerAuthenticationMode | null>(null);
 
   useEffect(() => {
