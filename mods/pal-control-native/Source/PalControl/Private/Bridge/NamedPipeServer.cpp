@@ -202,7 +202,7 @@ namespace
             "\"sentAt\":\"" + UtcNow() + "\"," +
             "\"gameBuild\":\"" + EscapeJson(gameBuild) + "\"," +
             "\"modVersion\":\"" + EscapeJson(modVersion) + "\"," +
-            "\"capabilities\":[\"bridge.hello\",\"players.probe\",\"players.schema\",\"players.progression.schema\",\"players.progression.probe\",\"players.progression.read\",\"players.progression.mutate\",\"players.progression.write\",\"inventory.schema\",\"inventory.probe\",\"inventory.read\",\"inventory.mutate\",\"inventory.write\",\"inventory.consume.experimental\",\"inventory.consume.partial-stack-only\",\"pals.schema\",\"pals.probe\",\"pals.read\",\"pals.skills.catalog\",\"pals.mutate\",\"pals.write\",\"announcements.overlay.probe\",\"announcements.overlay.write\",\"announcements.banner.probe\",\"announcements.banner.write\",\"ui.notifications.probe\",\"ui.notifications.write\"]," +
+            "\"capabilities\":[\"bridge.hello\",\"players.probe\",\"players.schema\",\"players.progression.schema\",\"players.progression.probe\",\"players.progression.read\",\"players.progression.mutate\",\"players.progression.write\",\"inventory.schema\",\"inventory.probe\",\"inventory.read\",\"inventory.mutate\",\"inventory.write\",\"inventory.consume.experimental\",\"pals.schema\",\"pals.probe\",\"pals.read\",\"pals.skills.catalog\",\"pals.mutate\",\"pals.write\",\"announcements.overlay.probe\",\"announcements.overlay.write\",\"announcements.banner.probe\",\"announcements.banner.write\",\"ui.notifications.probe\",\"ui.notifications.write\"]," +
             "\"probes\":{" +
                 "\"ue4ss.unreal_init\":true," +
                 "\"engine.tick.registered\":true," +

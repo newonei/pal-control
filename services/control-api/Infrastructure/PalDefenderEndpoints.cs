@@ -81,7 +81,8 @@ public static class PalDefenderEndpoints
                     items = await commands.GetAuditAsync(limit ?? 100, cancellationToken)
                 }));
 
-        var group = api.MapGroup("/servers/{serverId}/paldefender");
+        var group = api.MapGroup("/servers/{serverId}/paldefender")
+            .AddPlayerIdentityModerationLink();
 
         group.MapGet("/catalog", (string serverId, IConfiguration configuration) =>
             ValidateServerId(serverId, configuration) ?? Results.Ok(new
@@ -418,6 +419,14 @@ public static class PalDefenderEndpoints
             return Results.Conflict(new ApiError(
                 "IDEMPOTENCY_KEY_REUSED",
                 "The Idempotency-Key was already used for a different PalDefender operation."));
+        }
+        if (result.CapacityExceeded)
+        {
+            return Results.Json(
+                new ApiError(
+                    "PALDEFENDER_COMMAND_QUEUE_FULL",
+                    "The durable PalDefender command queue is at capacity."),
+                statusCode: StatusCodes.Status429TooManyRequests);
         }
         var command = result.Command
             ?? throw new InvalidOperationException("A PalDefender enqueue result has no command.");

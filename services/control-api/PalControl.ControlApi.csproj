@@ -10,7 +10,10 @@
   <ItemGroup>
     <Content Remove="data\**\*" />
     <None Remove="data\**\*" />
-    <Content Update="Resources\palworld-resource-catalog.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Generated from external game-data sources whose redistribution rights are not
+         cleared. Local development can read it from the source content root, but no
+         build or public release may copy it into output/publish implicitly. -->
+    <Content Update="Resources\palworld-resource-catalog.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <Content Update="appsettings.Local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
   </ItemGroup>
 

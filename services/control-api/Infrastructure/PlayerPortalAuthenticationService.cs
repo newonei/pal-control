@@ -11,16 +11,12 @@ namespace PalControl.ControlApi.Infrastructure;
 public sealed partial class PlayerPortalAuthenticationService
 {
     private const int ChallengeIdBytes = 32;
-    private const int SessionTokenBytes = 32;
-    private const int CsrfTokenBytes = 32;
     private const int MaximumRateLimitKeys = 4_096;
     private const int MaximumChallenges = 4_096;
-    private const int MaximumSessions = 16_384;
     private static readonly TimeSpan ExpirationCleanupInterval = TimeSpan.FromSeconds(30);
 
     private readonly object _sync = new();
     private readonly Dictionary<string, LoginChallenge> _challenges = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, PlayerPortalSession> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<DateTimeOffset>> _userRequests =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Queue<DateTimeOffset>> _ipRequests =
@@ -35,6 +31,7 @@ public sealed partial class PlayerPortalAuthenticationService
     private readonly IExtractionRconAdapter _rcon;
     private readonly PlayerPortalOptions _options;
     private readonly ExtractionRconOptions _rconOptions;
+    private readonly PlayerIdentitySecurityService _identitySecurity;
     private readonly TimeProvider _timeProvider;
     private DateTimeOffset _nextExpirationCleanupAt = DateTimeOffset.MinValue;
 
@@ -43,36 +40,97 @@ public sealed partial class PlayerPortalAuthenticationService
         IExtractionRconAdapter rcon,
         IOptions<PlayerPortalOptions> options,
         IOptions<ExtractionRconOptions> rconOptions,
+        PlayerIdentitySecurityService identitySecurity,
         TimeProvider timeProvider)
     {
         _coordinator = coordinator;
         _rcon = rcon;
         _options = options.Value;
         _rconOptions = rconOptions.Value;
+        _identitySecurity = identitySecurity;
         _timeProvider = timeProvider;
     }
 
     public bool Enabled => _options.Enabled;
 
+    public bool RequiresSteamOpenId =>
+        _options.AuthenticationMode == PlayerPortalAuthenticationMode.OpenIdThenGameCode;
+
     public async Task<PlayerLoginChallengeResult> RequestCodeAsync(
         string? suppliedUserId,
         string clientIp,
+        string? correlationId,
         CancellationToken cancellationToken)
     {
         EnsureEnabled();
         var now = _timeProvider.GetUtcNow();
         var normalizedClientIp = NormalizeClientIp(clientIp);
-        ReserveIpRequest(normalizedClientIp, now);
-        var userId = NormalizeUserId(suppliedUserId);
-        ReserveUserRequest(userId, now);
-
+        string? userId = null;
         try
         {
-            await _coordinator.EnsurePlayerOnlineForPortalAsync(userId, cancellationToken);
+            ReserveIpRequest(normalizedClientIp, now);
+            userId = NormalizeUserId(suppliedUserId);
+            ReserveUserRequest(userId, now);
+        }
+        catch (PlayerPortalException exception)
+        {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeRequest,
+                "denied",
+                exception.Code,
+                "suspicious",
+                userId,
+                normalizedClientIp,
+                correlationId);
+            throw;
+        }
+
+        if (_identitySecurity.IsBanned(userId))
+        {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeRequest,
+                "denied",
+                "subject_banned",
+                "high",
+                userId,
+                normalizedClientIp,
+                correlationId);
+            throw AccountBanned();
+        }
+
+        ExtractionLivePlayer? livePlayer;
+        try
+        {
+            livePlayer = await _coordinator.TryGetPlayerLocationAsync(userId, cancellationToken);
+            if (livePlayer is null || !livePlayer.Online)
+            {
+                throw new ExtractionModeException(
+                    "PLAYER_NOT_ONLINE",
+                    "The player must be online to receive a portal login code.",
+                    StatusCodes.Status409Conflict);
+            }
+            if (RequiresSteamOpenId &&
+                (string.IsNullOrWhiteSpace(livePlayer.PlayerUid) ||
+                 !Guid.TryParse(livePlayer.PlayerUid, out var observedPlayerUid) ||
+                 observedPlayerUid == Guid.Empty))
+            {
+                throw new ExtractionModeException(
+                    "PLAYER_BINDING_NOT_OBSERVED",
+                    "The current online player has no complete PlayerUID.",
+                    StatusCodes.Status409Conflict);
+            }
         }
         catch (Exception exception) when (
             exception is ExtractionModeException or InvalidOperationException or IOException)
         {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeRequest,
+                "failed",
+                "player_not_available",
+                "normal",
+                userId,
+                normalizedClientIp,
+                correlationId);
             throw new PlayerPortalException(
                 "AUTH_CODE_DELIVERY_UNAVAILABLE",
                 "验证码无法送达，请确认角色已经在线并完成加载后重试。",
@@ -82,6 +140,14 @@ public sealed partial class PlayerPortalAuthenticationService
         var capability = await ProbePrivateMessagingAsync(cancellationToken);
         if (!capability.Success)
         {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeRequest,
+                "failed",
+                "message_channel_unavailable",
+                "normal",
+                userId,
+                normalizedClientIp,
+                correlationId);
             throw new PlayerPortalException(
                 "AUTH_MESSAGE_CHANNEL_UNAVAILABLE",
                 "游戏内验证码消息通道暂时不可用，请稍后重试。",
@@ -103,6 +169,14 @@ public sealed partial class PlayerPortalAuthenticationService
         if (!delivery.Success)
         {
             // The code is deliberately not stored after a failed or uncertain dispatch.
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeRequest,
+                "failed",
+                "delivery_unavailable",
+                "normal",
+                userId,
+                normalizedClientIp,
+                correlationId);
             throw new PlayerPortalException(
                 "AUTH_CODE_DELIVERY_UNAVAILABLE",
                 "验证码无法送达，请稍后重试。",
@@ -130,19 +204,34 @@ public sealed partial class PlayerPortalAuthenticationService
             _challenges[challengeId] = new LoginChallenge(
                 challengeId,
                 userId,
+                livePlayer.PlayerUid,
                 digest,
                 expiresAt,
                 Attempts: 0);
         }
 
         // Never return or log the code or the generated RCON command.
+        _identitySecurity.Audit(
+            PlayerIdentitySecurityEvents.CodeRequest,
+            "succeeded",
+            "delivered_in_game",
+            "normal",
+            userId,
+            normalizedClientIp,
+            correlationId);
         return new PlayerLoginChallengeResult(
             challengeId,
             expiresAt,
             _options.UserCooldownSeconds);
     }
 
-    public PlayerPortalSessionCreation Verify(string? challengeId, string? suppliedCode)
+    public async Task<PlayerPortalSessionCreation> VerifyAsync(
+        string? challengeId,
+        string? suppliedCode,
+        string? clientIp,
+        string? correlationId,
+        string? expectedOpenIdUserId,
+        CancellationToken cancellationToken)
     {
         EnsureEnabled();
         var now = _timeProvider.GetUtcNow();
@@ -153,6 +242,8 @@ public sealed partial class PlayerPortalAuthenticationService
             ? suppliedCode
             : string.Empty;
 
+        LoginChallenge? verifiedChallenge = null;
+        LoginChallenge? attemptedChallenge = null;
         lock (_sync)
         {
             CleanupExpiredIfDueLocked(now);
@@ -165,6 +256,7 @@ public sealed partial class PlayerPortalAuthenticationService
             var actualDigest = ComputeCodeDigest(safeChallengeId, safeCode);
             var expectedDigest = found ? challenge!.CodeDigest : _dummyDigest;
             var matches = CryptographicOperations.FixedTimeEquals(actualDigest, expectedDigest);
+            attemptedChallenge = challenge;
 
             if (!found || !matches || safeCode.Length != 8)
             {
@@ -180,22 +272,128 @@ public sealed partial class PlayerPortalAuthenticationService
                         _challenges[safeChallengeId] = challenge with { Attempts = attempts };
                     }
                 }
-                throw InvalidChallenge();
+            }
+            else
+            {
+                _challenges.Remove(safeChallengeId);
+                verifiedChallenge = challenge;
+            }
+        }
+
+        var normalizedClientIp = NormalizeClientIp(clientIp ?? "unavailable");
+        if (verifiedChallenge is null)
+        {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeVerification,
+                "denied",
+                "invalid_or_expired_code",
+                "suspicious",
+                attemptedChallenge?.UserId,
+                normalizedClientIp,
+                correlationId);
+            throw InvalidChallenge();
+        }
+
+        string? boundPlayerUid = verifiedChallenge.PlayerUid;
+        if (RequiresSteamOpenId)
+        {
+            if (string.IsNullOrWhiteSpace(expectedOpenIdUserId) ||
+                !string.Equals(
+                    verifiedChallenge.UserId,
+                    expectedOpenIdUserId,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                _identitySecurity.Audit(
+                    PlayerIdentitySecurityEvents.CodeVerification,
+                    "denied",
+                    "openid_challenge_subject_mismatch",
+                    "high",
+                    verifiedChallenge.UserId,
+                    normalizedClientIp,
+                    correlationId);
+                throw new PlayerPortalException(
+                    "STEAM_OPENID_IDENTITY_MISMATCH",
+                    "Steam 身份与游戏内验证码账号不一致，请重新开始登录。",
+                    StatusCodes.Status403Forbidden);
             }
 
-            _challenges.Remove(safeChallengeId);
-            var sessionToken = CreateOpaqueToken(SessionTokenBytes);
-            var csrfToken = CreateOpaqueToken(CsrfTokenBytes);
-            var expiresAt = now.AddHours(_options.SessionLifetimeHours);
-            var session = new PlayerPortalSession(challenge!.UserId, csrfToken, now, expiresAt);
-            if (_sessions.Count >= MaximumSessions)
+            try
             {
-                var oldest = _sessions.MinBy(pair => pair.Value.ExpiresAt).Key;
-                _sessions.Remove(oldest);
+                var context = await _coordinator.GetAccountContextAsync(
+                    verifiedChallenge.UserId,
+                    requireOnline: true,
+                    cancellationToken);
+                var binding = context.IdentityBinding;
+                if (binding is null ||
+                    string.IsNullOrWhiteSpace(verifiedChallenge.PlayerUid) ||
+                    !string.Equals(
+                        binding.PlayerUid,
+                        NormalizePlayerUid(verifiedChallenge.PlayerUid),
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        binding.PlatformSubject,
+                        verifiedChallenge.UserId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    context.Season.WorldId is null ||
+                    !string.Equals(
+                        binding.WorldId,
+                        context.Season.WorldId,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new PlayerPortalException(
+                        "PLAYER_WORLD_BINDING_FAILED",
+                        "无法把 Steam 身份绑定到当前周在线角色，请保持角色在线后重试。",
+                        StatusCodes.Status409Conflict);
+                }
+                boundPlayerUid = binding.PlayerUid;
             }
-            _sessions[HashSessionToken(sessionToken)] = session;
-            return new PlayerPortalSessionCreation(sessionToken, session);
+            catch (PlayerPortalException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is ExtractionModeException or InvalidOperationException or IOException)
+            {
+                _identitySecurity.Audit(
+                    PlayerIdentitySecurityEvents.CodeVerification,
+                    "denied",
+                    "world_playeruid_binding_failed",
+                    "high",
+                    verifiedChallenge.UserId,
+                    normalizedClientIp,
+                    correlationId);
+                throw new PlayerPortalException(
+                    "PLAYER_WORLD_BINDING_FAILED",
+                    "无法把 Steam 身份绑定到当前周在线角色，请保持角色在线后重试。",
+                    StatusCodes.Status409Conflict);
+            }
         }
+
+        var creation = _identitySecurity.CreateSessionIfAllowed(
+            verifiedChallenge.UserId,
+            boundPlayerUid,
+            TimeSpan.FromHours(_options.SessionLifetimeHours));
+        if (creation is null)
+        {
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.CodeVerification,
+                "denied",
+                "subject_banned",
+                "high",
+                verifiedChallenge.UserId,
+                normalizedClientIp,
+                correlationId);
+            throw AccountBanned();
+        }
+        _identitySecurity.Audit(
+            PlayerIdentitySecurityEvents.CodeVerification,
+            "succeeded",
+            "session_created",
+            "normal",
+            verifiedChallenge.UserId,
+            normalizedClientIp,
+            correlationId);
+        return creation;
     }
 
     public PlayerPortalSession? Authenticate(HttpContext context)
@@ -205,22 +403,33 @@ public sealed partial class PlayerPortalAuthenticationService
             token.Length != 43 ||
             !OpaqueTokenPattern().IsMatch(token))
         {
+            if (context.Request.Cookies.ContainsKey(_options.CookieName))
+            {
+                _identitySecurity.Audit(
+                    PlayerIdentitySecurityEvents.SessionRejected,
+                    "denied",
+                    "malformed_session_cookie",
+                    "suspicious",
+                    null,
+                    context.Connection.RemoteIpAddress?.ToString(),
+                    context.TraceIdentifier);
+            }
             return null;
         }
 
-        var now = _timeProvider.GetUtcNow();
-        lock (_sync)
+        var session = _identitySecurity.Authenticate(token);
+        if (session is null)
         {
-            CleanupExpiredIfDueLocked(now);
-            var tokenHash = HashSessionToken(token);
-            var session = _sessions.GetValueOrDefault(tokenHash);
-            if (session is null || session.ExpiresAt > now)
-            {
-                return session;
-            }
-            _sessions.Remove(tokenHash);
-            return null;
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.SessionRejected,
+                "denied",
+                "unknown_expired_or_revoked_session",
+                "suspicious",
+                null,
+                context.Connection.RemoteIpAddress?.ToString(),
+                context.TraceIdentifier);
         }
+        return session;
     }
 
     public PlayerPortalSession RequireSession(HttpContext context) =>
@@ -263,13 +472,23 @@ public sealed partial class PlayerPortalAuthenticationService
         }
     }
 
-    public void AppendSessionCookie(HttpResponse response, PlayerPortalSessionCreation creation)
+    public void AppendSessionCookie(HttpContext context, PlayerPortalSessionCreation creation)
     {
-        response.Cookies.Append(
+        if (context.Request.Cookies.TryGetValue(_options.CookieName, out var previousToken) &&
+            previousToken.Length == 43 &&
+            OpaqueTokenPattern().IsMatch(previousToken) &&
+            !string.Equals(previousToken, creation.SessionToken, StringComparison.Ordinal))
+        {
+            _identitySecurity.Revoke(previousToken);
+        }
+        context.Response.Cookies.Append(
             _options.CookieName,
             creation.SessionToken,
             CookieOptions(creation.Session.ExpiresAt));
     }
+
+    public void RevokeCreatedSession(PlayerPortalSessionCreation creation) =>
+        _identitySecurity.Revoke(creation.SessionToken);
 
     public void Logout(HttpContext context)
     {
@@ -277,10 +496,17 @@ public sealed partial class PlayerPortalAuthenticationService
             token.Length == 43 &&
             OpaqueTokenPattern().IsMatch(token))
         {
-            lock (_sync)
-            {
-                _sessions.Remove(HashSessionToken(token));
-            }
+            var session = _identitySecurity.Authenticate(token);
+            var revoked = _identitySecurity.Revoke(token);
+            _identitySecurity.Audit(
+                PlayerIdentitySecurityEvents.SessionLogout,
+                revoked ? "succeeded" : "ignored",
+                revoked ? "session_revoked" : "session_not_found",
+                "normal",
+                session?.UserId,
+                context.Connection.RemoteIpAddress?.ToString(),
+                context.TraceIdentifier,
+                revoked ? 1 : 0);
         }
         context.Response.Cookies.Delete(_options.CookieName, CookieOptions(null));
     }
@@ -445,13 +671,6 @@ public sealed partial class PlayerPortalAuthenticationService
         {
             _challenges.Remove(challengeId);
         }
-        foreach (var sessionId in _sessions
-                     .Where(pair => pair.Value.ExpiresAt <= now)
-                     .Select(pair => pair.Key)
-                     .ToArray())
-        {
-            _sessions.Remove(sessionId);
-        }
         _nextExpirationCleanupAt = now.Add(ExpirationCleanupInterval);
     }
 
@@ -502,9 +721,6 @@ public sealed partial class PlayerPortalAuthenticationService
         MaxAge = expires is null ? null : expires - _timeProvider.GetUtcNow()
     };
 
-    private static string HashSessionToken(string token) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(token)));
-
     private static string CreateOpaqueToken(int byteCount) =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(byteCount))
             .TrimEnd('=')
@@ -527,6 +743,9 @@ public sealed partial class PlayerPortalAuthenticationService
 
     private static string NormalizeClientIp(string clientIp) =>
         string.IsNullOrWhiteSpace(clientIp) ? "unavailable" : clientIp.Trim();
+
+    private static string NormalizePlayerUid(string value) =>
+        Guid.Parse(value.Trim()).ToString("N").ToLowerInvariant();
 
     private void EnsureEnabled()
     {
@@ -560,6 +779,11 @@ public sealed partial class PlayerPortalAuthenticationService
         StatusCodes.Status429TooManyRequests,
         retryAfterSeconds);
 
+    private static PlayerPortalException AccountBanned() => new(
+        "PLAYER_ACCOUNT_BANNED",
+        "该平台账号已被管理员封禁，无法登录玩家门户。",
+        StatusCodes.Status403Forbidden);
+
     [GeneratedRegex(
         "^(?:steam|gdk|xbox|xuid|epic)_[a-z0-9]{3,64}$",
         RegexOptions.CultureInvariant)]
@@ -574,6 +798,7 @@ public sealed partial class PlayerPortalAuthenticationService
     private sealed record LoginChallenge(
         string ChallengeId,
         string UserId,
+        string? PlayerUid,
         byte[] CodeDigest,
         DateTimeOffset ExpiresAt,
         int Attempts);
@@ -588,7 +813,8 @@ public sealed record PlayerPortalSession(
     string UserId,
     string CsrfToken,
     DateTimeOffset CreatedAt,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    string? PlayerUid = null);
 
 public sealed record PlayerPortalSessionCreation(
     string SessionToken,

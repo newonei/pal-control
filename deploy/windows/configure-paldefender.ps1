@@ -131,7 +131,7 @@ $tokenDocument = [ordered]@{
 Write-JsonAtomically -Path $tokenPath -Value $tokenDocument
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-& icacls $tokenPath /inheritance:r /grant:r "${identity}:(F)" "SYSTEM:(F)" | Out-Null
+& icacls $tokenPath /inheritance:r /grant:r "${identity}:(F)" "*S-1-5-18:(F)" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to restrict the PalDefender token file ACL."
 }

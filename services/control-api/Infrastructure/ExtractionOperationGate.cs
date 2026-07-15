@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PalControl.ControlApi.Extraction;
 
@@ -14,12 +15,13 @@ public sealed class ExtractionOperationGate
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true
+        WriteIndented = false
     };
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _sync = new();
-    private readonly string _path;
+    private readonly string _legacyPath;
+    private readonly string _connectionString;
     private ExtractionOperationGateState _state;
     private int _activeOperations;
     private TaskCompletionSource<bool> _drained = CompletedDrain();
@@ -33,12 +35,26 @@ public sealed class ExtractionOperationGate
             ? configured
             : Path.Combine(environment.ContentRootPath, configured));
         Directory.CreateDirectory(directory);
-        _path = Path.Combine(directory, "extraction-operation-gate.json");
-        _state = Load() ?? new ExtractionOperationGateState(
+        _legacyPath = Path.Combine(directory, "extraction-operation-gate.json");
+        _connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(directory, "extraction-commerce.db"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = false
+        }.ToString();
+        Initialize();
+        ImportLegacyOnce();
+        var persisted = Load();
+        _state = persisted ?? new ExtractionOperationGateState(
             false,
-            "正常运营",
+            "Normal operation",
             "system-bootstrap",
             DateTimeOffset.UtcNow);
+        if (persisted is null)
+        {
+            Persist(_state);
+        }
     }
 
     public ExtractionOperationGateState Current
@@ -92,9 +108,18 @@ public sealed class ExtractionOperationGate
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
         if (reason.Trim().Length is < 3 or > 500 || reason.Any(char.IsControl))
         {
-            throw new ArgumentException("Maintenance reason must contain 3 to 500 non-control characters.", nameof(reason));
+            throw new ArgumentException(
+                "Maintenance reason must contain 3 to 500 non-control characters.",
+                nameof(reason));
+        }
+        if (actor.Trim().Length > 256 || actor.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                "Maintenance actor must contain at most 256 non-control characters.",
+                nameof(actor));
         }
         await _gate.WaitAsync(cancellationToken);
         try
@@ -107,7 +132,7 @@ public sealed class ExtractionOperationGate
             var updated = new ExtractionOperationGateState(
                 maintenance,
                 reason.Trim(),
-                actor,
+                actor.Trim(),
                 DateTimeOffset.UtcNow);
 
             if (maintenance)
@@ -179,7 +204,7 @@ public sealed class ExtractionOperationGate
         {
             throw new ExtractionModeException(
                 "EXTRACTION_MAINTENANCE",
-                $"资源经济已进入换档维护：{state.Reason}",
+                $"The resource economy is in rollover maintenance: {state.Reason}",
                 StatusCodes.Status423Locked);
         }
     }
@@ -209,44 +234,151 @@ public sealed class ExtractionOperationGate
         }
     }
 
+    private void Initialize()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=FULL;
+            CREATE TABLE IF NOT EXISTS economy_schema_migrations (
+                component TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0),
+                applied_at TEXT NOT NULL,
+                PRIMARY KEY (component, version)
+            );
+            CREATE TABLE IF NOT EXISTS economy_gate_state (
+                gate_key TEXT PRIMARY KEY CHECK (gate_key IN ('operation', 'safety')),
+                state_json TEXT NOT NULL CHECK (json_valid(state_json)),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                updated_at TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO economy_schema_migrations (component, version, applied_at)
+            VALUES ('economy-gate-state', 1, $appliedAt);
+            """;
+        command.Parameters.AddWithValue("$appliedAt", DateTimeOffset.UtcNow.ToString("O"));
+        command.ExecuteNonQuery();
+    }
+
+    private void ImportLegacyOnce()
+    {
+        using var connection = Open();
+        using (var check = connection.CreateCommand())
+        {
+            check.CommandText = """
+                SELECT 1 FROM economy_schema_migrations
+                WHERE component = 'operation-gate-legacy-json' AND version = 1;
+                """;
+            if (check.ExecuteScalar() is not null)
+            {
+                return;
+            }
+        }
+        ExtractionOperationGateState? legacy = null;
+        if (File.Exists(_legacyPath))
+        {
+            legacy = JsonSerializer.Deserialize<ExtractionOperationGateState>(
+                File.ReadAllBytes(_legacyPath), JsonOptions)
+                ?? throw new InvalidDataException("The legacy extraction operation gate is invalid.");
+            ValidateState(legacy);
+        }
+        using var transaction = connection.BeginTransaction();
+        if (legacy is not null)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT OR IGNORE INTO economy_gate_state (
+                    gate_key, state_json, revision, updated_at)
+                VALUES ('operation', $state, 1, $updatedAt);
+                """;
+            insert.Parameters.AddWithValue("$state", JsonSerializer.Serialize(legacy, JsonOptions));
+            insert.Parameters.AddWithValue("$updatedAt", legacy.UpdatedAt.ToString("O"));
+            insert.ExecuteNonQuery();
+        }
+        using (var marker = connection.CreateCommand())
+        {
+            marker.Transaction = transaction;
+            marker.CommandText = """
+                INSERT INTO economy_schema_migrations (component, version, applied_at)
+                VALUES ('operation-gate-legacy-json', 1, $appliedAt);
+                """;
+            marker.Parameters.AddWithValue("$appliedAt", DateTimeOffset.UtcNow.ToString("O"));
+            marker.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
     private ExtractionOperationGateState? Load()
     {
-        if (!File.Exists(_path))
-        {
-            return null;
-        }
-        var bytes = File.ReadAllBytes(_path);
-        return JsonSerializer.Deserialize<ExtractionOperationGateState>(bytes, JsonOptions)
-            ?? throw new InvalidDataException("The extraction operation gate is invalid.");
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT state_json FROM economy_gate_state WHERE gate_key = 'operation';
+            """;
+        return command.ExecuteScalar() is string json ? DeserializeState(json) : null;
     }
 
     private async Task PersistAsync(
         ExtractionOperationGateState state,
         CancellationToken cancellationToken)
     {
-        var tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
-        try
+        await using var connection = Open();
+        await using var command = CreateUpsert(connection, state);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private void Persist(ExtractionOperationGateState state)
+    {
+        using var connection = Open();
+        using var command = CreateUpsert(connection, state);
+        command.ExecuteNonQuery();
+    }
+
+    private SqliteConnection Open()
+    {
+        var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA busy_timeout=5000;";
+        command.ExecuteNonQuery();
+        return connection;
+    }
+
+    private static SqliteCommand CreateUpsert(
+        SqliteConnection connection,
+        ExtractionOperationGateState state)
+    {
+        ValidateState(state);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO economy_gate_state (gate_key, state_json, revision, updated_at)
+            VALUES ('operation', $state, 1, $updatedAt)
+            ON CONFLICT(gate_key) DO UPDATE SET
+                state_json = excluded.state_json,
+                revision = economy_gate_state.revision + 1,
+                updated_at = excluded.updated_at;
+            """;
+        command.Parameters.AddWithValue("$state", JsonSerializer.Serialize(state, JsonOptions));
+        command.Parameters.AddWithValue("$updatedAt", state.UpdatedAt.ToString("O"));
+        return command;
+    }
+
+    private static ExtractionOperationGateState DeserializeState(string json)
+    {
+        var state = JsonSerializer.Deserialize<ExtractionOperationGateState>(json, JsonOptions)
+            ?? throw new InvalidDataException("The extraction operation gate is invalid.");
+        ValidateState(state);
+        return state;
+    }
+
+    private static void ValidateState(ExtractionOperationGateState state)
+    {
+        if (string.IsNullOrWhiteSpace(state.Reason) || state.Reason.Length > 500 ||
+            state.Reason.Any(char.IsControl) || string.IsNullOrWhiteSpace(state.Actor) ||
+            state.Actor.Length > 256 || state.Actor.Any(char.IsControl))
         {
-            await using (var stream = new FileStream(
-                             tempPath,
-                             FileMode.CreateNew,
-                             FileAccess.Write,
-                             FileShare.None,
-                             4 * 1024,
-                             FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await JsonSerializer.SerializeAsync(stream, state, JsonOptions, cancellationToken);
-                await stream.FlushAsync(cancellationToken);
-                stream.Flush(flushToDisk: true);
-            }
-            File.Move(tempPath, _path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
+            throw new InvalidDataException("The extraction operation gate state is invalid.");
         }
     }
 }

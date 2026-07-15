@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     Browser["Console Web"] -->|loopback HTTP; production HTTPS / OIDC| API["Control API"]
-    API --> DB["SQLite economy + JSONL command audit (single host)\nPostgreSQL target (multi-node)"]
+    API --> DB["SQLite economy + PalDefender outbox (single host)\nnon-economy JSONL side state"]
     API -->|Basic Auth / loopback| REST["Official Palworld REST API"]
     API -->|stable snapshot copy + SHA-256 manifest| Backup["Managed backup root\noutside active world"]
     API -->|Windows Named Pipe| Bridge["Pal Control Native"]
@@ -16,7 +16,7 @@ flowchart LR
     SSE --> Browser
 ```
 
-浏览器不直接连接官方 REST、RCON 或模组。当前单机版本只监听 loopback：经济账本使用本地 SQLite 事务事件库，游戏命令以独占 lease 加 JSONL 事件日志实现幂等队列和审计；它不是公网入口。未来开放非本机访问时，必须先增加 HTTPS 反向代理、身份认证、权限和限流，并把状态存储迁移到 PostgreSQL 等支持多实例并发的数据库。
+浏览器不直接连接官方 REST、RCON 或模组。当前单机版本只监听 loopback：经济账本与 PalDefender 发货命令使用同一个本地 SQLite，发货 outbox 以条件租约、唯一 server+key 和不可变事件实现幂等；公告/通知/存档 side state 仍是独立 JSONL。它不是公网入口。未来开放非本机访问时，必须先增加 HTTPS 反向代理、身份认证、权限和限流；只有确需多个 Control API/worker 实例时，才迁移到支持多实例并发的数据库与通用 transactional outbox。
 
 ## 目录职责
 

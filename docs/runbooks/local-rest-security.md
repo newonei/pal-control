@@ -17,7 +17,8 @@ The local REST password lives in `services/control-api/appsettings.Local.json`, 
 Invoke-WebRequest http://127.0.0.1:8212/v1/api/info
 
 # Control API should report the official adapter as connected
-Invoke-RestMethod http://127.0.0.1:5180/api/v1/servers/local/capabilities
+$headers = @{ "X-Pal-Admin-Key" = $env:PAL_CONTROL_VIEWER_KEY }
+Invoke-RestMethod http://127.0.0.1:5180/api/v1/servers/local/capabilities -Headers $headers
 ```
 
-Do not paste the Basic Auth value into browser code, logs, screenshots or audit payloads.
+Inject `PAL_CONTROL_VIEWER_KEY` from a password manager only for the controlled process. Do not paste either credential into browser code, committed scripts, logs, screenshots or audit payloads.

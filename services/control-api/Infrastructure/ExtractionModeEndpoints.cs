@@ -11,6 +11,101 @@ public static class ExtractionModeEndpoints
     {
         var group = api.MapGroup("/extraction");
 
+        group.MapGet("/capabilities", async (
+            ExtractionCommerceService commerce,
+            ExtractionOperationGate operationGate,
+            EconomySafetyGate safetyGate,
+            PalDefenderCommandQueue deliveryCommands,
+            ExtractionSettlementQueue settlementQueue,
+            CancellationToken cancellationToken) =>
+        {
+            var gate = operationGate.Current;
+            var deliveryQueue = await deliveryCommands.GetEconomyLoadAsync(cancellationToken);
+            var backlog = (await commerce.ListBlockingOrdersAsync(cancellationToken)).Count;
+            var purchase = await safetyGate.EvaluateAsync(
+                EconomyWriteFeature.Purchase,
+                context: null,
+                deliveryQueue with
+                {
+                    Backlog = backlog,
+                    BacklogCapacity = safetyGate.DeliveryBacklogCapacity
+                },
+                cancellationToken);
+            var resourceExchange = await safetyGate.EvaluateAsync(
+                EconomyWriteFeature.ResourceExchange,
+                context: null,
+                new EconomyQueueSnapshot(
+                    settlementQueue.IsAccepting,
+                    settlementQueue.AdmittedCount,
+                    settlementQueue.Capacity),
+                cancellationToken);
+
+            return Results.Ok(new
+            {
+                gameplayMode = ExtractionModeCoordinator.GameplayMode,
+                readReady = commerce.IsReady,
+                maintenance = gate.Maintenance,
+                writes = new
+                {
+                    purchase = new
+                    {
+                        purchase.Enabled,
+                        purchase.Blockers,
+                        circuit = purchase.Circuit
+                    },
+                    resourceExchange = new
+                    {
+                        resourceExchange.Enabled,
+                        resourceExchange.Blockers,
+                        circuit = resourceExchange.Circuit
+                    }
+                },
+                evaluatedAt = purchase.EvaluatedAt > resourceExchange.EvaluatedAt
+                    ? purchase.EvaluatedAt
+                    : resourceExchange.EvaluatedAt
+            });
+        });
+
+        group.MapPut("/admin/safety-gate/{feature}", async (
+            string feature,
+            EconomyCircuitUpdateRequest request,
+            HttpContext httpContext,
+            EconomySafetyGate safetyGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var parsedFeature = feature.Trim().ToLowerInvariant() switch
+                {
+                    "purchase" => EconomyWriteFeature.Purchase,
+                    "resource-exchange" => EconomyWriteFeature.ResourceExchange,
+                    _ => throw new ExtractionModeException(
+                        "INVALID_ECONOMY_WRITE_FEATURE",
+                        "feature 只能是 purchase 或 resource-exchange。",
+                        StatusCodes.Status400BadRequest)
+                };
+                if (string.IsNullOrWhiteSpace(request.Reason))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "ECONOMY_CIRCUIT_REASON_REQUIRED",
+                        "切换经济熔断器必须填写原因。"));
+                }
+                AdminAuditEnrichment.SetBefore(httpContext, safetyGate.Current);
+                var state = await safetyGate.SetCircuitAsync(
+                    parsedFeature,
+                    request.WritesEnabled,
+                    request.Reason,
+                    AdminIdentity.RequireSubject(httpContext),
+                    cancellationToken);
+                AdminAuditEnrichment.SetAfter(httpContext, state);
+                return Results.Ok(state);
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        }).RequireAuthorization(AdminPolicies.EconomyHighRisk);
+
         group.MapGet("/overview", async (
             string userId,
             ExtractionModeCoordinator coordinator,
@@ -221,7 +316,8 @@ public static class ExtractionModeEndpoints
                     settlementEnabled = settlementProbe.Success,
                     reason = settlementProbe.Success
                         ? null
-                        : settlementProbe.ErrorMessage ?? "RCON 扣物适配器当前不可用；未证明物品已移除前绝不入账。"
+                        : settlementProbe.ErrorMessage ??
+                          "Native 稳定扣物/持久化证据不可用；未证明资源已移除前绝不入账。"
                 });
             }
             catch (Exception exception)
@@ -252,7 +348,7 @@ public static class ExtractionModeEndpoints
             Guid runId,
             HttpRequest httpRequest,
             SettleExtractionRunRequest request,
-            ExtractionSettlementService settlement,
+            ExtractionSettlementQueue settlementQueue,
             ExtractionOperationGate operationGate,
             CancellationToken cancellationToken) =>
         {
@@ -269,7 +365,7 @@ public static class ExtractionModeEndpoints
                         "IDEMPOTENCY_KEY_REQUIRED",
                         "资源兑换结算必须提供 8 到 128 个字符的 Idempotency-Key。"));
                 }
-                var run = await settlement.SettleAsync(
+                var run = await settlementQueue.EnqueueAsync(
                     runId,
                     request.UserId,
                     idempotencyKey,
@@ -318,6 +414,7 @@ public static class ExtractionModeEndpoints
                     product,
                     request.Quantity,
                     idempotencyKey,
+                    AdminIdentity.RequireSubject(httpRequest.HttpContext),
                     cancellationToken);
                 if (purchase.ErrorCode is not null || purchase.Order is null)
                 {
@@ -368,12 +465,23 @@ public static class ExtractionModeEndpoints
                     request.UserId,
                     requireOnline: false,
                     cancellationToken);
+                var beforeBalance = currency == ExtractionCurrency.SeasonVoucher
+                    ? context.Wallet.SeasonVoucher
+                    : context.Wallet.MarketCoin;
+                AdminAuditEnrichment.SetBefore(httpRequest.HttpContext, new
+                {
+                    accountId = context.Account.AccountId,
+                    currency = ExtractionModeCoordinator.ToClientCurrency(currency),
+                    balance = beforeBalance.Balance,
+                    revision = beforeBalance.Revision
+                });
                 var adjustment = await coordinator.AdjustWalletAsync(
                     context,
                     currency,
                     request.Delta,
                     request.Reason.Trim(),
                     idempotencyKey,
+                    AdminIdentity.RequireSubject(httpRequest.HttpContext),
                     cancellationToken);
                 if (adjustment.ErrorCode is not null || adjustment.Balance is null)
                 {
@@ -383,6 +491,15 @@ public static class ExtractionModeEndpoints
                             adjustment.ErrorMessage ?? "钱包调账失败。"),
                         statusCode: StatusCodes.Status409Conflict);
                 }
+                AdminAuditEnrichment.SetAfter(httpRequest.HttpContext, new
+                {
+                    accountId = context.Account.AccountId,
+                    currency = ExtractionModeCoordinator.ToClientCurrency(currency),
+                    balance = adjustment.Balance.Balance,
+                    revision = adjustment.Balance.Revision,
+                    ledgerEntryId = adjustment.LedgerEntry?.EntryId,
+                    created = adjustment.Created
+                });
                 return Results.Ok(new
                 {
                     accountId = context.Account.AccountId,
@@ -396,7 +513,7 @@ public static class ExtractionModeEndpoints
             {
                 return ToError(exception);
             }
-        });
+        }).RequireAuthorization(AdminPolicies.EconomyHighRisk);
 
         group.MapPost("/admin/orders/{orderId:guid}/reconcile", async (
             Guid orderId,
@@ -435,12 +552,17 @@ public static class ExtractionModeEndpoints
                         $"confirmation 必须精确填写 {expectedConfirmation}。"));
                 }
 
+                var beforeOrder = await commerce.GetOrderAsync(orderId, cancellationToken);
+                AdminAuditEnrichment.SetBefore(
+                    httpRequest.HttpContext,
+                    beforeOrder is null ? null : OrderDto(beforeOrder));
+
                 ShopOrder? order;
                 if (resolution == "delivered")
                 {
                     var result = await commerce.MarkUncertainOrderDeliveredAsync(
                         orderId,
-                        "local-console",
+                        AdminIdentity.RequireSubject(httpRequest.HttpContext),
                         request.Reason,
                         cancellationToken);
                     if (result.ErrorCode is not null || result.Order is null)
@@ -456,7 +578,7 @@ public static class ExtractionModeEndpoints
                     var result = await commerce.RefundUncertainOrderAsync(
                         orderId,
                         idempotencyKey,
-                        "local-console",
+                        AdminIdentity.RequireSubject(httpRequest.HttpContext),
                         request.Reason,
                         cancellationToken);
                     if (result.ErrorCode is not null || result.Order is null)
@@ -473,18 +595,21 @@ public static class ExtractionModeEndpoints
                         "INVALID_RECONCILIATION_RESOLUTION",
                         "resolution 只能是 delivered 或 refund。"));
                 }
+                AdminAuditEnrichment.SetAfter(httpRequest.HttpContext, OrderDto(order));
                 return Results.Ok(OrderDto(order));
             }
             catch (Exception exception)
             {
                 return ToError(exception);
             }
-        });
+        }).RequireAuthorization(AdminPolicies.EconomyHighRisk);
 
         group.MapPost("/admin/runs/{runId:guid}/reconcile", async (
             Guid runId,
+            HttpContext httpContext,
             ExtractionRunReconciliationRequest request,
             ExtractionSettlementService settlement,
+            ExtractionRunStore runStore,
             ExtractionOperationGate operationGate,
             CancellationToken cancellationToken) =>
         {
@@ -506,66 +631,64 @@ public static class ExtractionModeEndpoints
                         "RECONCILIATION_CONFIRMATION_INVALID",
                         $"confirmation 必须精确填写 {expectedConfirmation}。"));
                 }
+                var beforeRun = await runStore.GetAsync(runId, cancellationToken);
+                AdminAuditEnrichment.SetBefore(
+                    httpContext,
+                    beforeRun is null ? null : RunDto(beforeRun));
                 var run = await settlement.ReconcileUncertainAsync(
                     runId,
                     resolution,
                     request.Reason,
+                    AdminIdentity.RequireSubject(httpContext),
                     cancellationToken);
+                AdminAuditEnrichment.SetAfter(httpContext, RunDto(run));
                 return Results.Ok(RunDto(run));
             }
             catch (Exception exception)
             {
                 return ToError(exception);
             }
-        });
+        }).RequireAuthorization(AdminPolicies.EconomyHighRisk);
 
-        group.MapGet("/admin/rcon/status", async (
-            ExtractionSettlementService settlement,
-            CancellationToken cancellationToken) =>
-        {
-            if (!settlement.SettlementEnabled)
-            {
-                return Results.Ok(new
-                {
-                    enabled = false,
-                    connected = false,
-                    outcome = "disabled",
-                    error = new ApiError("RCON_DISABLED", "资源兑换 RCON 适配器未启用。")
-                });
-            }
-            var result = await settlement.ProbeSettlementAsync(cancellationToken);
-            return Results.Ok(new
-            {
-                enabled = true,
-                connected = result.Success,
-                outcome = result.Outcome.ToString().ToLowerInvariant(),
-                error = result.Success
-                    ? null
-                    : new ApiError(
-                        result.ErrorCode ?? "RCON_PROBE_FAILED",
-                        result.ErrorMessage ?? "RCON 探针失败。")
-            });
-        });
+        group.MapGet("/admin/settlement/status", GetSettlementStatusAsync);
+        // Deprecated compatibility alias. It intentionally returns the same
+        // adapter-neutral schema because production settlement is Native; no
+        // new caller should infer an RCON transport from this legacy path.
+        group.MapGet("/admin/rcon/status", GetSettlementStatusAsync);
 
         group.MapPost("/admin/rollover/maintenance", async (
+            HttpContext httpContext,
             RolloverMaintenanceRequest request,
             ExtractionOperationGate operationGate,
+            WeeklyRolloverStateStore rolloverStore,
+            Microsoft.Extensions.Options.IOptions<ExtractionModeOptions> extractionOptions,
             CancellationToken cancellationToken) =>
         {
             try
             {
+                if (!request.Maintenance && await rolloverStore.FindIncompleteAsync(
+                        extractionOptions.Value.ServerId,
+                        cancellationToken) is { } incomplete)
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_REOPEN_STEP_REQUIRED",
+                        $"Persistent rollover '{incomplete.OperationId:D}' must complete its " +
+                        $"'{incomplete.CurrentStep}' step before maintenance can reopen."));
+                }
+                AdminAuditEnrichment.SetBefore(httpContext, operationGate.Current);
                 var state = await operationGate.SetAsync(
                     request.Maintenance,
                     request.Reason,
-                    "local-console",
+                    AdminIdentity.RequireSubject(httpContext),
                     cancellationToken);
+                AdminAuditEnrichment.SetAfter(httpContext, state);
                 return Results.Ok(state);
             }
             catch (Exception exception)
             {
                 return ToError(exception);
             }
-        });
+        }).RequireAuthorization(AdminPolicies.SeasonHighRisk);
 
         group.MapGet("/admin/rollover/preflight", async (
             ExtractionModeCoordinator coordinator,
@@ -613,15 +736,56 @@ public static class ExtractionModeEndpoints
         });
 
         group.MapPost("/admin/rollover/commit", async (
+            HttpContext httpContext,
             RolloverCommitRequest request,
             ExtractionModeCoordinator coordinator,
             ExtractionCommerceService commerce,
             ExtractionRunStore runStore,
             ExtractionOperationGate operationGate,
+            WeeklyRolloverStateStore rolloverStore,
+            SeasonSettlementJobStore seasonJobs,
+            Microsoft.Extensions.Options.IOptions<ExtractionModeOptions> extractionOptions,
             CancellationToken cancellationToken) =>
         {
             try
             {
+                // The normal coordinator read deliberately rejects an active
+                // season whose WorldId is still null. The one exception is the
+                // first controlled world binding: initialization has already
+                // created exactly one active season, maintenance is closed to
+                // players, and no rollover state machine exists yet. Read the
+                // repository directly so this bootstrap state is observable;
+                // every subsequent commit still requires the durable rollover
+                // state machine below.
+                var serverId = extractionOptions.Value.ServerId;
+                var currentSeason = await commerce.GetActiveSeasonAsync(
+                        serverId,
+                        cancellationToken)
+                    ?? throw new ExtractionModeException(
+                        "ROLLOVER_ACTIVE_SEASON_REQUIRED",
+                        "A rollover commit requires one active economy season.",
+                        StatusCodes.Status409Conflict);
+                var initialWorldBinding = currentSeason.WorldId is null;
+                if (initialWorldBinding)
+                {
+                    var seasons = await commerce.ListSeasonsAsync(serverId, cancellationToken);
+                    if (seasons.Count != 1 ||
+                        seasons[0].SeasonId != currentSeason.SeasonId ||
+                        seasons[0].State != ExtractionSeasonState.Active ||
+                        seasons[0].WorldId is not null)
+                    {
+                        return Results.Conflict(new ApiError(
+                            "ROLLOVER_INITIAL_BINDING_STATE_INVALID",
+                            "The initial world binding requires exactly one active, unbound economy season."));
+                    }
+                }
+                AdminAuditEnrichment.SetBefore(httpContext, new
+                {
+                    currentSeason.SeasonId,
+                    currentSeason.Code,
+                    currentSeason.WorldId,
+                    currentSeason.Revision
+                });
                 var blockers = await GetRolloverBlockersAsync(
                     commerce,
                     runStore,
@@ -639,9 +803,59 @@ public static class ExtractionModeEndpoints
                         "ROLLOVER_NOT_READY",
                         $"仍有 {blockers.ActiveOperations} 个在途写操作、{blockers.Orders.Count} 个订单和 {blockers.Runs.Count} 个资源兑换记录等待终结。"));
                 }
+                var persistent = await rolloverStore.FindIncompleteAsync(
+                    serverId,
+                    cancellationToken);
+                if (initialWorldBinding && persistent is not null)
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_INITIAL_BINDING_STATE_INVALID",
+                        "The initial world binding cannot bypass an existing persistent rollover operation."));
+                }
+                if (!initialWorldBinding && persistent is null)
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_PERSISTENT_STATE_REQUIRED",
+                        "The initial world binding is already complete; subsequent commits require the persistent rollover workflow."));
+                }
+                if (persistent is not null &&
+                    (persistent.CurrentStep != WeeklyRolloverStep.Commit ||
+                     !string.Equals(
+                         persistent.TargetWorldId,
+                         request.WorldId,
+                         StringComparison.OrdinalIgnoreCase)))
+                {
+                    return Results.Conflict(new ApiError(
+                        "ROLLOVER_PERSISTENT_STEP_MISMATCH",
+                        $"Persistent rollover '{persistent.OperationId:D}' requires step " +
+                        $"'{persistent.CurrentStep}' for target world '{persistent.TargetWorldId}'."));
+                }
+                if (persistent is not null)
+                {
+                    var expiry = await seasonJobs.FindExpiryAsync(
+                        persistent.FromSeasonId,
+                        cancellationToken);
+                    if (expiry?.State != SeasonSettlementJobState.Completed ||
+                        !string.Equals(
+                            expiry.RulesVersion,
+                            persistent.RulesVersion,
+                            StringComparison.Ordinal))
+                    {
+                        return Results.Conflict(new ApiError(
+                            "ROLLOVER_EXPIRY_JOB_REQUIRED",
+                            "The version-matched SeasonVoucher expiry job must complete before the season commit."));
+                    }
+                }
                 var season = await coordinator.CommitRolloverAsync(
                     request.WorldId,
                     cancellationToken);
+                AdminAuditEnrichment.SetAfter(httpContext, new
+                {
+                    season.SeasonId,
+                    season.Code,
+                    season.WorldId,
+                    season.Revision
+                });
                 return Results.Ok(new
                 {
                     seasonId = season.SeasonId,
@@ -654,9 +868,32 @@ public static class ExtractionModeEndpoints
             {
                 return ToError(exception);
             }
-        });
+        }).RequireAuthorization(AdminPolicies.SeasonHighRisk);
 
         return group;
+    }
+
+    private static async Task<IResult> GetSettlementStatusAsync(
+        ExtractionSettlementService settlement,
+        CancellationToken cancellationToken)
+    {
+        var result = await settlement.ProbeSettlementAsync(cancellationToken);
+        return Results.Ok(new
+        {
+            adapter = settlement.SettlementAdapter,
+            enabled = settlement.SettlementEnabled,
+            connected = result.Success,
+            outcome = result.Outcome.ToString().ToLowerInvariant(),
+            error = result.Success
+                ? null
+                : new ApiError(
+                    result.Outcome == RconOperationOutcome.Uncertain
+                        ? "SETTLEMENT_PROBE_UNCERTAIN"
+                        : "SETTLEMENT_PROBE_FAILED",
+                    result.Outcome == RconOperationOutcome.Uncertain
+                        ? "资源结算探针结果不确定；禁止自动重发，未证明资源已移除前绝不入账。"
+                        : "资源结算适配器当前不可用；未证明资源已移除前绝不入账。")
+        });
     }
 
     private static async Task<RolloverBlockers> GetRolloverBlockersAsync(
@@ -776,6 +1013,7 @@ public static class ExtractionModeEndpoints
             ExtractionSettlementState.Quoted => "preparing",
             ExtractionSettlementState.Consuming => "deployed",
             ExtractionSettlementState.Removed => "deployed",
+            ExtractionSettlementState.Credited => "deployed",
             ExtractionSettlementState.Settled => "extracted",
             ExtractionSettlementState.Uncertain => "uncertain",
             ExtractionSettlementState.Cancelled => "cancelled",
@@ -891,6 +1129,10 @@ public static class ExtractionModeEndpoints
         string Resolution,
         string Reason,
         string Confirmation);
+
+    public sealed record EconomyCircuitUpdateRequest(
+        bool WritesEnabled,
+        string Reason);
 
     private sealed record RolloverBlockers(
         ExtractionOperationGateState GateState,

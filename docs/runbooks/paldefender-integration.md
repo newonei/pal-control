@@ -147,7 +147,7 @@ Content-Type: application/json
 }
 ```
 
-`reason` 必须为 3–500 个无控制字符的可审计文本。服务会先把 `accepted` 事件强制刷新到 `CommandPersistence.DataDirectory/paldefender-command-audit.jsonl`，然后由单实例 `PalDefenderCommandQueue` 后台派发；不要把 `202 Accepted` 当作上游成功。
+`reason` 必须为 3–500 个无控制字符的可审计文本。服务会先在 `ExtractionMode:Persistence:DataDirectory/extraction-commerce.db` 的同一事务中写入 `paldefender_commands(state=accepted)` 和不可变 `paldefender_command_events`，然后由单实例 `PalDefenderCommandQueue` 后台租约派发；不要把 `202 Accepted` 当作上游成功。
 
 ```text
 accepted -> dispatched -> succeeded
@@ -157,17 +157,24 @@ accepted -> dispatched -> succeeded
 
 - 同一 server、同一 key、完全相同的路径、reason 和 payload 只对应一个命令；进行中重放返回 `202`，终态重放返回 `200`，`commandId` 不变。
 - 同一 key 配不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`。
+- 队列容量只统计 `accepted/dispatched`；单 worker 保证同一时刻只有一个游戏写入。每次领取以 SQLite CAS 写入 30 秒租约，进程在派发前崩溃时可安全释放租约并继续。
 - 上游明确的非 5xx 拒绝进入 `failed`；默认未授权的 `deletebase` 因此会进入 `failed`。
 - 派发后超时、连接中断或上游 5xx 进入 `uncertain`，不会自动重发。
 - 服务重启时，尚未派发的 `accepted` 可以继续处理；已经 `dispatched` 但没有终态的命令会记录 `recovered-uncertain`，不会盲目重发。
+- 派发前内部故障采用有限退避；连续 5 次后写入 `failed/COMMAND_DEAD_LETTERED` 和 `deadLetteredAt`，`OUTBOX_DEAD_LETTER_PRESENT` 会关闭购买写熔断。若同一 delivery 的全部行都能证明从未 `dispatched`，receipt 可按明确失败退款；只要有任一行已成功、部分成功或不确定，就必须人工复核且不能全额自动退款。
 - `uncertain` 必须先在游戏状态、PalDefender 日志和审计记录中人工对账，再决定是否使用一个新 key 发起补偿操作。
+
+首次升级会在一个 SQLite 事务内只读导入旧 `CommandPersistence.DataDirectory/paldefender-command-audit.jsonl`。导入成功后源文件改名为 `.jsonl.migrated-to-sqlite-v1` 继续保留，但不再参与派发；重复 key 冲突、未知 command、损坏的非末行事件、迁移后的源文件篡改或任何部分导入都会使 Control API 启动失败。不要手工把归档改回原名；回滚旧版本前应先恢复配套经济快照。
+
+购买扣款/订单事务与 PalDefender `accepted` 事务目前是同库的两个独立事务。中间崩溃由持久 delivery request、不可变 receipt request 和确定性 `shop:<orderId>:delivery:*` key 补齐，不能把它描述成一次跨步骤原子提交；恢复 worker 会优先查找已存在命令，绝不生成新 key 盲发。
 
 查询命令和审计：
 
 ```powershell
 $api = 'http://127.0.0.1:5180/api/v1'
-Invoke-RestMethod "$api/paldefender-commands/<commandId>"
-Invoke-RestMethod "$api/audit/paldefender-commands?limit=100"
+$adminHeaders = @{ "X-Pal-Admin-Key" = $env:PAL_CONTROL_VIEWER_KEY }
+Invoke-RestMethod "$api/paldefender-commands/<commandId>" -Headers $adminHeaders
+Invoke-RestMethod "$api/audit/paldefender-commands?limit=100" -Headers $adminHeaders
 ```
 
 ## 验证与验收记录
@@ -176,9 +183,12 @@ Invoke-RestMethod "$api/audit/paldefender-commands?limit=100"
 
 ```powershell
 $api = 'http://127.0.0.1:5180/api/v1'
-Invoke-RestMethod "$api/servers/local/paldefender/status"
-Invoke-RestMethod "$api/servers/local/paldefender/catalog"
+$adminHeaders = @{ "X-Pal-Admin-Key" = $env:PAL_CONTROL_VIEWER_KEY }
+Invoke-RestMethod "$api/servers/local/paldefender/status" -Headers $adminHeaders
+Invoke-RestMethod "$api/servers/local/paldefender/catalog" -Headers $adminHeaders
 ```
+
+这里的 `PAL_CONTROL_VIEWER_KEY` 是 Control API 的只读管理凭据，不是 PalDefender token；两者都只能从密码管理器注入受控进程。
 
 验收标准是 `status.connected=true`、`catalog.count=27`，且 `version` 与上述固定版本一致。2026-07-11 本机联调中，10 个白名单 GET 均返回 `200`；`Alert` 完成了 `202 accepted -> succeeded` 闭环，查询终态为 `200`；相同 key 和请求返回相同命令，复用 key 但改变请求返回 `409`。
 
@@ -190,7 +200,8 @@ Invoke-RestMethod "$api/servers/local/paldefender/catalog"
 - `PALDEFENDER_TOKEN_UNAVAILABLE`：检查 token JSON 的 `Token` 字段和 ACL，不要把 token 复制到代码。
 - 上游 `401/403`：核对具体目录项所需权限；`deletebase` 默认出现 `403` 是预期的最小权限行为。
 - 带有效 bearer 仍被拒绝：首先核对请求 `Origin` 与 `Cors.Allowed-Origins` 是否逐字一致。
-- `PALDEFENDER_COMMAND_QUEUE_UNAVAILABLE` 或持久化失败：停止写入，检查数据目录空间、ACL 和是否有第二个 Control API 实例持有 queue lock。
+- `PALDEFENDER_COMMAND_QUEUE_UNAVAILABLE` 或持久化失败：停止写入，检查经济数据目录空间/ACL、`PRAGMA integrity_check`、migration marker 与是否有第二个 Control API 实例持有 queue lock。
+- `COMMAND_DEAD_LETTERED` / `OUTBOX_DEAD_LETTER_PRESENT`：保持购买熔断关闭，核对该命令从未进入 `dispatched`，修复依赖后创建经过审计的人工处置；不要直接改 SQLite 状态或删除不可变事件。
 - `uncertain`：禁止自动重试，按上节人工对账。
 - guarded start 拒绝 Steam build 或摘要：保持服务器停止，重新做兼容性评审；不要跳过校验或只替换其中一个 DLL。
 

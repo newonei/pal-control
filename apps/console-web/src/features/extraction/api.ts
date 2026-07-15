@@ -1,3 +1,7 @@
+// Extraction endpoints in Console are administrator APIs. adminFetch itself
+// refuses to attach the credential to player-portal or cross-origin URLs.
+import { adminFetch as fetch } from "../../lib/api/adminFetch";
+
 export type ExtractionCurrency = "merchantCoin" | "weeklyTicket";
 
 export type ExtractionSeason = {

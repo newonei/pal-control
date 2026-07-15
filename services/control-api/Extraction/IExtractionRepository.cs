@@ -1,8 +1,24 @@
 namespace PalControl.ControlApi.Extraction;
 
-public interface IExtractionRepository
+public interface IPlayerIdentityBindingStore
+{
+    Task<PlayerIdentityBinding?> FindActivePlayerIdentityBindingAsync(
+        string serverId,
+        string playerIdentifier,
+        CancellationToken cancellationToken);
+}
+
+public interface IExtractionRepository : IPlayerIdentityBindingStore
 {
     bool IsReady { get; }
+
+    /// <summary>
+    /// Performs a rolled-back write against the authoritative store. A cached
+    /// startup-ready flag is not sufficient for a money-moving admission
+    /// decision because disk permissions, capacity, or SQLite locking can
+    /// drift while the read projection remains available.
+    /// </summary>
+    Task ProbeWriteAsync(CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ExtractionSeason>> ListSeasonsAsync(
         string? serverId,
@@ -31,6 +47,25 @@ public interface IExtractionRepository
     Task<ExtractionAccount?> FindAccountAsync(
         string identityProvider,
         string externalUserId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ExtractionAccount>> ListAccountsAsync(
+        CancellationToken cancellationToken);
+
+    Task<PlayerIdentityBindingResult> BindOrVerifyPlayerIdentityAsync(
+        PlayerIdentityBindingRequest request,
+        CancellationToken cancellationToken);
+
+    Task<PlayerIdentityBinding?> GetPlayerIdentityBindingAsync(
+        Guid accountId,
+        Guid seasonId,
+        string worldId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<PlayerIdentityBindingHistoryEntry>> ListPlayerIdentityBindingHistoryAsync(
+        Guid? accountId,
+        Guid? seasonId,
+        int limit,
         CancellationToken cancellationToken);
 
     Task<ExtractionWalletSnapshot> GetWalletAsync(

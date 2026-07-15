@@ -7,6 +7,11 @@ coverage/
 .npm/
 .pnpm-store/
 
+# Python test/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # .NET
 bin/
 obj/

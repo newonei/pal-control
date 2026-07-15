@@ -18,6 +18,10 @@ public sealed class ExtractionModeOptions
     public bool RefundDefinitiveDeliveryFailures { get; init; } = true;
     public int ExtractionQuoteSeconds { get; init; } = 30;
     public int ExtractionPositionSampleMilliseconds { get; init; } = 2_000;
+    public int SettlementLeaseHeartbeatSeconds { get; init; } = 10;
+    public int SettlementQueueCapacity { get; init; } = 32;
+    public int SettlementWorkerCount { get; init; } = 4;
+    public int SettlementQueueOperationTimeoutSeconds { get; init; } = 180;
     public IReadOnlyList<ExtractionZoneOptions> ExtractionZones { get; init; } =
     [
         new ExtractionZoneOptions()
@@ -95,6 +99,15 @@ public sealed class ExtractionModeOptions
             ExtractionPositionSampleMilliseconds is < 500 or > 10_000)
         {
             error = "Extraction quote duration or position sampling interval is invalid.";
+            return false;
+        }
+        if (SettlementLeaseHeartbeatSeconds is < 2 or > 30 ||
+            SettlementQueueCapacity is < 1 or > 512 ||
+            SettlementWorkerCount is < 1 or > 32 ||
+            SettlementWorkerCount > SettlementQueueCapacity ||
+            SettlementQueueOperationTimeoutSeconds is < 30 or > 600)
+        {
+            error = "Extraction settlement heartbeat, queue capacity, worker count, or operation timeout is invalid.";
             return false;
         }
         if (ExtractionZones.Count == 0 || ExtractionZones.Any(zone => !zone.IsValid()))
@@ -179,9 +192,15 @@ public sealed class PalDefenderShopDeliveryDispatcher : IShopDeliveryCommandDisp
             result.Command?.CommandId,
             result.Command is not null,
             result.IdempotencyConflict,
-            result.IdempotencyConflict ? "IDEMPOTENCY_CONFLICT" : null,
+            result.IdempotencyConflict
+                ? "IDEMPOTENCY_CONFLICT"
+                : result.CapacityExceeded
+                    ? "PALDEFENDER_COMMAND_QUEUE_FULL"
+                    : null,
             result.IdempotencyConflict
                 ? "The PalDefender delivery idempotency key conflicts with another command."
-                : null);
+                : result.CapacityExceeded
+                    ? "The PalDefender command queue is at its hard capacity."
+                    : null);
     }
 }

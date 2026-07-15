@@ -20,6 +20,24 @@ Pal\Binaries\Win64\ue4ss\Mods\mods.txt
 Pal\Binaries\Win64\ue4ss\Mods\PalControlNative\dlls\main.dll
 ```
 
+## 锁定依赖构建
+
+Native MOD 与 Palworld、UE4SS 和 Unreal ABI 精确绑定。先按
+[`dependencies.lock.json`](dependencies.lock.json) 获取 UE4SS 源码和子模块，并确保
+工作树停在锁定提交；不要提交 `third_party/`、独立构建目录或本机生成的 DLL。
+
+```powershell
+git clone --recurse-submodules https://github.com/Okaetsu/RE-UE4SS `
+  .\third_party\RE-UE4SS-Palworld-c2ac246
+git -C .\third_party\RE-UE4SS-Palworld-c2ac246 checkout c2ac246447a8bcd92541070cb474044e7a2bbbe6
+git -C .\third_party\RE-UE4SS-Palworld-c2ac246 submodule update --init --recursive
+
+.\mods\pal-control-native\scripts\Build-PalControlNative.ps1 `
+  -Ue4ssRoot .\third_party\RE-UE4SS-Palworld-c2ac246
+```
+
+脚本在配置前核对锁定的 UE4SS/Unreal 提交和 CMake、Rust、MSVC 工具链，且要求构建目录位于 UE4SS 源码树之外。它不会自动 clone、切换提交、部署 DLL 或重启服务器。只检查环境而不编译时使用 `-GuardOnly`；成功后终端会打印产物绝对路径、字节数和 SHA-256。
+
 开发服已验证真实 `hello` 和持续 heartbeat。所有原生读写仍会校验精确游戏版本、反射签名、玩家身份、revision 与回读结果，不匹配时 fail-closed。
 
 ## 游戏内撤离点查询

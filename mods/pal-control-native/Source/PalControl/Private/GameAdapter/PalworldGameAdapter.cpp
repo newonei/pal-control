@@ -21,7 +21,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cmath>
 #include <cstdio>
@@ -60,6 +62,11 @@ namespace PalControl::Game::Detail
         std::int32_t slotIndex = -1;
         std::string itemId;
         std::int32_t quantity = -1;
+        std::string dynamicCreatedWorldId;
+        std::string dynamicLocalIdInCreatedWorld;
+        bool hasDynamicItemData = false;
+        double corruptionProgress = 0;
+        std::uint32_t corruptionProgressBits = 0;
     };
 
     struct InventoryExpectedContainerPayload
@@ -71,6 +78,7 @@ namespace PalControl::Game::Detail
 
     struct InventoryConsumePayload
     {
+        std::int32_t snapshotVersion = 0;
         std::string ownerPlayerId;
         std::vector<InventoryConsumeItemPayload> items;
         std::vector<InventoryExpectedContainerPayload> expectedContainers;
@@ -172,6 +180,24 @@ namespace
             }
         }
         return escaped;
+    }
+
+    std::string FloatToJson(float value)
+    {
+        if (!std::isfinite(value))
+        {
+            return "null";
+        }
+        std::array<char, 64> buffer{};
+        const auto [end, error] = std::to_chars(
+            buffer.data(),
+            buffer.data() + buffer.size(),
+            value,
+            std::chars_format::general,
+            std::numeric_limits<float>::max_digits10);
+        return error == std::errc{}
+            ? std::string(buffer.data(), end)
+            : std::string{"null"};
     }
 
     std::string UtcNow()
@@ -2166,6 +2192,44 @@ namespace
         return result;
     }
 
+    std::optional<bool> ReadNoParameterBoolFunction(
+        RC::Unreal::UObject* target,
+        const RC::File::CharType* functionName,
+        const RC::File::CharType* functionPath,
+        std::string_view expectedFullName)
+    {
+        using namespace RC;
+        using namespace RC::Unreal;
+        if (!target)
+        {
+            return std::nullopt;
+        }
+        auto* function = ResolveFunction(target, functionName, functionPath);
+        auto* returnParameter = FindTypedProperty<FBoolProperty>(
+            function,
+            STR("ReturnValue"));
+        if (!function || !returnParameter ||
+            function->GetReturnProperty() != returnParameter ||
+            CountParameters(function) != 1 ||
+            to_string(function->GetFullName()) != expectedFullName)
+        {
+            return std::nullopt;
+        }
+
+        const auto storageCount = std::max<std::size_t>(
+            (function->GetPropertiesSize() + sizeof(std::max_align_t) - 1) /
+                sizeof(std::max_align_t),
+            1);
+        std::vector<std::max_align_t> storage(storageCount);
+        auto* parameters = storage.data();
+        function->InitializeStruct(parameters);
+        target->ProcessEvent(function, parameters);
+        const auto result = returnParameter->GetPropertyValue(
+            returnParameter->ContainerPtrToValuePtr<void>(parameters));
+        function->DestroyStruct(parameters);
+        return result;
+    }
+
     struct InventoryProperties
     {
         struct ContainerField
@@ -2185,7 +2249,12 @@ namespace
         RC::Unreal::FIntProperty* SlotIndex{};
         RC::Unreal::FStructProperty* ItemId{};
         RC::Unreal::FNameProperty* StaticItemId{};
+        RC::Unreal::FStructProperty* DynamicItemId{};
+        RC::Unreal::FStructProperty* DynamicCreatedWorldId{};
+        RC::Unreal::FStructProperty* DynamicLocalId{};
         RC::Unreal::FIntProperty* StackCount{};
+        RC::Unreal::FFloatProperty* CorruptionProgress{};
+        RC::Unreal::FWeakObjectProperty* DynamicItemData{};
 
         [[nodiscard]] bool IsReady() const
         {
@@ -2195,6 +2264,12 @@ namespace
                 std::ranges::all_of(ContainerFields, [](const ContainerField& field) {
                     return field.Property != nullptr;
                 });
+        }
+
+        [[nodiscard]] bool SupportsStaticSlotClear() const
+        {
+            return DynamicItemId && DynamicCreatedWorldId && DynamicLocalId &&
+                CorruptionProgress && DynamicItemData;
         }
     };
 
@@ -2241,6 +2316,19 @@ namespace
             : nullptr;
         result.StaticItemId = FindTypedProperty<FNameProperty>(
             itemIdStruct, STR("StaticId"));
+        result.DynamicItemId = FindTypedProperty<FStructProperty>(
+            itemIdStruct, STR("DynamicId"));
+        auto* dynamicItemIdStruct = result.DynamicItemId
+            ? static_cast<UStruct*>(result.DynamicItemId->GetStruct())
+            : nullptr;
+        result.DynamicCreatedWorldId = FindTypedProperty<FStructProperty>(
+            dynamicItemIdStruct, STR("CreatedWorldId"));
+        result.DynamicLocalId = FindTypedProperty<FStructProperty>(
+            dynamicItemIdStruct, STR("LocalIdInCreatedWorld"));
+        result.CorruptionProgress = FindTypedProperty<FFloatProperty>(
+            result.SlotClass, STR("CorruptionProgressValue"));
+        result.DynamicItemData = FindTypedProperty<FWeakObjectProperty>(
+            result.SlotClass, STR("DynamicItemData"));
         return result;
     }
 
@@ -4995,13 +5083,14 @@ namespace PalControl::Game
         using namespace RC;
         using namespace RC::Unreal;
 
-        constexpr std::array<const File::CharType*, 13> CandidatePaths{
+        constexpr std::array<const File::CharType*, 14> CandidatePaths{
             STR("/Script/Pal.PalPlayerInventoryData"),
             STR("/Script/Pal.PalPlayerDataInventoryInfo"),
             STR("/Script/Pal.PalItemContainer"),
             STR("/Script/Pal.PalItemSlot"),
             STR("/Script/Pal.PalContainerId"),
             STR("/Script/Pal.PalItemId"),
+            STR("/Script/Pal.PalDynamicItemId"),
             STR("/Script/Pal.PalItemSlotId"),
             STR("/Script/Pal.PalItemSlotIdAndNum"),
             STR("/Script/Pal.PalItemContainerInfo"),
@@ -5080,12 +5169,17 @@ namespace PalControl::Game
             std::size_t functionCount = 0;
             if (Cast<UClass>(type))
             {
+                const auto typeName = to_string(type->GetName());
+                const bool includeAllFunctions =
+                    typeName == "PalItemSlot" ||
+                    typeName == "PalItemContainer";
                 for (UFunction* function : TFieldRange<UFunction>(
                          type,
                          EFieldIterationFlags::IncludeAll))
                 {
                     const auto functionName = to_string(function->GetName());
-                    if (!IsInventoryFunction(functionName) ||
+                    if ((!includeAllFunctions &&
+                         !IsInventoryFunction(functionName)) ||
                         functionCount >= MaxReturnedFunctions)
                     {
                         continue;
@@ -5151,12 +5245,185 @@ namespace PalControl::Game
         typesJson += ']';
         missingJson += ']';
 
+        // Inventory mutation entry points are not all declared on the small set
+        // of DTO/container types above. Return a bounded, read-only global view
+        // so a game-version upgrade can be reviewed without guessing a native
+        // slot-clear or consume signature.
+        constexpr std::array<std::string_view, 10> MutationTokens{
+            "remove", "consume", "delete", "clear", "drop", "discard",
+            "decrease", "reduce", "take", "lift"};
+        std::vector<UObject*> functionObjects;
+        UObjectGlobals::FindAllOf(STR("Function"), functionObjects);
+        std::string globalMutationFunctionsJson{"["};
+        std::size_t globalMutationFunctionCount = 0;
+        for (auto* object : functionObjects)
+        {
+            auto* function = Cast<UFunction>(object);
+            if (!function || globalMutationFunctionCount >= MaxReturnedFunctions)
+            {
+                continue;
+            }
+            const auto name = to_string(function->GetName());
+            const auto fullName = to_string(function->GetFullName());
+            std::string lowered{name};
+            std::transform(
+                lowered.begin(),
+                lowered.end(),
+                lowered.begin(),
+                [](unsigned char value)
+                {
+                    return static_cast<char>(std::tolower(value));
+                });
+            const bool mutationName = IsInventoryFunction(name) &&
+                std::ranges::any_of(MutationTokens, [&](std::string_view token)
+                {
+                    return lowered.find(token) != std::string::npos;
+                });
+            if (!mutationName ||
+                fullName.find("/Script/Pal.") == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string parametersJson{"["};
+            std::size_t parameterCount = 0;
+            for (FProperty* parameter : TFieldRange<FProperty>(
+                     function,
+                     EFieldIterationFlags::IncludeAll))
+            {
+                if (!parameter->HasAnyPropertyFlags(EPropertyFlags::CPF_Parm))
+                {
+                    continue;
+                }
+                if (parameterCount++ > 0)
+                {
+                    parametersJson += ',';
+                }
+                const auto detailType = PropertyDetailType(parameter);
+                parametersJson += std::string{"{"} +
+                    "\"name\":\"" + EscapeJson(to_string(parameter->GetName())) + "\"," +
+                    "\"propertyClass\":\"" + EscapeJson(to_string(parameter->GetClass().GetName())) + "\"," +
+                    "\"detailType\":" + (detailType.empty()
+                        ? std::string{"null"}
+                        : "\"" + EscapeJson(detailType) + "\"") + "," +
+                    "\"out\":" + (parameter->HasAnyPropertyFlags(EPropertyFlags::CPF_OutParm)
+                        ? "true" : "false") + "," +
+                    "\"return\":" + (parameter->HasAnyPropertyFlags(EPropertyFlags::CPF_ReturnParm)
+                        ? "true" : "false") + "}";
+            }
+            parametersJson += ']';
+            if (globalMutationFunctionCount++ > 0)
+            {
+                globalMutationFunctionsJson += ',';
+            }
+            globalMutationFunctionsJson += std::string{"{"} +
+                "\"name\":\"" + EscapeJson(name) + "\"," +
+                "\"fullName\":\"" + EscapeJson(fullName) + "\"," +
+                "\"functionFlags\":" + std::to_string(function->GetFunctionFlags()) + "," +
+                "\"parameterCount\":" + std::to_string(parameterCount) + "," +
+                "\"parameterSize\":" + std::to_string(function->GetPropertiesSize()) + "," +
+                "\"parameters\":" + parametersJson + "}";
+        }
+        globalMutationFunctionsJson += ']';
+
+        // RequestConsumeInventoryItem is the only reflected candidate in the
+        // reviewed game build that accepts the authoritative player inventory,
+        // an item id and an exact quantity, and returns an integer result.  Do
+        // not invoke it from a schema probe.  Report the exact signature and
+        // the number of live, non-template targets so promotion to a mutation
+        // path can remain fail-closed and evidence based.
+        auto* incidentClass = UObjectGlobals::StaticFindObject<UClass*>(
+            nullptr,
+            nullptr,
+            STR("/Script/Pal.PalIncidentBase"));
+        auto* consumeFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr,
+            nullptr,
+            STR("/Script/Pal.PalIncidentBase:RequestConsumeInventoryItem"));
+        auto* consumeInventoryParameter = FindTypedProperty<FObjectProperty>(
+            consumeFunction,
+            STR("InventoryData"));
+        auto* consumeItemParameter = FindTypedProperty<FNameProperty>(
+            consumeFunction,
+            STR("ItemId"));
+        auto* consumeCountParameter = FindTypedProperty<FIntProperty>(
+            consumeFunction,
+            STR("ConsumeNum"));
+        auto* consumeReturnParameter = FindTypedProperty<FIntProperty>(
+            consumeFunction,
+            STR("ReturnValue"));
+        const auto inventoryClass = UObjectGlobals::StaticFindObject<UClass*>(
+            nullptr,
+            nullptr,
+            STR("/Script/Pal.PalPlayerInventoryData"));
+        const bool consumeSignatureReady = incidentClass && inventoryClass &&
+            consumeFunction && consumeInventoryParameter &&
+            consumeItemParameter && consumeCountParameter &&
+            consumeReturnParameter && CountParameters(consumeFunction) == 4 &&
+            consumeFunction->GetReturnProperty() == consumeReturnParameter &&
+            consumeInventoryParameter->GetPropertyClass().Get() == inventoryClass &&
+            to_string(consumeFunction->GetFullName()) ==
+                "Function /Script/Pal.PalIncidentBase:RequestConsumeInventoryItem";
+
+        std::vector<UObject*> incidentObjects;
+        UObjectGlobals::FindAllOf(STR("PalIncidentBase"), incidentObjects);
+        std::string liveIncidentTargetsJson{"["};
+        std::size_t liveIncidentTargetCount = 0;
+        for (auto* candidate : incidentObjects)
+        {
+            if (!candidate || !incidentClass || !candidate->IsA(incidentClass) ||
+                candidate->HasAnyFlags(static_cast<EObjectFlags>(
+                    RF_ClassDefaultObject |
+                    RF_ArchetypeObject |
+                    RF_BeginDestroyed |
+                    RF_FinishDestroyed)))
+            {
+                continue;
+            }
+            if (liveIncidentTargetCount < 8)
+            {
+                if (liveIncidentTargetCount > 0)
+                {
+                    liveIncidentTargetsJson += ',';
+                }
+                liveIncidentTargetsJson += "\"" + EscapeJson(
+                    to_string(candidate->GetFullName())) + "\"";
+            }
+            ++liveIncidentTargetCount;
+        }
+        liveIncidentTargetsJson += ']';
+        const auto consumeInvokerProbeJson = std::string{"{"} +
+            "\"ownerClassReady\":" +
+                (incidentClass ? "true" : "false") + "," +
+            "\"inventoryClassReady\":" +
+                (inventoryClass ? "true" : "false") + "," +
+            "\"functionResolved\":" +
+                (consumeFunction ? "true" : "false") + "," +
+            "\"signatureReady\":" +
+                (consumeSignatureReady ? "true" : "false") + "," +
+            "\"functionFlags\":" + (consumeFunction
+                ? std::to_string(consumeFunction->GetFunctionFlags())
+                : std::string{"0"}) + "," +
+            "\"parameterSize\":" + (consumeFunction
+                ? std::to_string(consumeFunction->GetPropertiesSize())
+                : std::string{"0"}) + "," +
+            "\"liveTargetCount\":" +
+                std::to_string(liveIncidentTargetCount) + "," +
+            "\"liveTargetsTruncated\":" +
+                (liveIncidentTargetCount > 8 ? "true" : "false") + "," +
+            "\"liveTargets\":" + liveIncidentTargetsJson + "}";
+
         const auto data = std::string{"{"} +
             "\"observedAt\":\"" + UtcNow() + "\"," +
             "\"executionThread\":\"unreal-engine-tick\"," +
-            "\"typeCount\":" + std::to_string(typeCount) + "," +
-            "\"missingTypes\":" + missingJson + "," +
-            "\"types\":" + typesJson + "}";
+                "\"typeCount\":" + std::to_string(typeCount) + "," +
+                "\"missingTypes\":" + missingJson + "," +
+                "\"globalMutationFunctionCount\":" +
+                    std::to_string(globalMutationFunctionCount) + "," +
+                "\"globalMutationFunctions\":" +
+                    globalMutationFunctionsJson + "," +
+                "\"consumeInvokerProbe\":" + consumeInvokerProbeJson + "," +
+                "\"types\":" + typesJson + "}";
 
         return Contracts::CommandResult{
             .CommandId = command.CommandId,
@@ -5309,12 +5576,47 @@ namespace PalControl::Game
                             const auto staticItemIdText = staticItemId
                                 ? to_string(staticItemId->ToString())
                                 : std::string{"None"};
+                            const FGuid* dynamicCreatedWorldId = nullptr;
+                            const FGuid* dynamicLocalId = nullptr;
+                            const FWeakObjectPtr* dynamicItemData = nullptr;
+                            float corruptionProgress = 0;
+                            if (mapping.SupportsStaticSlotClear())
+                            {
+                                auto* dynamicItemIdMemory = mapping.DynamicItemId
+                                    ->ContainerPtrToValuePtr<uint8>(itemIdMemory);
+                                dynamicCreatedWorldId = mapping.DynamicCreatedWorldId
+                                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                                dynamicLocalId = mapping.DynamicLocalId
+                                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                                dynamicItemData = mapping.DynamicItemData
+                                    ->ContainerPtrToValuePtr<FWeakObjectPtr>(slot);
+                                corruptionProgress = *mapping.CorruptionProgress
+                                    ->ContainerPtrToValuePtr<float>(slot);
+                            }
+                            const auto corruptionProgressBits = std::bit_cast<
+                                std::uint32_t>(corruptionProgress);
 
                             slotsJson += std::string{"{"} +
                                 "\"slotIndex\":" + std::to_string(slotIndex) + "," +
                                 "\"staticItemId\":\"" +
                                     EscapeJson(staticItemIdText) + "\"," +
-                                "\"stackCount\":" + std::to_string(stackCount) + "}";
+                                "\"stackCount\":" + std::to_string(stackCount) + "," +
+                                "\"dynamicCreatedWorldId\":" +
+                                    (dynamicCreatedWorldId
+                                        ? "\"" + GuidToString(*dynamicCreatedWorldId) + "\""
+                                        : std::string{"null"}) + "," +
+                                "\"dynamicLocalIdInCreatedWorld\":" +
+                                    (dynamicLocalId
+                                        ? "\"" + GuidToString(*dynamicLocalId) + "\""
+                                        : std::string{"null"}) + "," +
+                                "\"hasDynamicItemData\":" +
+                                    (dynamicItemData && dynamicItemData->Get()
+                                        ? "true"
+                                        : "false") + "," +
+                                "\"corruptionProgress\":" +
+                                    FloatToJson(corruptionProgress) + "," +
+                                "\"corruptionProgressBits\":" +
+                                    std::to_string(corruptionProgressBits) + "}";
                         }
                     }
                 }
@@ -5346,6 +5648,8 @@ namespace PalControl::Game
             "\"observedAt\":\"" + UtcNow() + "\"," +
             "\"executionThread\":\"unreal-engine-tick\"," +
             "\"mappingReady\":" + (mapping.IsReady() ? "true" : "false") + "," +
+            "\"slotMetadataReady\":" +
+                (mapping.SupportsStaticSlotClear() ? "true" : "false") + "," +
             "\"inventoryObjectCount\":" + std::to_string(inventoryObjects.size()) + "," +
             "\"containerObjectCount\":" + std::to_string(containerObjects.size()) + "," +
             "\"truncated\":" +
@@ -5765,7 +6069,8 @@ namespace PalControl::Game
                         character == '-';
                 });
         };
-        if (parseError || !isFullIdentifier(payload.ownerPlayerId) ||
+        if (parseError || payload.snapshotVersion != 1 ||
+            !isFullIdentifier(payload.ownerPlayerId) ||
             payload.items.empty() || payload.items.size() > 64 ||
             payload.expectedContainers.size() != 3)
         {
@@ -5823,14 +6128,23 @@ namespace PalControl::Game
                 const bool emptySlot = slot.itemId == "None" && slot.quantity == 0;
                 const bool occupiedSlot = isSafeItemId(slot.itemId) &&
                     slot.quantity >= 1 && slot.quantity <= 999999;
+                const auto corruptionProgress = static_cast<float>(
+                    slot.corruptionProgress);
+                const bool completeMetadata =
+                    isFullIdentifier(slot.dynamicCreatedWorldId) &&
+                    isFullIdentifier(slot.dynamicLocalIdInCreatedWorld) &&
+                    std::isfinite(slot.corruptionProgress) &&
+                    std::isfinite(corruptionProgress) &&
+                    std::bit_cast<std::uint32_t>(corruptionProgress) ==
+                        slot.corruptionProgressBits;
                 if (slot.slotIndex < 0 ||
                     !expectedSlotIds.insert(slot.slotIndex).second ||
-                    (!emptySlot && !occupiedSlot))
+                    (!emptySlot && !occupiedSlot) || !completeMetadata)
                 {
                     return Failure(
                         command,
                         "INVALID_INVENTORY_EXPECTED_SLOT",
-                        "Expected slots must be unique and contain either None/0 or a safe item id with a positive quantity.");
+                        "Expected slots must be unique and include a complete version-1 item, dynamic-id, corruption, and dynamic-data snapshot.");
                 }
             }
         }
@@ -5843,7 +6157,7 @@ namespace PalControl::Game
         }
 
         const auto mapping = ResolveInventoryProperties();
-        if (!mapping.IsReady())
+        if (!mapping.IsReady() || !mapping.SupportsStaticSlotClear())
         {
             return Failure(
                 command,
@@ -6071,6 +6385,12 @@ namespace PalControl::Game
             std::int32_t SlotIndex{};
             std::string ItemId;
             std::int32_t Quantity{};
+            std::string DynamicCreatedWorldId;
+            std::string DynamicLocalIdInCreatedWorld;
+            bool HasDynamicItemData{};
+            float CorruptionProgress{};
+            std::uint32_t CorruptionProgressBits{};
+            bool StaticSlotClearEligible{};
         };
         struct LiveContainer
         {
@@ -6157,11 +6477,47 @@ namespace PalControl::Game
                     : std::string{"None"};
                 const auto quantity = *mapping.StackCount
                     ->ContainerPtrToValuePtr<int32>(slot);
+                auto* dynamicItemIdMemory = mapping.DynamicItemId
+                    ->ContainerPtrToValuePtr<uint8>(itemIdMemory);
+                const auto* createdWorldId = mapping.DynamicCreatedWorldId
+                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                const auto* localId = mapping.DynamicLocalId
+                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                const auto* dynamicItemData = mapping.DynamicItemData
+                    ->ContainerPtrToValuePtr<FWeakObjectPtr>(slot);
+                const auto corruptionProgress = *mapping.CorruptionProgress
+                    ->ContainerPtrToValuePtr<float>(slot);
+                const auto corruptionProgressBits = std::bit_cast<std::uint32_t>(
+                    corruptionProgress);
+                const auto dynamicCreatedWorldId = createdWorldId
+                    ? GuidToString(*createdWorldId)
+                    : std::string{};
+                const auto dynamicLocalId = localId
+                    ? GuidToString(*localId)
+                    : std::string{};
+                const bool hasDynamicItemData = dynamicItemData &&
+                    dynamicItemData->Get() != nullptr;
+                const bool staticSlotClearEligible = createdWorldId && localId &&
+                    !createdWorldId->is_valid() && !localId->is_valid() &&
+                    dynamicItemData && !hasDynamicItemData &&
+                    std::isfinite(corruptionProgress) &&
+                    std::abs(corruptionProgress) <=
+                        std::numeric_limits<float>::epsilon();
                 const auto expectedSlot = expectedBySlot.find(slotIndex);
                 if (!liveSlotIds.insert(slotIndex).second ||
                     expectedSlot == expectedBySlot.end() ||
                     expectedSlot->second->itemId != itemId ||
-                    expectedSlot->second->quantity != quantity)
+                    expectedSlot->second->quantity != quantity ||
+                    NormalizeIdentifier(
+                        expectedSlot->second->dynamicCreatedWorldId) !=
+                        NormalizeIdentifier(dynamicCreatedWorldId) ||
+                    NormalizeIdentifier(
+                        expectedSlot->second->dynamicLocalIdInCreatedWorld) !=
+                        NormalizeIdentifier(dynamicLocalId) ||
+                    expectedSlot->second->hasDynamicItemData !=
+                        hasDynamicItemData ||
+                    expectedSlot->second->corruptionProgressBits !=
+                        corruptionProgressBits)
                 {
                     return Failure(
                         command,
@@ -6172,7 +6528,13 @@ namespace PalControl::Game
                     .Object = slot,
                     .SlotIndex = slotIndex,
                     .ItemId = itemId,
-                    .Quantity = quantity
+                    .Quantity = quantity,
+                    .DynamicCreatedWorldId = dynamicCreatedWorldId,
+                    .DynamicLocalIdInCreatedWorld = dynamicLocalId,
+                    .HasDynamicItemData = hasDynamicItemData,
+                    .CorruptionProgress = corruptionProgress,
+                    .CorruptionProgressBits = corruptionProgressBits,
+                    .StaticSlotClearEligible = staticSlotClearEligible
                 });
             }
             std::sort(live.Slots.begin(), live.Slots.end(), [](const auto& left, const auto& right)
@@ -6191,6 +6553,10 @@ namespace PalControl::Game
                 std::int32_t SlotIndex{};
                 std::string ItemId;
                 std::int32_t Quantity{};
+                std::string DynamicCreatedWorldId;
+                std::string DynamicLocalId;
+                bool HasDynamicItemData{};
+                std::uint32_t CorruptionProgressBits{};
             };
             std::vector<RevisionSlot> observed;
             auto* currentContainer = resolveManagedContainer(
@@ -6219,6 +6585,16 @@ namespace PalControl::Game
                     ->ContainerPtrToValuePtr<uint8>(slot);
                 const auto* staticItemId = mapping.StaticItemId
                     ->ContainerPtrToValuePtr<FName>(itemIdMemory);
+                auto* dynamicItemIdMemory = mapping.DynamicItemId
+                    ->ContainerPtrToValuePtr<uint8>(itemIdMemory);
+                const auto* createdWorldId = mapping.DynamicCreatedWorldId
+                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                const auto* localId = mapping.DynamicLocalId
+                    ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+                const auto* dynamicItemData = mapping.DynamicItemData
+                    ->ContainerPtrToValuePtr<FWeakObjectPtr>(slot);
+                const auto corruptionProgress = *mapping.CorruptionProgress
+                    ->ContainerPtrToValuePtr<float>(slot);
                 observed.push_back(RevisionSlot{
                     .SlotIndex = *mapping.SlotIndex
                         ->ContainerPtrToValuePtr<int32>(slot),
@@ -6226,7 +6602,17 @@ namespace PalControl::Game
                         ? to_string(staticItemId->ToString())
                         : std::string{"None"},
                     .Quantity = *mapping.StackCount
-                        ->ContainerPtrToValuePtr<int32>(slot)
+                        ->ContainerPtrToValuePtr<int32>(slot),
+                    .DynamicCreatedWorldId = createdWorldId
+                        ? GuidToString(*createdWorldId)
+                        : std::string{},
+                    .DynamicLocalId = localId
+                        ? GuidToString(*localId)
+                        : std::string{},
+                    .HasDynamicItemData = dynamicItemData &&
+                        dynamicItemData->Get() != nullptr,
+                    .CorruptionProgressBits = std::bit_cast<std::uint32_t>(
+                        corruptionProgress)
                 });
             }
             std::sort(observed.begin(), observed.end(), [](const auto& left, const auto& right)
@@ -6236,7 +6622,10 @@ namespace PalControl::Game
             for (const auto& slot : observed)
             {
                 canonical += "|" + std::to_string(slot.SlotIndex) + ":" +
-                    slot.ItemId + ":" + std::to_string(slot.Quantity);
+                    slot.ItemId + ":" + std::to_string(slot.Quantity) + ":" +
+                    slot.DynamicCreatedWorldId + ":" + slot.DynamicLocalId + ":" +
+                    (slot.HasDynamicItemData ? "1:" : "0:") +
+                    std::to_string(slot.CorruptionProgressBits);
             }
             return StableRevision(canonical);
         };
@@ -6360,6 +6749,46 @@ namespace PalControl::Game
         std::vector<PlannedChange> changes;
         for (const auto& item : payload.items)
         {
+            std::int64_t removableWithoutClear = 0;
+            std::vector<std::pair<std::size_t, std::size_t>> clearEligibleSlots;
+            for (std::size_t containerIndex = 0;
+                 containerIndex < liveContainers.size();
+                 ++containerIndex)
+            {
+                const auto& container = liveContainers[containerIndex];
+                for (std::size_t slotIndex = 0;
+                     slotIndex < container.Slots.size();
+                     ++slotIndex)
+                {
+                    const auto& slot = container.Slots[slotIndex];
+                    if (slot.ItemId != item.itemId || slot.Quantity <= 0)
+                    {
+                        continue;
+                    }
+                    removableWithoutClear += std::max(slot.Quantity - 1, 0);
+                    if (slot.StaticSlotClearEligible)
+                    {
+                        clearEligibleSlots.emplace_back(containerIndex, slotIndex);
+                    }
+                }
+            }
+            const auto requiredSlotClears = std::max<std::int64_t>(
+                item.quantity - removableWithoutClear,
+                0);
+            if (requiredSlotClears > static_cast<std::int64_t>(
+                    clearEligibleSlots.size()))
+            {
+                return Failure(
+                    command,
+                    "INVENTORY_SLOT_CLEAR_UNSUPPORTED",
+                    "The request would clear a dynamic, corrupting, or otherwise unverifiable slot; no items were changed.");
+            }
+            std::set<std::pair<std::size_t, std::size_t>> slotsToClear;
+            for (std::int64_t index = 0; index < requiredSlotClears; ++index)
+            {
+                slotsToClear.insert(clearEligibleSlots[static_cast<std::size_t>(index)]);
+            }
+
             std::int64_t remaining = item.quantity;
             for (std::size_t containerIndex = 0;
                  containerIndex < liveContainers.size() && remaining > 0;
@@ -6371,11 +6800,14 @@ namespace PalControl::Game
                      ++slotIndex)
                 {
                     const auto& slot = container.Slots[slotIndex];
-                    if (slot.ItemId != item.itemId || slot.Quantity <= 1)
+                    if (slot.ItemId != item.itemId || slot.Quantity <= 0)
                     {
                         continue;
                     }
-                    const auto removable = static_cast<std::int64_t>(slot.Quantity - 1);
+                    const bool clearSlot = slotsToClear.contains(
+                        {containerIndex, slotIndex});
+                    const auto removable = static_cast<std::int64_t>(
+                        clearSlot ? slot.Quantity : std::max(slot.Quantity - 1, 0));
                     const auto take = static_cast<std::int32_t>(std::min(remaining, removable));
                     if (take > 0)
                     {
@@ -6394,7 +6826,7 @@ namespace PalControl::Game
                 return Failure(
                     command,
                     "INVENTORY_SLOT_CLEAR_UNSUPPORTED",
-                    "This safe build cannot consume the last item in a slot because a verified native slot-clear function is unavailable; no items were changed.");
+                    "The safe slot-clear plan could not consume the exact requested quantity; no items were changed.");
             }
         }
         if (changes.size() > 128)
@@ -6438,6 +6870,65 @@ namespace PalControl::Game
                 }
             }
             return nullptr;
+        };
+        const auto slotStateMatches = [&](UObject* currentSlot,
+                                          const LiveSlot& originalSlot,
+                                          std::int32_t expectedQuantity)
+        {
+            if (!currentSlot || !currentSlot->IsA(mapping.SlotClass))
+            {
+                return false;
+            }
+            auto* itemIdMemory = mapping.ItemId
+                ->ContainerPtrToValuePtr<uint8>(currentSlot);
+            const auto* staticItemId = mapping.StaticItemId
+                ->ContainerPtrToValuePtr<FName>(itemIdMemory);
+            const auto expectedItemId = expectedQuantity == 0
+                ? std::string{"None"}
+                : originalSlot.ItemId;
+            if (!staticItemId ||
+                to_string(staticItemId->ToString()) != expectedItemId ||
+                *mapping.StackCount->ContainerPtrToValuePtr<int32>(currentSlot) !=
+                    expectedQuantity)
+            {
+                return false;
+            }
+            auto* dynamicItemIdMemory = mapping.DynamicItemId
+                ->ContainerPtrToValuePtr<uint8>(itemIdMemory);
+            const auto* createdWorldId = mapping.DynamicCreatedWorldId
+                ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+            const auto* localId = mapping.DynamicLocalId
+                ->ContainerPtrToValuePtr<FGuid>(dynamicItemIdMemory);
+            const auto* dynamicItemData = mapping.DynamicItemData
+                ->ContainerPtrToValuePtr<FWeakObjectPtr>(currentSlot);
+            const auto corruptionProgress = *mapping.CorruptionProgress
+                ->ContainerPtrToValuePtr<float>(currentSlot);
+            if (!createdWorldId || !localId || !dynamicItemData ||
+                NormalizeIdentifier(GuidToString(*createdWorldId)) !=
+                    NormalizeIdentifier(originalSlot.DynamicCreatedWorldId) ||
+                NormalizeIdentifier(GuidToString(*localId)) !=
+                    NormalizeIdentifier(originalSlot.DynamicLocalIdInCreatedWorld) ||
+                (dynamicItemData->Get() != nullptr) !=
+                    originalSlot.HasDynamicItemData ||
+                std::bit_cast<std::uint32_t>(corruptionProgress) !=
+                    originalSlot.CorruptionProgressBits)
+            {
+                return false;
+            }
+            const auto isEmpty = ReadNoParameterBoolFunction(
+                currentSlot,
+                STR("IsEmpty"),
+                STR("/Script/Pal.PalItemSlot:IsEmpty"),
+                "Function /Script/Pal.PalItemSlot:IsEmpty");
+            if (!isEmpty || *isEmpty != (expectedQuantity == 0))
+            {
+                return false;
+            }
+            if (expectedQuantity != 0 || originalSlot.Quantity == 0)
+            {
+                return true;
+            }
+            return originalSlot.StaticSlotClearEligible;
         };
         const auto inventoryAssociationMatches = [&]()
         {
@@ -6540,15 +7031,10 @@ namespace PalControl::Game
                         planned != changes.end()
                         ? planned->After
                         : originalSlot->Quantity;
-                    auto* itemIdMemory = mapping.ItemId
-                        ->ContainerPtrToValuePtr<uint8>(currentSlot);
-                    const auto* staticItemId = mapping.StaticItemId
-                        ->ContainerPtrToValuePtr<FName>(itemIdMemory);
-                    if (!staticItemId ||
-                        to_string(staticItemId->ToString()) !=
-                            originalSlot->ItemId ||
-                        *mapping.StackCount->ContainerPtrToValuePtr<int32>(
-                            currentSlot) != expectedQuantity)
+                    if (!slotStateMatches(
+                            currentSlot,
+                            *originalSlot,
+                            expectedQuantity))
                     {
                         return false;
                     }
@@ -6557,6 +7043,14 @@ namespace PalControl::Game
             return true;
         };
 
+        if (!completeStateMatches(false))
+        {
+            return Failure(
+                command,
+                "INVENTORY_SNAPSHOT_CONFLICT",
+                "The complete inventory snapshot changed before mutation; no items were changed.");
+        }
+
         std::set<std::size_t> changedContainers;
         for (const auto& change : changes)
         {
@@ -6564,6 +7058,13 @@ namespace PalControl::Game
             auto& slot = container.Slots[change.SlotVectorIndex];
             *mapping.StackCount->ContainerPtrToValuePtr<int32>(slot.Object) =
                 change.After;
+            if (change.After == 0)
+            {
+                auto* itemIdMemory = mapping.ItemId
+                    ->ContainerPtrToValuePtr<uint8>(slot.Object);
+                *mapping.StaticItemId->ContainerPtrToValuePtr<FName>(itemIdMemory) =
+                    FName(STR("None"));
+            }
             changedContainers.insert(change.ContainerIndex);
         }
 
@@ -6576,16 +7077,10 @@ namespace PalControl::Game
             auto* currentSlot = findCurrentSlot(
                 currentContainer,
                 originalSlot.SlotIndex);
-            auto* itemIdMemory = currentSlot
-                ? mapping.ItemId->ContainerPtrToValuePtr<uint8>(currentSlot)
-                : nullptr;
-            const auto* staticItemId = itemIdMemory
-                ? mapping.StaticItemId->ContainerPtrToValuePtr<FName>(itemIdMemory)
-                : nullptr;
-            const bool currentSlotMatches = currentSlot && staticItemId &&
-                to_string(staticItemId->ToString()) == originalSlot.ItemId &&
-                *mapping.StackCount->ContainerPtrToValuePtr<int32>(currentSlot) ==
-                    change.After;
+            const bool currentSlotMatches = slotStateMatches(
+                currentSlot,
+                originalSlot,
+                change.After);
             callbacksSucceeded = currentSlotMatches &&
                 InvokeObjectParameterFunction(
                     currentContainer,
@@ -6639,25 +7134,29 @@ namespace PalControl::Game
                 auto* currentSlot = findCurrentSlot(
                     currentContainer,
                     originalSlot.SlotIndex);
-                auto* itemIdMemory = currentSlot
-                    ? mapping.ItemId->ContainerPtrToValuePtr<uint8>(currentSlot)
-                    : nullptr;
-                const auto* staticItemId = itemIdMemory
-                    ? mapping.StaticItemId->ContainerPtrToValuePtr<FName>(itemIdMemory)
-                    : nullptr;
-                if (!currentSlot || !staticItemId ||
-                    to_string(staticItemId->ToString()) != originalSlot.ItemId)
+                if (!currentSlot)
                 {
                     rollbackWriteSafe = false;
                     continue;
                 }
-                auto* currentQuantity = mapping.StackCount
-                    ->ContainerPtrToValuePtr<int32>(currentSlot);
-                if (*currentQuantity == change.After)
+                if (slotStateMatches(currentSlot, originalSlot, change.After))
                 {
-                    *currentQuantity = change.Before;
+                    if (change.After == 0)
+                    {
+                        auto* itemIdMemory = mapping.ItemId
+                            ->ContainerPtrToValuePtr<uint8>(currentSlot);
+                        const auto originalItemId = to_wstring(originalSlot.ItemId);
+                        *mapping.StaticItemId
+                            ->ContainerPtrToValuePtr<FName>(itemIdMemory) =
+                                FName(originalItemId.c_str());
+                    }
+                    *mapping.StackCount
+                        ->ContainerPtrToValuePtr<int32>(currentSlot) = change.Before;
                 }
-                else if (*currentQuantity != change.Before)
+                else if (!slotStateMatches(
+                             currentSlot,
+                             originalSlot,
+                             change.Before))
                 {
                     rollbackWriteSafe = false;
                 }
@@ -6671,10 +7170,11 @@ namespace PalControl::Game
                 auto* currentSlot = findCurrentSlot(
                     currentContainer,
                     originalSlot.SlotIndex);
-                const bool quantityRestored = currentSlot &&
-                    *mapping.StackCount->ContainerPtrToValuePtr<int32>(currentSlot) ==
-                        change.Before;
-                rollbackCallbacksSucceeded = quantityRestored &&
+                const bool slotRestored = slotStateMatches(
+                    currentSlot,
+                    originalSlot,
+                    change.Before);
+                rollbackCallbacksSucceeded = slotRestored &&
                     InvokeObjectParameterFunction(
                         currentContainer,
                         STR("OnUpdateSlotContent"),
@@ -6728,7 +7228,8 @@ namespace PalControl::Game
                 "\"executionThread\":\"unreal-engine-tick\"," +
                 "\"applied\":false," +
                 "\"snapshotMatched\":true," +
-                "\"slotClearSupported\":false," +
+                "\"slotClearSupported\":" +
+                    (mapping.SupportsStaticSlotClear() ? "true," : "false,") +
                 "\"persistenceVerified\":false," +
                 "\"beforeRevision\":" + std::to_string(beforeRevision) + "," +
                 "\"observedRevision\":" + std::to_string(aggregateRevision()) + "," +
@@ -6809,7 +7310,8 @@ namespace PalControl::Game
             "\"executionThread\":\"unreal-engine-tick\"," +
             "\"applied\":true," +
             "\"snapshotMatched\":true," +
-            "\"slotClearSupported\":false," +
+            "\"slotClearSupported\":" +
+                (mapping.SupportsStaticSlotClear() ? "true," : "false,") +
             "\"persistenceVerified\":false," +
             "\"beforeRevision\":" + std::to_string(beforeRevision) + "," +
             "\"observedRevision\":" + std::to_string(afterRevision) + "," +

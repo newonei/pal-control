@@ -3,6 +3,18 @@ namespace PalControl.ControlApi.Extraction;
 public sealed class ExtractionPersistenceOptions
 {
     public string DataDirectory { get; init; } = "data/extraction";
+
+    public bool IsValid(out string? error)
+    {
+        if (string.IsNullOrWhiteSpace(DataDirectory) ||
+            DataDirectory.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+        {
+            error = "ExtractionMode:Persistence:DataDirectory must be a valid non-empty path.";
+            return false;
+        }
+        error = null;
+        return true;
+    }
 }
 
 public sealed record ShopDeliveryCommandAcceptance(
@@ -31,6 +43,9 @@ public sealed class ExtractionCommerceService
     }
 
     public bool IsReady => _repository.IsReady;
+
+    public Task ProbeWriteAsync(CancellationToken cancellationToken) =>
+        _repository.ProbeWriteAsync(cancellationToken);
 
     public async Task<ExtractionSeason?> GetActiveSeasonAsync(
         string serverId,
@@ -69,6 +84,43 @@ public sealed class ExtractionCommerceService
         string externalUserId,
         CancellationToken cancellationToken) =>
         _repository.FindAccountAsync(identityProvider, externalUserId, cancellationToken);
+
+    public Task<PlayerIdentityBindingResult> BindOrVerifyPlayerIdentityAsync(
+        PlayerIdentityBindingRequest request,
+        CancellationToken cancellationToken) =>
+        _repository.BindOrVerifyPlayerIdentityAsync(request, cancellationToken);
+
+    public Task<PlayerIdentityBinding?> GetPlayerIdentityBindingAsync(
+        Guid accountId,
+        Guid seasonId,
+        string worldId,
+        CancellationToken cancellationToken) =>
+        _repository.GetPlayerIdentityBindingAsync(
+            accountId,
+            seasonId,
+            worldId,
+            cancellationToken);
+
+    public Task<PlayerIdentityBinding?> FindActivePlayerIdentityBindingAsync(
+        string serverId,
+        string playerIdentifier,
+        CancellationToken cancellationToken) =>
+        _repository.FindActivePlayerIdentityBindingAsync(
+            serverId,
+            playerIdentifier,
+            cancellationToken);
+
+    public Task<IReadOnlyList<PlayerIdentityBindingHistoryEntry>>
+        ListPlayerIdentityBindingHistoryAsync(
+            Guid? accountId,
+            Guid? seasonId,
+            int limit,
+            CancellationToken cancellationToken) =>
+        _repository.ListPlayerIdentityBindingHistoryAsync(
+            accountId,
+            seasonId,
+            limit,
+            cancellationToken);
 
     public Task<ExtractionWalletSnapshot> GetWalletAsync(
         Guid accountId,

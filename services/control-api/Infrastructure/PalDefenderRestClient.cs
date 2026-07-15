@@ -12,6 +12,7 @@ public sealed class PalDefenderRestOptions
     public string BaseUrl { get; init; } = "http://127.0.0.1:17993/v1/pdapi/";
     public string Token { get; init; } = string.Empty;
     public string TokenFile { get; init; } = string.Empty;
+    public IReadOnlyList<string> Permissions { get; init; } = [];
     public string Origin { get; init; } = "http://127.0.0.1:5180";
     public int TimeoutSeconds { get; init; } = 7;
 
@@ -44,6 +45,12 @@ public sealed class PalDefenderRestOptions
             error = "An enabled adapter requires Token or TokenFile.";
             return false;
         }
+        if (Permissions.Any(permission =>
+                string.IsNullOrWhiteSpace(permission) || permission.Length > 128))
+        {
+            error = "Permissions must contain only non-empty names up to 128 characters.";
+            return false;
+        }
         error = null;
         return true;
     }
@@ -70,6 +77,12 @@ public sealed record PalDefenderApiResponse(
         new(503, null, null, true, outcomeUncertain, code, message);
 }
 
+public sealed record PalDefenderPermissionProbe(
+    bool Success,
+    IReadOnlyList<string> MissingPermissions,
+    string? ErrorCode,
+    string? ErrorMessage);
+
 public sealed class PalDefenderRestClient
 {
     private readonly HttpClient _httpClient;
@@ -88,6 +101,68 @@ public sealed class PalDefenderRestClient
 
     public bool Enabled => _options.Enabled;
     public string BaseUrl => _options.BaseUrl;
+
+    public async Task<PalDefenderPermissionProbe> ProbeConfiguredPermissionsAsync(
+        IReadOnlyCollection<string> requiredPermissions,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(requiredPermissions);
+        IReadOnlyCollection<string> configured;
+        if (!string.IsNullOrWhiteSpace(_options.TokenFile))
+        {
+            try
+            {
+                var raw = await File.ReadAllTextAsync(_options.TokenFile, cancellationToken);
+                using var document = JsonDocument.Parse(raw);
+                if (!document.RootElement.TryGetProperty("Permissions", out var permissions) ||
+                    permissions.ValueKind != JsonValueKind.Array)
+                {
+                    return new PalDefenderPermissionProbe(
+                        false,
+                        requiredPermissions.Order(StringComparer.Ordinal).ToArray(),
+                        "PALDEFENDER_PERMISSION_DOCUMENT_INVALID",
+                        "The configured PalDefender token file has no Permissions array.");
+                }
+                configured = permissions
+                    .EnumerateArray()
+                    .Where(value => value.ValueKind == JsonValueKind.String)
+                    .Select(value => value.GetString())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value!)
+                    .ToArray();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or JsonException)
+            {
+                return new PalDefenderPermissionProbe(
+                    false,
+                    requiredPermissions.Order(StringComparer.Ordinal).ToArray(),
+                    "PALDEFENDER_PERMISSION_DOCUMENT_UNAVAILABLE",
+                    "The configured PalDefender token permissions could not be read.");
+            }
+        }
+        else
+        {
+            configured = _options.Permissions;
+        }
+
+        var granted = configured.ToHashSet(StringComparer.Ordinal);
+        var missing = requiredPermissions
+            .Where(permission => !granted.Contains(permission))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        return missing.Length == 0
+            ? new PalDefenderPermissionProbe(true, [], null, null)
+            : new PalDefenderPermissionProbe(
+                false,
+                missing,
+                "PALDEFENDER_CAPABILITY_NOT_APPROVED",
+                $"The PalDefender credential is missing: {string.Join(", ", missing)}.");
+    }
 
     public Task<PalDefenderApiResponse> GetAsync(
         string relativePath,
@@ -166,7 +241,7 @@ public sealed class PalDefenderRestClient
             _logger.LogWarning(
                 "PalDefender REST {Method} {Path} timed out.",
                 method,
-                relativePath);
+                LogSafeEndpoint(relativePath));
             return PalDefenderApiResponse.TransportFailure(
                 isWrite
                     ? "PALDEFENDER_OUTCOME_UNCERTAIN"
@@ -180,10 +255,10 @@ public sealed class PalDefenderRestClient
         {
             var isWrite = method != HttpMethod.Get;
             _logger.LogWarning(
-                exception,
-                "PalDefender REST {Method} {Path} is unavailable.",
+                "PalDefender REST {Method} {Path} is unavailable ({ExceptionType}).",
                 method,
-                relativePath);
+                LogSafeEndpoint(relativePath),
+                exception.GetType().Name);
             return PalDefenderApiResponse.TransportFailure(
                 isWrite
                     ? "PALDEFENDER_OUTCOME_UNCERTAIN"
@@ -220,8 +295,17 @@ public sealed class PalDefenderRestClient
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
-            _logger.LogWarning(exception, "PalDefender token file could not be read.");
+            _logger.LogWarning(
+                "PalDefender token file could not be read ({ExceptionType}).",
+                exception.GetType().Name);
             return (string.Empty, "The configured PalDefender token file could not be read.");
         }
+    }
+
+    private static string LogSafeEndpoint(string relativePath)
+    {
+        var path = relativePath.Split('?', 2)[0];
+        var separator = path.IndexOf('/');
+        return separator < 0 ? path : $"{path[..separator]}/<redacted>";
     }
 }

@@ -16,7 +16,7 @@
 └─ dumps/         <- 崩溃转储，不上传
 ```
 
-`pal-control/` 已作为独立 Git 仓库初始化，默认分支为 `main`；首次公开提交只包含本项目源码、文档和经审核的静态资源，不继承上级运行环境的任何历史。
+`pal-control/` 已作为独立 Git 仓库初始化，默认分支为 `main`，远端是已公开的 [`newonei/pal-control`](https://github.com/newonei/pal-control)。因此本轮不再执行 `git init` 或新建远端；任何修改都必须先在本地完成候选提交复核，再推送到公开分支。
 
 ## 应上传
 
@@ -30,7 +30,7 @@
 | `mods/pal-control-native/` | Native MOD 源码与版本锁 | 上传源码、配置示例、模板和依赖锁，不上传 DLL |
 | `packages/contracts/` | OpenAPI 与 Bridge 契约 | 上传，但先统一许可证声明 |
 | `deploy/` | Windows/Caddy 脚本与示例配置 | 只上传不含域名、密码和 Token 的模板 |
-| `docs/`、`extraction-mode/docs/` | 架构、威胁模型和运维手册 | 上传；先移除任何机器专用断言和真实路径 |
+| `docs/`、`extraction-mode/docs/` | 架构、威胁模型、运维手册和脱敏界面预览 | 上传；`docs/images/` 只保留 README 引用且人工检查过的产品截图，移除机器路径、真实玩家、凭据和运行证据 |
 | `tests/`、`tools/` | 隔离测试与开发工具源码 | 上传源码，不上传测试输出 |
 
 ## 不应上传
@@ -45,7 +45,7 @@
 - `services/control-api/data/` 下的 SQLite、JSONL、锁文件和审计日志；
 - `node_modules/`、`dist/`、`bin/`、`obj/`、`artifacts/`、`output/`、`.agent-build/`；
 - 本机 `third_party/`、CMake/xmake 中间目录和已生成 Solution；
-- `.dll`、`.exe`、`.pdb`、`.obj`、压缩包、日志、截图、崩溃转储；
+- `.dll`、`.exe`、`.pdb`、`.obj`、压缩包、日志、临时测试截图、真实服务器截图和崩溃转储；README 明确引用、已脱敏且位于 `docs/images/` 的产品界面预览除外；
 - SteamCMD 配置、缓存、日志、匿名用户数据和 depot manifest；
 - PalDefender 或 UE4SS 的第三方二进制副本。
 
@@ -71,22 +71,22 @@
 
 4. Native MOD
    - `third_party/` 约 4.7 GB，包含下载的源码、子模块和构建产物，不应整体提交。
-   - 当前本机模板有未提交修改，干净 clone 尚无一键复现构建流程。
-   - 首次公开可先发布 `mods/pal-control-native/` 源码并明确“构建流程待补”；正式发布 DLL 前必须补依赖获取脚本、锁定 commit、哈希校验、许可证汇总和干净环境构建证据。
+   - 已提供锁定 `dependencies.lock.json` 的 `scripts/Build-PalControlNative.ps1`：它校验 UE4SS/Unreal commit、工具链和独立构建目录，不自动下载、部署或重启服务器。
+   - 首次公开只发布 `mods/pal-control-native/` 源码、模板、锁文件和构建脚本；正式发布 DLL 前仍必须保存干净环境构建证据、产物 SHA-256 和真实服务器持久化验收记录。
 
 ## 发布前阻断项
 
-以下任一项未完成时，不建议把仓库设为 Public：
+以下任一项未完成时，不得推送当前发布候选提交或创建 GitHub Release：
 
 - [x] 选择 MIT 根许可证并加入 `LICENSE`；
 - [x] 把 OpenAPI 的许可证声明改为同一 SPDX 标识；
 - [x] 资源目录生成文件已从公开提交移除并由 `.gitignore` 阻止误传；
 - [x] 核对并保留地图、PalCalc、UE4SS 等第三方来源与许可证；
-- [x] 检查所有示例配置为空值/占位符，不含真实密码、Token、路径或域名；
-- [x] 修正明显过时的运行文档和机器专用路径；
-- [x] 从首次提交克隆干净副本，并完成两个前端与 `.NET` Release 构建；
-- [x] 运行高置信度秘密扫描；
-- [x] 人工审阅首次提交的完整暂存文件清单。
+- [ ] 检查当前提交中的所有示例配置为空值/占位符，不含真实密码、Token、路径或域名；
+- [ ] 修正当前提交中明显过时的运行文档和机器专用路径；
+- [ ] 在本地形成候选提交后，从该提交克隆干净副本，并完成两个前端、`.NET` Release 和统一测试；
+- [ ] 对当前候选提交运行高置信度秘密扫描；
+- [ ] 人工审阅当前候选提交的完整暂存文件清单。
 
 本项目已采用 MIT。若未来更换许可证，必须同步评估既有贡献者授权，并统一根许可证、README、包元数据与 OpenAPI 声明。
 
@@ -100,8 +100,8 @@ npm --version
 dotnet --version
 
 npm ci
-npm run build:web
-npm run build:player
+npm run build
+npm test
 dotnet build .\services\control-api\PalControl.ControlApi.csproj -c Release
 ```
 
@@ -117,12 +117,14 @@ dotnet restore .\tools\bridge-smoke\PalControl.BridgeSmoke.csproj
 
 这些命令会生成被忽略的本地产物。不要为了上传测试证据而提交 `dist/`、`bin/`、`obj/`、`.agent-build/` 或日志。
 
-## 创建首次 Git 提交
+## 形成并推送发布候选提交
 
-完成所有阻断项后，在 `pal-control` 目录执行：
+完成除“候选提交干净克隆验证”外的阻断项后，在 `pal-control` 目录先确认现有仓库边界和远端：
 
 ```powershell
-git init -b main
+git rev-parse --show-toplevel
+git branch --show-current
+git remote -v
 git add --dry-run .
 git status --ignored --short
 ```
@@ -140,13 +142,42 @@ git check-ignore -v `
   .\backups
 ```
 
-确认文件清单和秘密扫描无问题后再提交：
+确认文件清单后暂存，同时扫描既有 Git 历史和本次暂存内容：
 
 ```powershell
 git add .
 git status --short
-git commit -m "chore: prepare initial open-source release"
-git remote add origin https://github.com/<owner>/<repository>.git
+git diff --cached --name-status
+gitleaks git --redact --no-banner --config .gitleaks.toml
+gitleaks git --staged --redact --no-banner --config .gitleaks.toml
+git diff --cached --check
+```
+
+以上命令要求预先安装并可直接调用 Gitleaks。当前候选已用 CLI `8.30.1` 验证；CI 的 action 固定在不可变提交，但 action 版本不等于 CLI 版本。以后发布可使用当时受支持的 CLI，必须先记录 `gitleaks version`，且不得跳过扫描；安装来源见 [Gitleaks 官方发布页](https://github.com/gitleaks/gitleaks/releases)。
+
+两次 Gitleaks、完整暂存清单和工作区构建验证全部通过后，先只在本地创建候选提交，不要推送：
+
+```powershell
+git commit -m "feat: harden weekly resource economy MVP"
+```
+
+随后从这个本地提交创建独立干净 clone，并在 clone 内重新安装和验证。以下命令会打印临时目录；验证结束后确认路径无误，再手工删除该目录：
+
+```powershell
+$verifyRoot = Join-Path $env:TEMP ("pal-control-verify-" + [Guid]::NewGuid().ToString("N"))
+git clone --no-local . $verifyRoot
+Push-Location $verifyRoot
+npm ci
+npm run build
+npm test
+dotnet build .\services\control-api\PalControl.ControlApi.csproj -c Release
+Pop-Location
+$verifyRoot
+```
+
+干净 clone 全部通过并完成最终暂存清单复核后，才允许推送：
+
+```powershell
 git push -u origin main
 ```
 
@@ -154,7 +185,7 @@ git push -u origin main
 
 ## GitHub 推荐设置
 
-首次建议创建 **Private** 仓库完成远端复核，再切换 Public：
+当前仓库已是 **Public**，本地候选提交在通过复核前不得推送。远端建议配置：
 
 1. 启用 Secret scanning、Push protection 和 Dependabot alerts；
 2. 启用私密 Security Advisories；
@@ -163,16 +194,16 @@ git push -u origin main
 5. 创建 Release 时只上传自行构建且有来源清单的产物，不打包游戏服务端或第三方闭源文件；
 6. 在仓库 About 中使用 `palworld`、`dedicated-server`、`react`、`dotnet`、`ue4ss` 等主题，并保留“unofficial”说明。
 
-## 建议的后续仓库文件
+## 仓库协作文件
 
-首次发布后按优先级补充：
+当前仓库已包含：
 
 - `SECURITY.md`：漏洞私下报告方式和受支持版本；
 - `CONTRIBUTING.md`：开发、测试、契约和安全规则；
-- `THIRD_PARTY_NOTICES.md`：已创建；首次公开前继续补齐所有外部代码、数据、图片和许可证；
-- `.gitattributes`：统一文本换行和二进制文件识别；
-- `.github/workflows/ci.yml`：前端构建、`.NET` 构建、隔离 smoke tests；
-- Issue/PR 模板：要求测试证据、风险和回滚说明。
+- `THIRD_PARTY_NOTICES.md`：外部代码、数据、图片和许可证清单；
+- `.gitattributes`：文本换行和二进制文件识别；
+- `.github/workflows/ci.yml`：前端、`.NET`、契约和隔离测试；
+- Issue/PR 模板：要求测试证据、风险、迁移和回滚说明。
 
 ## 最终发布判定
 

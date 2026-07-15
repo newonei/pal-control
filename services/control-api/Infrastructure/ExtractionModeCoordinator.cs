@@ -16,6 +16,7 @@ public sealed partial class ExtractionModeCoordinator
     private readonly ExtractionCommerceService _commerce;
     private readonly PalDefenderRestClient _palDefender;
     private readonly PalDefenderCommandQueue _deliveryCommands;
+    private readonly EconomySafetyGate _economySafety;
     private readonly PalworldResourceCatalogService _catalogService;
     private readonly SaveManagementService _saveManagement;
     private readonly ExtractionModeOptions _options;
@@ -27,6 +28,7 @@ public sealed partial class ExtractionModeCoordinator
         ExtractionCommerceService commerce,
         PalDefenderRestClient palDefender,
         PalDefenderCommandQueue deliveryCommands,
+        EconomySafetyGate economySafety,
         PalworldResourceCatalogService catalogService,
         SaveManagementService saveManagement,
         IOptions<ExtractionModeOptions> options,
@@ -35,6 +37,7 @@ public sealed partial class ExtractionModeCoordinator
         _commerce = commerce;
         _palDefender = palDefender;
         _deliveryCommands = deliveryCommands;
+        _economySafety = economySafety;
         _catalogService = catalogService;
         _saveManagement = saveManagement;
         _options = options.Value;
@@ -90,9 +93,31 @@ public sealed partial class ExtractionModeCoordinator
 
         var season = await _commerce.GetActiveSeasonAsync(_options.ServerId, cancellationToken)
             ?? throw new InvalidOperationException("The extraction mode has no active season.");
+        PlayerIdentityBinding? identityBinding = null;
+        if (requireOnline)
+        {
+            await EnsureSeasonMatchesActiveWorldAsync(season, cancellationToken);
+            identityBinding = await BindOrVerifyCurrentPlayerIdentityAsync(
+                normalizedUserId,
+                account,
+                season,
+                livePlayer!,
+                cancellationToken);
+        }
+        else if (season.WorldId is not null)
+        {
+            identityBinding = await _commerce.GetPlayerIdentityBindingAsync(
+                account.AccountId,
+                season.SeasonId,
+                season.WorldId,
+                cancellationToken);
+        }
         await SeedWalletAsync(account, season, cancellationToken);
         var wallet = await _commerce.GetWalletAsync(account.AccountId, season.SeasonId, cancellationToken);
-        return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false);
+        return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false)
+        {
+            IdentityBinding = identityBinding
+        };
     }
 
     public async Task<ExtractionAccountContext> GetExistingAccountContextAsync(
@@ -117,7 +142,17 @@ public sealed partial class ExtractionModeCoordinator
             season.SeasonId,
             cancellationToken);
         var livePlayer = await FindPalDefenderPlayerAsync(normalizedUserId, cancellationToken);
-        return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false);
+        var identityBinding = season.WorldId is null
+            ? null
+            : await _commerce.GetPlayerIdentityBindingAsync(
+                account.AccountId,
+                season.SeasonId,
+                season.WorldId,
+                cancellationToken);
+        return new ExtractionAccountContext(account, season, wallet, livePlayer?.Online ?? false)
+        {
+            IdentityBinding = identityBinding
+        };
     }
 
     public async Task<ExtractionLivePlayer> GetLivePlayerAsync(
@@ -140,7 +175,7 @@ public sealed partial class ExtractionModeCoordinator
                 "PalDefender 未返回玩家地图坐标。",
                 StatusCodes.Status409Conflict);
         }
-        return player;
+        return player with { PlayerUid = RequireCompletePlayerUid(player.PlayerUid) };
     }
 
     public async Task<ExtractionLivePlayer?> TryGetPlayerLocationAsync(
@@ -362,15 +397,21 @@ public sealed partial class ExtractionModeCoordinator
         ShopProduct product,
         int quantity,
         string idempotencyKey,
+        string actor,
         CancellationToken cancellationToken)
     {
-        if (!_deliveryCommands.IsReady)
-        {
-            throw new ExtractionModeException(
-                "SHOP_DELIVERY_QUEUE_NOT_READY",
-                "游戏内发货队列当前不可用，订单尚未扣款，请稍后重试。",
-                StatusCodes.Status503ServiceUnavailable);
-        }
+        EnsureWriteContextHasCurrentIdentity(context);
+        var queue = await _deliveryCommands.GetEconomyLoadAsync(cancellationToken);
+        var backlog = (await _commerce.ListBlockingOrdersAsync(cancellationToken)).Count;
+        using var safetyLease = await _economySafety.AcquireAsync(
+            EconomyWriteFeature.Purchase,
+            EconomySafetyContext.FromAccount(context),
+            queue with
+            {
+                Backlog = backlog,
+                BacklogCapacity = _economySafety.DeliveryBacklogCapacity
+            },
+            cancellationToken);
         await EnsureSeasonMatchesActiveWorldAsync(context.Season, cancellationToken);
         return await _commerce.PurchaseAsync(
             new ShopPurchaseRequest(
@@ -380,8 +421,10 @@ public sealed partial class ExtractionModeCoordinator
                 context.Account.ExternalUserId,
                 [new ShopPurchaseLineInput(product.Sku, quantity)],
                 idempotencyKey,
-                "local-console",
-                $"购买商城商品 {product.Sku}"),
+                actor,
+                $"购买商城商品 {product.Sku}",
+                context.IdentityBinding!.PlayerUid,
+                context.IdentityBinding.WorldId),
             cancellationToken);
     }
 
@@ -403,6 +446,7 @@ public sealed partial class ExtractionModeCoordinator
         long delta,
         string reason,
         string idempotencyKey,
+        string actor,
         CancellationToken cancellationToken) =>
         _commerce.AdjustWalletAsync(
             new WalletAdjustmentRequest(
@@ -413,7 +457,7 @@ public sealed partial class ExtractionModeCoordinator
                 reason,
                 "operator_adjustment",
                 idempotencyKey,
-                "local-console",
+                actor,
                 idempotencyKey),
             cancellationToken);
 
@@ -699,6 +743,85 @@ public sealed partial class ExtractionModeCoordinator
         return null;
     }
 
+    private async Task<PlayerIdentityBinding> BindOrVerifyCurrentPlayerIdentityAsync(
+        string platformSubject,
+        ExtractionAccount account,
+        ExtractionSeason season,
+        ExtractionLivePlayer livePlayer,
+        CancellationToken cancellationToken)
+    {
+        if (season.WorldId is null)
+        {
+            throw new ExtractionModeException(
+                "SEASON_WORLD_UNBOUND",
+                "当前周档尚未绑定世界，不能建立玩家身份绑定。",
+                StatusCodes.Status423Locked);
+        }
+        var playerUid = RequireCompletePlayerUid(livePlayer.PlayerUid);
+        var result = await _commerce.BindOrVerifyPlayerIdentityAsync(
+            new PlayerIdentityBindingRequest(
+                platformSubject,
+                season.SeasonId,
+                season.WorldId,
+                playerUid,
+                account.AccountId),
+            cancellationToken);
+        if (result.Verified && result.Binding is not null)
+        {
+            return result.Binding;
+        }
+
+        var statusCode = result.ErrorCode switch
+        {
+            "PLAYER_BINDING_SUBJECT_MISMATCH" => StatusCodes.Status403Forbidden,
+            "PLAYER_BINDING_WORLD_MISMATCH" or
+            "PLAYER_BINDING_SEASON_NOT_ACTIVE" => StatusCodes.Status423Locked,
+            _ => StatusCodes.Status409Conflict
+        };
+        throw new ExtractionModeException(
+            result.ErrorCode ?? "PLAYER_BINDING_NOT_OBSERVED",
+            result.ErrorMessage ?? "无法从当前在线玩家记录验证本周 PlayerUID 绑定。",
+            statusCode);
+    }
+
+    private static void EnsureWriteContextHasCurrentIdentity(ExtractionAccountContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var binding = context.IdentityBinding;
+        if (binding is null ||
+            binding.AccountId != context.Account.AccountId ||
+            binding.SeasonId != context.Season.SeasonId ||
+            !string.Equals(
+                binding.PlatformSubject,
+                context.Account.ExternalUserId,
+                StringComparison.OrdinalIgnoreCase) ||
+            context.Season.WorldId is null ||
+            !string.Equals(
+                binding.WorldId,
+                context.Season.WorldId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ExtractionModeException(
+                "PLAYER_BINDING_REQUIRED",
+                "当前写操作没有经过本周世界 PlayerUID 绑定验证。",
+                StatusCodes.Status409Conflict);
+        }
+    }
+
+    private static string RequireCompletePlayerUid(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            !Guid.TryParse(value.Trim(), out var playerUid) ||
+            playerUid == Guid.Empty)
+        {
+            throw new ExtractionModeException(
+                "PLAYER_BINDING_NOT_OBSERVED",
+                "PalDefender 未返回当前在线角色的完整 PlayerUID，经济写操作已拒绝。",
+                StatusCodes.Status409Conflict);
+        }
+        return playerUid.ToString("N").ToLowerInvariant();
+    }
+
     private (DateTimeOffset StartsAt, DateTimeOffset EndsAt, string Code, string DisplayName)
         GetCurrentSeasonWindow(DateTimeOffset now)
     {
@@ -818,9 +941,9 @@ public sealed partial class ExtractionModeCoordinator
             // able to sign in; use an explicit audited adjustment/migration for a
             // changed policy instead of retrying bootstrap with a new key.
             _logger.LogWarning(
-                "Bootstrap policy {PolicyVersion} differs from the recorded grant for account {AccountId} season {SeasonId}; existing balance was left unchanged.",
+                "Bootstrap policy {PolicyVersion} differs from the recorded grant for account fingerprint {AccountFingerprint} season {SeasonId}; existing balance was left unchanged.",
                 policyVersion,
-                accountId,
+                PlayerIdentitySecurityStore.FingerprintSubject(accountId.ToString("N")),
                 seasonId);
             return;
         }
@@ -864,7 +987,10 @@ public sealed record ExtractionAccountContext(
     ExtractionAccount Account,
     ExtractionSeason Season,
     ExtractionWalletSnapshot Wallet,
-    bool Online);
+    bool Online)
+{
+    public PlayerIdentityBinding? IdentityBinding { get; init; }
+}
 
 public sealed record ExtractionLivePlayer(
     string UserId,

@@ -9,6 +9,24 @@ namespace PalControl.ControlApi.Infrastructure;
 public sealed class CommandPersistenceOptions
 {
     public string DataDirectory { get; init; } = "data";
+    public int PalDefenderQueueCapacity { get; init; } = 256;
+
+    public bool IsValid(out string? error)
+    {
+        if (string.IsNullOrWhiteSpace(DataDirectory) ||
+            DataDirectory.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+        {
+            error = "CommandPersistence:DataDirectory must be a valid non-empty path.";
+            return false;
+        }
+        if (PalDefenderQueueCapacity is < 1 or > 10_000)
+        {
+            error = "CommandPersistence:PalDefenderQueueCapacity must be between 1 and 10000.";
+            return false;
+        }
+        error = null;
+        return true;
+    }
 }
 
 public sealed record AnnouncementCreateResult(

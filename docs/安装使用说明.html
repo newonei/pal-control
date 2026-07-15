@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>幻兽商域 · 安装与使用说明</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --blue: #2563eb;
+      --blue-dark: #1e3a8a;
+      --ink: #172033;
+      --muted: #5f6b7c;
+      --line: #dce3ed;
+      --soft: #f5f8fc;
+      --warn: #9a4b00;
+      --warn-bg: #fff7e8;
+      --ok: #08755b;
+      --ok-bg: #eafaf5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+      color: var(--ink);
+      background: #eef3f9;
+      line-height: 1.75;
+    }
+    header {
+      color: white;
+      background: linear-gradient(135deg, #0f2557, #2563eb 62%, #38a3ff);
+      padding: 54px 24px 48px;
+    }
+    header > div, main { max-width: 940px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: clamp(30px, 5vw, 48px); line-height: 1.2; }
+    header p { margin: 0; opacity: .9; font-size: 18px; }
+    main { background: white; padding: 38px 54px 64px; box-shadow: 0 12px 40px rgba(35, 61, 102, .1); }
+    h2 { margin: 44px 0 16px; color: var(--blue-dark); font-size: 26px; line-height: 1.35; }
+    h2:first-child { margin-top: 0; }
+    h3 { margin: 25px 0 8px; font-size: 19px; }
+    p { margin: 8px 0 14px; }
+    ol, ul { padding-left: 26px; }
+    li { margin: 7px 0; }
+    code {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      background: #eef2f7;
+      border-radius: 5px;
+      padding: 2px 6px;
+      word-break: break-all;
+    }
+    .lead {
+      font-size: 17px;
+      background: var(--ok-bg);
+      border-left: 5px solid var(--ok);
+      padding: 16px 19px;
+      border-radius: 7px;
+    }
+    .warning {
+      background: var(--warn-bg);
+      border-left: 5px solid #f59e0b;
+      color: #5f3908;
+      padding: 14px 18px;
+      border-radius: 7px;
+      margin: 18px 0;
+    }
+    .steps { counter-reset: step; display: grid; gap: 14px; }
+    .step {
+      counter-increment: step;
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 17px 20px 17px 64px;
+      background: #fff;
+    }
+    .step::before {
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 17px;
+      width: 31px;
+      height: 31px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--blue);
+      color: white;
+      font-weight: 700;
+    }
+    .step strong { display: block; margin-bottom: 3px; font-size: 17px; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0 22px; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    details { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    .small { color: var(--muted); font-size: 14px; }
+    footer { margin-top: 48px; border-top: 1px solid var(--line); padding-top: 20px; color: var(--muted); }
+    @media (max-width: 680px) {
+      main { padding: 28px 22px 48px; }
+      header { padding: 38px 22px; }
+      table { display: block; overflow-x: auto; }
+    }
+    @media print {
+      body { background: white; }
+      header { padding: 28px; }
+      main { box-shadow: none; padding: 24px; }
+      details { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>幻兽商域</h1>
+      <p>Windows 安装与使用说明 · 面向无需开发环境的服务器管理员</p>
+    </div>
+  </header>
+  <main>
+    <h2>先看这里</h2>
+    <p class="lead">安装包已经包含管理网页、玩家网页和 .NET 运行环境。使用安装包时，不需要安装 Node.js、npm、Visual Studio 或 .NET SDK。</p>
+    <p>幻兽商域是 Palworld Dedicated Server 的本机管理工具，不包含 Palworld 服务端本体。开始前，请先在同一台 Windows 电脑上安装好 Palworld Dedicated Server。</p>
+
+    <h2>一、安装前准备</h2>
+    <table>
+      <thead><tr><th>项目</th><th>要求</th></tr></thead>
+      <tbody>
+        <tr><td>操作系统</td><td>64 位 Windows 10、Windows 11 或 Windows Server</td></tr>
+        <tr><td>Palworld 服务端</td><td>已经安装，并能正常启动进入世界</td></tr>
+        <tr><td>白名单资源目录</td><td>基础管理台不需要；启用玩家门户、商城或资源兑换前，管理员必须自行提供经授权的 <code>&lt;安装目录&gt;\Resources\palworld-resource-catalog.json</code>（源码运行时对应 <code>services/control-api/Resources</code>）。公开安装包因再分发授权未闭环而不包含它</td></tr>
+        <tr><td>权限</td><td>幻兽商域采用当前用户安装，通常不需要管理员权限</td></tr>
+        <tr><td>网络</td><td>管理台默认只在本机 <code>127.0.0.1:5180</code> 打开</td></tr>
+      </tbody>
+    </table>
+    <div class="warning"><strong>先备份存档。</strong>在修改服务器配置或安装任何 MOD 之前，先完整备份 <code>Pal\Saved\SaveGames</code>。</div>
+
+    <h2>二、安装幻兽商域</h2>
+    <div class="steps">
+      <div class="step"><strong>运行安装程序</strong>双击当前发布版本的 <code>幻兽商域-Setup-&lt;版本&gt;.exe</code>。选择安装位置，普通用户保持默认即可。</div>
+      <div class="step"><strong>处理 Windows 提示</strong>当前安装包没有商业代码签名证书。若 SmartScreen 显示“Windows 已保护你的电脑”，先确认文件来自可信渠道并核对随包提供的 SHA-256，再选择“更多信息 → 仍要运行”。</div>
+      <div class="step"><strong>创建快捷方式</strong>建议勾选“创建桌面快捷方式”。开始菜单会同时提供启动、停止、配置和本说明。</div>
+      <div class="step"><strong>打开配置窗口</strong>安装结束时保持“立即配置”勾选；以后也可从开始菜单打开“配置幻兽商域”。</div>
+    </div>
+
+    <h2>三、启用 Palworld 官方 REST</h2>
+    <p>幻兽商域通过 Palworld 官方 REST 读取服务器状态和在线玩家。请先停止 Palworld 服务端，再编辑：</p>
+    <p><code>PalServer\Pal\Saved\Config\WindowsServer\PalWorldSettings.ini</code></p>
+    <p>确认 <code>OptionSettings=(...)</code> 中包含以下设置；不要创建第二个 <code>OptionSettings</code>：</p>
+    <ul>
+      <li><code>AdminPassword="一个强密码"</code></li>
+      <li><code>RESTAPIEnabled=True</code></li>
+      <li><code>RESTAPIPort=8212</code></li>
+    </ul>
+    <p>保存后重新启动 Palworld 服务端。管理员密码不要发给玩家，也不要放进截图或群聊。</p>
+
+    <h2>四、首次配置</h2>
+    <div class="steps">
+      <div class="step"><strong>选择 PalServer 目录</strong>选择包含 <code>PalServer.exe</code> 的文件夹。通常是 Steam 库中的 Palworld Dedicated Server 安装目录。</div>
+      <div class="step"><strong>填写 REST 端口</strong>没有自行修改时保持 <code>8212</code>。</div>
+      <div class="step"><strong>填写管理员密码</strong>这里必须与 <code>PalWorldSettings.ini</code> 的 <code>AdminPassword</code> 完全一致。</div>
+      <div class="step"><strong>保存配置与管理员凭据</strong>配置保存在当前用户的安装目录中。首次保存会生成管理 API Key 与 TOTP 密钥且只显示一次，请立即放入密码管理器；修改旧配置时，工具会先生成带时间戳的备份，只覆盖界面中的 PalServer 目录、REST 地址、账号和密码，已启用的 Native、PalDefender、玩家门户及未知扩展字段会保留。</div>
+    </div>
+
+    <h2>五、启动和使用</h2>
+    <ol>
+      <li>先启动 Palworld Dedicated Server，并等待世界加载完成。</li>
+      <li>双击桌面的“幻兽商域”，或从开始菜单打开“启动幻兽商域”。</li>
+      <li>程序会在后台启动，并自动打开 <code>http://127.0.0.1:5180/</code>。</li>
+      <li>页面出现管理员登录门禁后，粘贴首次配置时只显示一次的 API Key。不要把 API Key 写入网址、截图或浏览器同步笔记。</li>
+      <li>登录后先查看仪表盘。Control API 应显示在线；官方 REST 连接成功后，服务器信息和在线玩家会出现。</li>
+      <li>使用结束后，从开始菜单打开“停止幻兽商域”。</li>
+    </ol>
+    <p>关闭浏览器不会停止后台服务。重复点击启动快捷方式不会重复启动，只会重新打开管理台。</p>
+
+    <h2>六、功能开放顺序</h2>
+    <table>
+      <thead><tr><th>阶段</th><th>可用功能</th><th>建议</th></tr></thead>
+      <tbody>
+        <tr><td>首次安装</td><td>管理台、健康检查、本地队列</td><td>先确认页面能正常打开</td></tr>
+        <tr><td>官方 REST 已连接</td><td>服务器状态、在线玩家、实时地图、保存请求</td><td>先使用只读功能验证配置</td></tr>
+        <tr><td>PalDefender 与玩家门户已配置</td><td>游戏内验证码登录、商城发货、奖励、公会和封禁</td><td>必须限制为本机访问、使用最小权限 Token；验证码还要求本机受限 RCON 精确提供 <code>send:3</code></td></tr>
+        <tr><td>公网 Steam 门户</td><td>Steam OpenID + 当前周角色验证码双层登录</td><td>必须使用官方 HTTPS OP、精确 realm/return_to、安全 Cookie 和审核后的 Caddy 反向代理；不能把管理 API 暴露到公网</td></tr>
+        <tr><td>精确版本 Native MOD</td><td>背包/帕鲁精细工具、Native 通知、白名单资源兑换</td><td>资源兑换还必须取得稳定 <code>inventory.consume</code> 能力并通过保存、停服、重启、重新登录验收</td></tr>
+        <tr><td>受限 RCON</td><td>玩家验证码私信；可选开发诊断和经批准的人工应急</td><td>启用玩家门户时它是必需的本机消息通道；正式资源兑换不会使用 RCON 模拟扣物，也不要对公网开放端口</td></tr>
+      </tbody>
+    </table>
+    <div class="warning">玩家门户、PalDefender、RCON 和 Native 写能力默认关闭。这是安全设计，不是安装失败。当前资源兑换在 Native 持久化证据未通过时会保持只读；不要为了“全部变绿”而直接开放端口、伪造能力或跳过版本检查。</div>
+    <p>公网 Steam 登录的完整配置不是安装向导默认开启项。请按 GitHub 仓库中的 <a href="https://github.com/newonei/pal-control/blob/main/docs/player-portal/01-%E9%83%A8%E7%BD%B2%E6%89%8B%E5%86%8C.md">玩家门户部署手册</a> 配置域名、TLS、Caddy、Steam OpenID、PalDefender REST、经授权的白名单资源目录和仅回环可达的 RCON 密码文件，再执行验收清单。发布包只附带本说明，不包含仓库的完整运行手册。OpenID 只证明 Steam 身份；游戏内验证码成功并确认本周 <code>worldId + PlayerUID</code> 后才会建立正式会话。</p>
+    <div class="warning"><strong>资源经济前置条件：</strong>公开安装包不包含 <code>palworld-resource-catalog.json</code>。缺少管理员自行提供的经授权目录时，基础管理页仍可使用，但玩家绑定、商城初始化和白名单资源兑换会保持不可用；不要从不明来源下载或重新分发游戏数据快照。</div>
+
+    <h2>七、常见问题</h2>
+    <details open>
+      <summary>启动后没有自动打开网页</summary>
+      <p>手动打开 <code>http://127.0.0.1:5180/</code>。若仍打不开，先运行“停止幻兽商域”，再重新启动；同时检查其他程序是否占用了 5180 端口。</p>
+    </details>
+    <details>
+      <summary>网页能打开，但服务器显示离线</summary>
+      <p>确认 Palworld 服务端正在运行，<code>RESTAPIEnabled=True</code>，REST 端口和管理员密码与配置窗口完全一致。修改后需要重启 Palworld 服务端。</p>
+    </details>
+    <details>
+      <summary>看到“待连接”“安全只读”或灰色按钮</summary>
+      <p>对应的外部组件尚未启用或版本门禁没有通过。基础安装默认如此。先完成官方 REST 只读联调，再按照项目运行手册逐项启用进阶组件。</p>
+    </details>
+    <details>
+      <summary>怎样查看错误日志</summary>
+      <p>打开安装目录中的 <code>logs</code> 文件夹。普通运行数据在 <code>data</code>，配置文件为 <code>appsettings.Local.json</code>。向维护人员求助时可提供日志，但应先检查并遮盖服务器路径、Token 和密码。</p>
+    </details>
+    <details>
+      <summary>升级会不会删除数据</summary>
+      <p>覆盖安装前仍建议备份安装目录中的 <code>appsettings.Local.json</code> 和 <code>data</code>。卸载程序不会主动删除运行后生成的配置和业务数据；确认不再需要后可手工删除残留目录。</p>
+    </details>
+
+    <h2>八、安全要求</h2>
+    <ul>
+      <li>不要在路由器、云安全组、端口映射或内网穿透中开放 <code>5180</code>、<code>8212</code>、<code>17993</code>、<code>25575</code>。</li>
+      <li>管理台只应在服务器本机使用。需要远程管理时，优先使用系统远程桌面或受控 VPN。</li>
+      <li>公网只能通过经过审核的 HTTPS 反向代理开放玩家门户和 <code>/api/v1/player/*</code>，不能开放管理 API。</li>
+      <li>任何显示为 <code>uncertain</code> 的发货或写操作都要先人工核对，不要重复点击。</li>
+      <li>Native MOD 当前目标是 Palworld <code>v1.0.0.100427</code> 与指定 UE4SS 提交。公开发布包不包含 Native DLL；必须按仓库锁定版本单独获取依赖并自行构建，版本不一致时不要加载。</li>
+    </ul>
+
+    <h2>九、卸载</h2>
+    <ol>
+      <li>从开始菜单打开“停止幻兽商域”。</li>
+      <li>在 Windows“设置 → 应用 → 已安装的应用”中找到“幻兽商域”并卸载。</li>
+      <li>如需彻底清理，先确认不再需要账本、审计和配置备份，再手工删除残留的安装目录。</li>
+    </ol>
+
+    <footer>
+      <p><strong>项目性质：</strong>非官方社区项目，与 Pocketpair 或 Palworld 权利方无隶属、授权或背书关系。</p>
+      <p class="small">本说明随 Windows x64 发布包提供。安装程序未使用商业代码签名证书。</p>
+    </footer>
+  </main>
+</body>
+</html>

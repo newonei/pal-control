@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AdminAccessGate } from "../features/auth/AdminAccessGate";
 import { AnnouncementBoard } from "../features/announcements/AnnouncementBoard";
 import { ServerConfigurationPanel } from "../features/configuration/ServerConfigurationPanel";
 import { DashboardOverview } from "../features/dashboard/DashboardOverview";
@@ -52,6 +53,10 @@ const navigation: Array<{ key: NavKey; label: string; glyph: string; group: stri
 ];
 
 export function App() {
+  return <AdminAccessGate><ConsoleApp /></AdminAccessGate>;
+}
+
+function ConsoleApp() {
   const [capabilities, setCapabilities] = useState<ServerCapabilities>();
   const [palDefenderStatus, setPalDefenderStatus] = useState<PalDefenderStatus>();
   const [gameCatalog, setGameCatalog] = useState<GameResourceCatalog>();

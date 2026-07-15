@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$env:PlayerPortal__Enabled = "false"
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -255,7 +256,7 @@ OptionSettings=(ServerName="Fake Palworld",ServerDescription="save smoke")
     $env:SaveManagement__SnapshotTimeoutSeconds = "2"
     $env:SaveManagement__StabilitySampleMilliseconds = "100"
     $env:SaveManagement__StabilityRequiredSamples = "2"
-    $env:SaveManagement__MinimumFreeSpaceBytes = "1"
+    $env:SaveManagement__MinimumFreeSpaceBytes = "16777216"
 
     $api = Start-TestApi
     Wait-ForEndpoint "$baseUri/health/live" 100 $api | Out-Null

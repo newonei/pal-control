@@ -25,7 +25,7 @@ namespace PalControl
     public:
         PalControlNativeMod()
         {
-            ModVersion = STR("0.3.0-dev.35");
+            ModVersion = STR("0.3.0-dev.36");
             ModName = STR("PalControlNative");
             ModAuthors = STR("Pal Control");
             ModDescription = STR("Local Named Pipe bridge for Palworld server control.");
@@ -72,7 +72,7 @@ namespace PalControl
 #if PALCONTROL_ENABLE_RANDOM_SAFE_RESPAWN
             (void)randomSafeRespawn_.Install();
 #endif
-            bridge_.Start(PALCONTROL_TARGET_GAME_BUILD, "0.3.0-dev.35");
+            bridge_.Start(PALCONTROL_TARGET_GAME_BUILD, "0.3.0-dev.36");
             Output::send<LogLevel::Verbose>(
                 STR("[PalControlNative] Duplex bridge ready; read-only player probe runs on Engine Tick.\n"));
         }

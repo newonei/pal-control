@@ -39,7 +39,7 @@ The Control API directly references:
 - `Microsoft.Data.Sqlite` — MIT License;
 - `SQLitePCLRaw.bundle_e_sqlite3` — Apache License 2.0.
 
-When distributing compiled frontend, API or Native MOD artifacts, collect and ship the license/notices required by the exact dependency versions in that build. Do not assume the future Pal Control project license replaces dependency obligations.
+The Windows release build generates `third-party/inventory.json` and ships the exact .NET runtime-pack notices, NuGet package metadata/licenses and frontend production-package licenses used by that build. The collector verifies package hashes and fails when the dependency closure or a reviewed license changes. Other compiled distributions, including any future Native MOD release, must provide an equivalent exact-version notice bundle; do not assume the Pal Control project license replaces dependency obligations.
 
 ## Trademarks and game content
 

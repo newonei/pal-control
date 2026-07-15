@@ -16,7 +16,7 @@
    ```
 
 3. 不要修改 `DefaultPalWorldSettings.ini`；它是示例文件。
-4. 首次启动只监听本机 REST，暂不做公网端口映射。
+4. 首次启动不为 REST/RCON 添加公网防火墙放行或端口映射；Control API 始终通过 loopback 地址访问。Palworld 进程可能显示为 `0.0.0.0` 监听，因此不能把“使用 127.0.0.1 连接”误当成入站隔离。
 
 ## 首次启动后
 
@@ -62,5 +62,6 @@ PalServer\Mods\PalModSettings.ini
 - dry-run diff 与游戏内结果一致。
 - 重复 idempotency key 不会重复发物品。
 - ACK 丢失测试进入 `uncertain` 并成功对账。
+- `inventory.consume` 只有完成真实“扣物 → 保存 → 停服 → 重启 → 重新登录”后才声明 stable；experimental 或 `persistenceVerified=false` 时资源兑换保持关闭。
 - 玩家掉线/换 session 返回冲突。
 - Pal 不在 Box 中的高风险操作被拒绝。

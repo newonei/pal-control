@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$env:PlayerPortal__Enabled = "false"
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $serviceRoot = Join-Path $repositoryRoot "services\control-api"

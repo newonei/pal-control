@@ -2,9 +2,9 @@
 
 本目录定义 `apps/player-web/dist` 的公网边界。它只允许玩家门户静态页面和 `/api/v1/player/*`，不把 Control API、运营控制台、Palworld 官方 REST、PalDefender、RCON 或 Native Bridge 暴露给互联网。
 
-当前玩家功能包括本人钱包、商城、订单、流水、撤离记录和撤离地图。撤离地图调用
-`GET /api/v1/player/me/extraction-zones`，只从 HttpOnly 会话确定玩家，返回本人的位置与公开的
-撤离点配置；不会返回其他玩家位置。页面每 5 秒刷新，位置不可用时明确显示未知而不会推测。
+当前玩家功能包括本人钱包、商城、订单、流水、资源兑换记录和资源兑换点地图。兼容路径
+`GET /api/v1/player/me/extraction-zones` 只从 HttpOnly 会话确定玩家，返回本人的位置与公开的
+资源兑换点配置；不会返回其他玩家位置。页面每 5 秒刷新，位置不可用时明确显示未知而不会推测。
 
 ## 文档索引
 

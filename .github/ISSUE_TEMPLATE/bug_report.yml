@@ -1,0 +1,50 @@
+name: Bug 报告
+description: 报告可复现且不包含敏感数据的问题
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 安全漏洞请使用仓库 Security Advisory 私下报告；不要上传真实存档、Token、玩家标识或服务器路径。
+  - type: input
+    id: commit
+    attributes:
+      label: Pal Control 版本
+      description: 提交 SHA 或发布版本。
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: 运行环境
+      description: Windows、Palworld、UE4SS、PalDefender 和 .NET/Node 版本；不适用项可省略。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 提供最小、可重复且已脱敏的步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 可粘贴已删除秘密、玩家标识和绝对路径的日志或测试输出。
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我确认这不是应当私下报告的安全漏洞。
+          required: true
+        - label: 我没有附带真实存档、数据库、凭据、玩家数据或第三方二进制。
+          required: true

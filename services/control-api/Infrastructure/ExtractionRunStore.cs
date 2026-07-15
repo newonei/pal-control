@@ -11,6 +11,7 @@ public enum ExtractionSettlementState
     Quoted,
     Consuming,
     Removed,
+    Credited,
     Settled,
     Failed,
     Uncertain,
@@ -53,6 +54,12 @@ public sealed record ExtractionSettlementRun(
     public Guid? LeaseId { get; init; }
     public string? LeaseOwner { get; init; }
     public DateTimeOffset? LeaseExpiresAt { get; init; }
+    public int AttemptCount { get; init; }
+    public DateTimeOffset? LastHeartbeatAt { get; init; }
+    public string? ReconciliationActor { get; init; }
+    public ExtractionNativeInventoryQuoteSnapshot? NativeInventorySnapshot { get; init; }
+    public string? SettlementRequestHash { get; init; }
+    public ExtractionNativeConsumeReceipt? NativeConsumeReceipt { get; init; }
 }
 
 public sealed record ExtractionConsumptionStart(
@@ -70,38 +77,46 @@ public sealed record ExtractionSeasonStatistics(
     int UncertainCount,
     long SettledTotalValue);
 
+public sealed record ExtractionRunCreditCommit(
+    ExtractionSettlementRun Run,
+    WalletLedgerEntry LedgerEntry,
+    bool CreditCreated);
+
+public interface IExtractionSettlementPersistence
+{
+    IReadOnlyList<ExtractionSettlementRun> LoadAndMigrateSettlementRuns(string legacyJsonPath);
+
+    Task PersistSettlementRunsAsync(
+        IReadOnlyCollection<ExtractionSettlementRun> runs,
+        CancellationToken cancellationToken);
+
+    Task<ExtractionRunCreditCommit> CreditRemovedRunAsync(
+        ExtractionSettlementRun expectedRun,
+        CancellationToken cancellationToken);
+}
+
 public sealed class ExtractionRunStore : IDisposable
 {
     public static readonly TimeSpan SettlementLeaseDuration = TimeSpan.FromMinutes(2);
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true
-    };
-
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Dictionary<Guid, ExtractionSettlementRun> _runs = [];
-    private readonly string _path;
-    private readonly FileStream _instanceLock;
+    private readonly IExtractionSettlementPersistence _persistence;
+    private readonly string _legacyPath;
     private bool _disposed;
 
     public ExtractionRunStore(
         IOptions<ExtractionPersistenceOptions> options,
-        IWebHostEnvironment environment)
+        IWebHostEnvironment environment,
+        IExtractionSettlementPersistence persistence)
     {
+        _persistence = persistence;
         var configured = options.Value.DataDirectory;
         var directory = Path.GetFullPath(Path.IsPathRooted(configured)
             ? configured
             : Path.Combine(environment.ContentRootPath, configured));
         Directory.CreateDirectory(directory);
-        _path = Path.Combine(directory, "extraction-runs.json");
-        _instanceLock = new FileStream(
-            Path.Combine(directory, "extraction-runs.lock"),
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.None,
-            1,
-            FileOptions.WriteThrough);
+        _legacyPath = Path.Combine(directory, "extraction-runs.json");
         Load();
     }
 
@@ -114,9 +129,19 @@ public sealed class ExtractionRunStore : IDisposable
         IReadOnlyList<ExtractionLootLine> items,
         string snapshotHash,
         DateTimeOffset expiresAt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ExtractionNativeInventoryQuoteSnapshot? nativeInventorySnapshot = null)
     {
         ArgumentNullException.ThrowIfNull(items);
+        if (nativeInventorySnapshot is not null &&
+            !string.Equals(
+                snapshotHash,
+                ExtractionNativeInventoryCanonicalizer.Hash(nativeInventorySnapshot),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The Native quote snapshot does not match the supplied snapshot hash.");
+        }
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -142,6 +167,7 @@ public sealed class ExtractionRunStore : IDisposable
                 run.AccountId == accountId &&
                 run.State is ExtractionSettlementState.Consuming or
                     ExtractionSettlementState.Removed or
+                    ExtractionSettlementState.Credited or
                     ExtractionSettlementState.Uncertain);
             if (blocking is not null)
             {
@@ -188,7 +214,8 @@ public sealed class ExtractionRunStore : IDisposable
                 null)
             {
                 Revision = 1,
-                StateChangedAt = now
+                StateChangedAt = now,
+                NativeInventorySnapshot = CloneNativeSnapshot(nativeInventorySnapshot)
             };
             snapshot[run.RunId] = run;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
@@ -297,6 +324,7 @@ public sealed class ExtractionRunStore : IDisposable
                 .Where(run =>
                     run.State is ExtractionSettlementState.Consuming or
                         ExtractionSettlementState.Removed or
+                        ExtractionSettlementState.Credited or
                         ExtractionSettlementState.Uncertain ||
                     run.State == ExtractionSettlementState.Quoted && run.ExpiresAt > now)
                 .OrderBy(run => run.UpdatedAt)
@@ -321,7 +349,9 @@ public sealed class ExtractionRunStore : IDisposable
             var now = DateTimeOffset.UtcNow;
             return _runs.Values
                 .Where(run => run.State is
-                        (ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed) &&
+                        (ExtractionSettlementState.Consuming or
+                            ExtractionSettlementState.Removed or
+                            ExtractionSettlementState.Credited) &&
                     !HasActiveLease(run, now))
                 .OrderBy(run => run.StateChangedAt ?? run.UpdatedAt)
                 .Take(Math.Clamp(limit, 1, 100))
@@ -339,7 +369,8 @@ public sealed class ExtractionRunStore : IDisposable
         string userId,
         string idempotencyKey,
         IReadOnlyDictionary<string, long> preDeleteTotals,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestHash = null)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -359,12 +390,28 @@ public sealed class ExtractionRunStore : IDisposable
                     "资源兑换报价不属于该玩家。",
                     StatusCodes.Status403Forbidden);
             }
+            var keyOwner = _runs.Values.FirstOrDefault(candidate =>
+                candidate.RunId != runId &&
+                string.Equals(
+                    candidate.SettlementIdempotencyKey,
+                    idempotencyKey,
+                    StringComparison.Ordinal));
+            if (keyOwner is not null)
+            {
+                return new ExtractionConsumptionStart(Clone(run), false, true);
+            }
             if (run.SettlementIdempotencyKey is not null)
             {
                 var conflict = !string.Equals(
-                    run.SettlementIdempotencyKey,
-                    idempotencyKey,
-                    StringComparison.Ordinal);
+                        run.SettlementIdempotencyKey,
+                        idempotencyKey,
+                        StringComparison.Ordinal) ||
+                    requestHash is not null &&
+                    run.SettlementRequestHash is not null &&
+                    !string.Equals(
+                        run.SettlementRequestHash,
+                        requestHash,
+                        StringComparison.Ordinal);
                 return new ExtractionConsumptionStart(Clone(run), false, conflict);
             }
             var now = DateTimeOffset.UtcNow;
@@ -399,16 +446,79 @@ public sealed class ExtractionRunStore : IDisposable
                     preDeleteTotals,
                     StringComparer.OrdinalIgnoreCase),
                 SettlementIdempotencyKey = idempotencyKey,
+                SettlementRequestHash = requestHash,
                 Revision = checked(run.Revision + 1),
                 StateChangedAt = now,
                 UpdatedAt = now,
                 LeaseId = leaseId,
                 LeaseOwner = "http-settlement",
-                LeaseExpiresAt = now.Add(SettlementLeaseDuration)
+                LeaseExpiresAt = now.Add(SettlementLeaseDuration),
+                AttemptCount = checked(run.AttemptCount + 1),
+                LastHeartbeatAt = now
             };
             updatedSnapshot[runId] = updated;
             await PersistAndSwapSnapshotAsync(updatedSnapshot, cancellationToken);
             return new ExtractionConsumptionStart(Clone(updated), true, false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ExtractionRunMutation> TryRecordNativeConsumeReceiptAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        ExtractionNativeConsumeReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+            if (run.Revision != expectedRevision ||
+                run.State != ExtractionSettlementState.Consuming ||
+                run.LeaseId != leaseId ||
+                !string.Equals(
+                    run.SettlementRequestHash,
+                    receipt.RequestHash,
+                    StringComparison.Ordinal))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+            if (run.NativeConsumeReceipt is not null)
+            {
+                var sameResult = string.Equals(
+                        run.NativeConsumeReceipt.RequestHash,
+                        receipt.RequestHash,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        run.NativeConsumeReceipt.ResponseHash,
+                        receipt.ResponseHash,
+                        StringComparison.Ordinal);
+                if (!sameResult)
+                {
+                    throw new InvalidDataException(
+                        $"Extraction run '{runId}' already contains a conflicting Native consume receipt.");
+                }
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+
+            var snapshot = CloneSnapshot();
+            var updated = snapshot[runId] with
+            {
+                NativeConsumeReceipt = CloneNativeReceipt(receipt),
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+            snapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
         {
@@ -426,13 +536,16 @@ public sealed class ExtractionRunStore : IDisposable
             expectedRevision,
             leaseOwner,
             static state => state is
-                ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed,
+                ExtractionSettlementState.Consuming or
+                    ExtractionSettlementState.Removed or
+                    ExtractionSettlementState.Credited,
             cancellationToken);
 
     public Task<ExtractionRunMutation> TryBeginManualSettlementAsync(
         Guid runId,
         long expectedRevision,
         string reason,
+        string actor,
         CancellationToken cancellationToken) =>
         TransitionAsync(
             runId,
@@ -444,7 +557,8 @@ public sealed class ExtractionRunStore : IDisposable
             "MANUALLY_RECONCILED_REMOVED",
             reason,
             acquireLeaseOwner: "manual-reconciliation",
-            cancellationToken);
+            cancellationToken,
+            reconciliationActor: actor);
 
     public Task<ExtractionRunMutation> TryMarkRemovedAsync(
         Guid runId,
@@ -456,6 +570,23 @@ public sealed class ExtractionRunStore : IDisposable
             expectedRevision,
             leaseId,
             expectedLeaseOwner: "http-settlement",
+            ExtractionSettlementState.Consuming,
+            ExtractionSettlementState.Removed,
+            null,
+            null,
+            acquireLeaseOwner: null,
+            cancellationToken);
+
+    public Task<ExtractionRunMutation> TryMarkRemovedFromRecordedNativeAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        CancellationToken cancellationToken) =>
+        TransitionAsync(
+            runId,
+            expectedRevision,
+            leaseId,
+            expectedLeaseOwner: "settlement-recovery",
             ExtractionSettlementState.Consuming,
             ExtractionSettlementState.Removed,
             null,
@@ -486,6 +617,7 @@ public sealed class ExtractionRunStore : IDisposable
         Guid runId,
         long expectedRevision,
         string reason,
+        string actor,
         CancellationToken cancellationToken) =>
         TransitionAsync(
             runId,
@@ -497,7 +629,8 @@ public sealed class ExtractionRunStore : IDisposable
             "MANUALLY_RECONCILED_FAILED",
             reason,
             acquireLeaseOwner: null,
-            cancellationToken);
+            cancellationToken,
+            reconciliationActor: actor);
 
     public Task<ExtractionRunMutation> TryMarkUncertainAsync(
         Guid runId,
@@ -529,12 +662,90 @@ public sealed class ExtractionRunStore : IDisposable
             expectedRevision,
             leaseId,
             expectedLeaseOwner: null,
-            ExtractionSettlementState.Removed,
+            ExtractionSettlementState.Credited,
             ExtractionSettlementState.Settled,
             reconciliationReason is null ? null : "MANUALLY_RECONCILED_SETTLED",
             reconciliationReason,
             acquireLeaseOwner: null,
             cancellationToken);
+
+    public async Task<ExtractionRunMutation> TryCreditRemovedAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+            if (run.Revision != expectedRevision ||
+                run.State != ExtractionSettlementState.Removed ||
+                run.LeaseId != leaseId)
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+
+            var commit = await _persistence.CreditRemovedRunAsync(run, cancellationToken);
+            var snapshot = CloneSnapshot();
+            snapshot[runId] = Clone(commit.Run);
+            _runs = snapshot;
+            return new ExtractionRunMutation(Clone(commit.Run), true);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ExtractionRunMutation> TryHeartbeatLeaseAsync(
+        Guid runId,
+        long expectedRevision,
+        Guid leaseId,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            if (!_runs.TryGetValue(runId, out var run))
+            {
+                throw new KeyNotFoundException($"Extraction run '{runId}' does not exist.");
+            }
+            if (run.Revision != expectedRevision ||
+                run.LeaseId != leaseId ||
+                !string.Equals(run.LeaseOwner, leaseOwner, StringComparison.Ordinal) ||
+                run.State is not
+                    (ExtractionSettlementState.Consuming or
+                        ExtractionSettlementState.Removed or
+                        ExtractionSettlementState.Credited))
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = CloneSnapshot();
+            var updated = snapshot[runId] with
+            {
+                UpdatedAt = now,
+                LastHeartbeatAt = now,
+                LeaseExpiresAt = now.Add(SettlementLeaseDuration)
+            };
+            snapshot[runId] = updated;
+            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            return new ExtractionRunMutation(Clone(updated), true);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     public async Task<ExtractionRunMutation> TryReleaseLeaseAsync(
         Guid runId,
@@ -553,7 +764,9 @@ public sealed class ExtractionRunStore : IDisposable
             if (run.Revision != expectedRevision ||
                 run.LeaseId != leaseId ||
                 run.State is not
-                    (ExtractionSettlementState.Consuming or ExtractionSettlementState.Removed))
+                    (ExtractionSettlementState.Consuming or
+                        ExtractionSettlementState.Removed or
+                        ExtractionSettlementState.Credited))
             {
                 return new ExtractionRunMutation(Clone(run), false);
             }
@@ -585,7 +798,6 @@ public sealed class ExtractionRunStore : IDisposable
             return;
         }
         _disposed = true;
-        _instanceLock.Dispose();
         _gate.Dispose();
         GC.SuppressFinalize(this);
     }
@@ -623,7 +835,9 @@ public sealed class ExtractionRunStore : IDisposable
                 UpdatedAt = now,
                 LeaseId = Guid.NewGuid(),
                 LeaseOwner = leaseOwner.Trim(),
-                LeaseExpiresAt = now.Add(SettlementLeaseDuration)
+                LeaseExpiresAt = now.Add(SettlementLeaseDuration),
+                AttemptCount = checked(run.AttemptCount + 1),
+                LastHeartbeatAt = now
             };
             snapshot[runId] = updated;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
@@ -645,7 +859,8 @@ public sealed class ExtractionRunStore : IDisposable
         string? errorCode,
         string? errorMessage,
         string? acquireLeaseOwner,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? reconciliationActor = null)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -681,8 +896,17 @@ public sealed class ExtractionRunStore : IDisposable
                 throw new InvalidOperationException(
                     $"Extraction run transition {run.State} -> {state} is not allowed.");
             }
+            if (run.State == ExtractionSettlementState.Consuming &&
+                state == ExtractionSettlementState.Removed &&
+                run.NativeInventorySnapshot is not null &&
+                run.NativeConsumeReceipt?.Disposition !=
+                    ExtractionNativeConsumeDisposition.Succeeded)
+            {
+                return new ExtractionRunMutation(Clone(run), false);
+            }
 
-            var keepLease = state == ExtractionSettlementState.Removed;
+            var keepLease = state is
+                ExtractionSettlementState.Removed or ExtractionSettlementState.Credited;
             var newLeaseId = acquireLeaseOwner is null
                 ? keepLease ? run.LeaseId : null
                 : Guid.NewGuid();
@@ -702,7 +926,12 @@ public sealed class ExtractionRunStore : IDisposable
                 SettledAt = state == ExtractionSettlementState.Settled ? now : run.SettledAt,
                 LeaseId = newLeaseId,
                 LeaseOwner = newLeaseOwner,
-                LeaseExpiresAt = newLeaseExpiry
+                LeaseExpiresAt = newLeaseExpiry,
+                AttemptCount = acquireLeaseOwner is null
+                    ? run.AttemptCount
+                    : checked(run.AttemptCount + 1),
+                LastHeartbeatAt = newLeaseId is null ? run.LastHeartbeatAt : now,
+                ReconciliationActor = reconciliationActor ?? run.ReconciliationActor
             };
             snapshot[runId] = updated;
             await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
@@ -729,19 +958,13 @@ public sealed class ExtractionRunStore : IDisposable
             (ExtractionSettlementState.Consuming, ExtractionSettlementState.Uncertain) => true,
             (ExtractionSettlementState.Uncertain, ExtractionSettlementState.Removed) => true,
             (ExtractionSettlementState.Uncertain, ExtractionSettlementState.Failed) => true,
-            (ExtractionSettlementState.Removed, ExtractionSettlementState.Settled) => true,
+            (ExtractionSettlementState.Credited, ExtractionSettlementState.Settled) => true,
             _ => false
         };
 
     private void Load()
     {
-        if (!File.Exists(_path))
-        {
-            return;
-        }
-        var bytes = File.ReadAllBytes(_path);
-        var runs = JsonSerializer.Deserialize<ExtractionSettlementRun[]>(bytes, JsonOptions)
-            ?? throw new InvalidDataException("The extraction run store is invalid.");
+        var runs = _persistence.LoadAndMigrateSettlementRuns(_legacyPath);
         foreach (var run in runs)
         {
             if (run.RunId == Guid.Empty || !_runs.TryAdd(run.RunId, Clone(run)))
@@ -753,44 +976,17 @@ public sealed class ExtractionRunStore : IDisposable
 
     private async Task PersistSnapshotAsync(
         IReadOnlyDictionary<Guid, ExtractionSettlementRun> snapshot,
-        CancellationToken cancellationToken)
-    {
-        var tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            await using (var stream = new FileStream(
-                             tempPath,
-                             FileMode.CreateNew,
-                             FileAccess.Write,
-                             FileShare.None,
-                             32 * 1024,
-                             FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await JsonSerializer.SerializeAsync(
-                    stream,
-                    snapshot.Values.OrderBy(run => run.QuotedAt).ToArray(),
-                    JsonOptions,
-                    cancellationToken);
-                await stream.FlushAsync(cancellationToken);
-                stream.Flush(flushToDisk: true);
-            }
-            File.Move(tempPath, _path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
-        }
-    }
+        CancellationToken cancellationToken) =>
+        await _persistence.PersistSettlementRunsAsync(
+            snapshot.Values.OrderBy(run => run.QuotedAt).ToArray(),
+            cancellationToken);
 
     private async Task PersistAndSwapSnapshotAsync(
         Dictionary<Guid, ExtractionSettlementRun> snapshot,
         CancellationToken cancellationToken)
     {
-        // The disk replacement is the commit point. No cancellable or fallible work
-        // may be introduced between it and the in-memory reference swap.
+        // The SQLite commit is the persistence point. No cancellable or fallible
+        // work may be introduced between it and the in-memory reference swap.
         await PersistSnapshotAsync(snapshot, cancellationToken);
         _runs = snapshot;
     }
@@ -810,6 +1006,24 @@ public sealed class ExtractionRunStore : IDisposable
         Items = run.Items.ToArray(),
         PreDeleteTotals = run.PreDeleteTotals is null
             ? null
-            : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase),
+        NativeInventorySnapshot = CloneNativeSnapshot(run.NativeInventorySnapshot),
+        NativeConsumeReceipt = CloneNativeReceipt(run.NativeConsumeReceipt)
     };
+
+    private static ExtractionNativeInventoryQuoteSnapshot? CloneNativeSnapshot(
+        ExtractionNativeInventoryQuoteSnapshot? snapshot) =>
+        snapshot is null
+            ? null
+            : snapshot with
+            {
+                Containers = snapshot.Containers.Select(container => container with
+                {
+                    Slots = container.Slots.ToArray()
+                }).ToArray()
+            };
+
+    private static ExtractionNativeConsumeReceipt? CloneNativeReceipt(
+        ExtractionNativeConsumeReceipt? receipt) =>
+        receipt is null ? null : receipt with { Items = receipt.Items.ToArray() };
 }

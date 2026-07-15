@@ -8,8 +8,12 @@ info:
   description: >-
     Browser-facing API for Palworld operations. The official Palworld REST API
     and native mod bridge are internal adapters and must not be exposed directly.
-    This local profile has no bearer challenge and must remain bound to loopback;
-    non-loopback deployments require an authenticated HTTPS reverse proxy.
+    Management operations require a configured administrator API key and are
+    additionally restricted to the loopback management boundary. Privileged
+    economy and season writes also require a TOTP code and an auditable reason.
+    Player-portal sessions use a separate cookie identity and never authorize
+    management operations. Non-loopback deployments require HTTPS at a trusted
+    reverse proxy in addition to these application controls.
 servers:
   - url: http://127.0.0.1:5180/api/v1
     description: Local development
@@ -44,6 +48,10 @@ tags:
     description: Local extraction-mode economy, shop, delivery, and settlement views.
   - name: ExtractionAdmin
     description: Loopback-only extraction economy administration and weekly rollover controls.
+  - name: EconomyObservability
+    description: Privacy-safe economy state, latency, invariant, alert, backup and circuit metrics.
+  - name: AdminSecurity
+    description: Administrator identity and immutable security-audit projections.
   - name: PlayerPortal
     description: >-
       Public player self-service endpoints. Authenticated player identity is
@@ -2035,15 +2043,95 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /player/auth/mode:
+    get:
+      tags: [PlayerPortal]
+      summary: Read the configured player authentication boundary
+      description: >-
+        Reports whether Steam OpenID is required and whether this browser has a
+        short-lived, pending Steam identity. It never returns a raw SteamID.
+      operationId: getPlayerAuthenticationMode
+      security: []
+      responses:
+        "200":
+          description: Authentication mode and pending-identity state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerAuthenticationMode"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/auth/steam/start:
+    get:
+      tags: [PlayerPortal]
+      summary: Start a Steam OpenID 2.0 login
+      description: >-
+        Creates a single-use, short-lived login-CSRF state and redirects only to
+        the configured Steam OP. Available only in OpenIdThenGameCode mode.
+      operationId: startSteamOpenIdLogin
+      security: []
+      responses:
+        "302":
+          description: Redirect to the fixed Steam OpenID provider
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+            Set-Cookie:
+              description: HttpOnly, Secure, SameSite=Lax one-time state cookie.
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/auth/steam/callback:
+    get:
+      tags: [PlayerPortal]
+      summary: Validate the Steam OpenID callback and create a pending identity
+      description: >-
+        Strictly validates state, namespace, OP endpoint, claimed_id/identity,
+        17-digit SteamID64, exact return_to and response_nonce, then performs a
+        bounded server-to-server check_authentication POST. Success creates only
+        a short-lived pending platform identity; no player session exists until
+        the in-game code binds the live worldId and PlayerUID.
+      operationId: completeSteamOpenIdLogin
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]{43}$"
+        - name: openid.mode
+          in: query
+          required: true
+          schema:
+            type: string
+            const: id_res
+      responses:
+        "302":
+          description: Pending Steam identity created; redirect to the fixed portal realm
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+            Set-Cookie:
+              description: HttpOnly, Secure, SameSite=Strict pending-identity cookie.
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
   /player/auth/request-code:
     post:
       tags: [PlayerPortal]
       summary: Send a one-time login code to an online player in game
       description: >-
-        Anonymous bootstrap operation. The supplied platform UserId selects the
-        online recipient only for this challenge; it does not establish a player
-        identity until the one-time code is verified. A single explicitly allowed
-        Origin header is required.
+        In TrustedGameCode mode the supplied platform UserId selects the online
+        recipient. In OpenIdThenGameCode mode userId must be omitted or exactly
+        match the pending Steam identity and cannot select another account. A
+        single explicitly allowed Origin header is required.
       operationId: requestPlayerLoginCode
       security: []
       parameters:
@@ -2068,9 +2156,11 @@ paths:
       tags: [PlayerPortal]
       summary: Verify an in-game one-time code and create a player session
       description: >-
-        Consumes the challenge after successful verification and sets the opaque
-        player session in an HttpOnly, SameSite=Strict cookie scoped to
-        /api/v1/player. A single explicitly allowed Origin header is required.
+        Consumes the challenge after successful verification and rotates the
+        opaque player session. In OpenIdThenGameCode mode it first verifies and
+        persists the exact current worldId + PlayerUID binding for the pending
+        Steam identity; failures create no formal session. A single explicitly
+        allowed Origin header is required.
       operationId: verifyPlayerLoginCode
       security: []
       parameters:
@@ -2151,6 +2241,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionOverview"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/new-player-activities:
+    get:
+      tags: [PlayerPortal]
+      summary: List new-player activities published for the authenticated weekly world
+      description: >-
+        Player identity comes only from the opaque HttpOnly session cookie. The
+        server returns only versions frozen to the account's active season and
+        world, together with that account's immutable claim result when present.
+      operationId: listPlayerNewPlayerActivities
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Current-world published activity versions and claim state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivityAvailabilityList"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/new-player-activities/{activityKey}/versions/{version}/claim:
+    post:
+      tags: [PlayerPortal]
+      summary: Claim one immutable new-player activity version
+      description: >-
+        Has no request body. Requires the authenticated player to be online with
+        the same complete PlayerUID captured by the session and bound to the
+        activity's frozen weekly world. Origin, CSRF, economy safety-gate, and
+        account-scoped idempotency checks run before the dual-wallet transaction.
+      operationId: claimPlayerNewPlayerActivity
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+        - $ref: "#/components/parameters/NewPlayerActivityVersion"
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Atomically created or idempotently replayed dual-wallet grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivityClaimResponse"
         default:
           $ref: "#/components/responses/PlayerPortalError"
   /player/me/extraction-zones:
@@ -2322,6 +2459,378 @@ paths:
                 $ref: "#/components/schemas/ExtractionRun"
         default:
           $ref: "#/components/responses/PlayerPortalError"
+  /admin/session:
+    get:
+      tags: [AdminSecurity]
+      summary: Read the authenticated administrator identity
+      operationId: getAdminSession
+      responses:
+        "200":
+          description: Current administrator subject, expanded roles and authentication method
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /admin/audit:
+    get:
+      tags: [AdminSecurity]
+      summary: List recent administrator audit events
+      description: Owner-only read projection. Events are append-only start and completion/failure records.
+      operationId: listAdminAuditEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Recent audit events in reverse insertion order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuditList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /admin/player-identity-security-audit:
+    get:
+      tags: [AdminSecurity]
+      summary: List redacted player authentication and moderation security events
+      description: >-
+        Owner-only reverse-chronological projection. Player subjects and source
+        IP addresses are represented only by SHA-256 fingerprints. Verification
+        codes, challenge IDs, session cookies, session tokens and CSRF tokens are
+        never persisted in this audit.
+      operationId: listPlayerIdentitySecurityAuditEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Recent redacted identity-security events in reverse insertion order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerIdentitySecurityAuditList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /admin/player-sessions/revoke:
+    post:
+      tags: [AdminSecurity]
+      summary: Revoke all player-portal sessions for one bound player identity
+      description: >-
+        Owner-only revocation. The identifier may be the active world's complete
+        PlayerUID or the normalized platform subject. Revocation does not ban the
+        player, but every currently issued process session becomes invalid before
+        the response is returned.
+      operationId: revokePlayerPortalSessions
+      parameters:
+        - name: X-Correlation-ID
+          in: header
+          required: false
+          description: Optional caller correlation value retained in both administrator and identity audits.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [serverId, playerIdentifier]
+              properties:
+                serverId:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                playerIdentifier:
+                  type: string
+                  minLength: 3
+                  maxLength: 128
+      responses:
+        "200":
+          description: All matching process sessions were revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [revokedSessions, resolvedSubjects, correlationId]
+                properties:
+                  revokedSessions:
+                    type: integer
+                    minimum: 0
+                  resolvedSubjects:
+                    type: integer
+                    minimum: 1
+                  correlationId:
+                    type: string
+                    minLength: 1
+        "400":
+          description: The server or player identifier was malformed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No active binding or process session matched the player identifier
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /economy/observability:
+    get:
+      tags: [EconomyObservability]
+      summary: Get the latest machine-readable economy health and alert snapshot
+      description: >-
+        Viewer-only loopback endpoint. It exports aggregate state counts and
+        latency, queue capacity and oldest age, uncertain outcomes, ledger and
+        identity invariants, runtime dependency and approved version/world
+        consistency, backup age, circuits and stable alert codes. It never exports player identifiers,
+        session values, OTPs, cookies, tokens or passwords. The optional refresh
+        performs a synchronous collection but never opens a circuit from the HTTP request.
+      operationId: getEconomyObservability
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Latest privacy-safe economy observability snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyObservabilitySnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /economy/metrics:
+    get:
+      tags: [EconomyObservability]
+      summary: Scrape privacy-safe Prometheus economy metrics
+      description: >-
+        Viewer-only loopback Prometheus 0.0.4 export of the latest cached
+        observability snapshot. Labels are restricted to stable state, alert,
+        feature, queue and version metadata; no player or credential value is emitted.
+      operationId: scrapeEconomyMetrics
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /extraction/capabilities:
+    get:
+      tags: [Extraction]
+      summary: Get independent economy write gates
+      description: >-
+        Read-only compatibility endpoint for the local console. Purchase and
+        resource-exchange writes are evaluated independently and fail closed
+        with stable blocker codes; one unavailable adapter does not take down
+        this endpoint or the readable economy projection.
+      operationId: getExtractionCapabilities
+      responses:
+        "200":
+          description: Current per-feature economy write gates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionCapabilities"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/safety-gate/{feature}:
+    put:
+      tags: [ExtractionAdmin]
+      summary: Change one economy write circuit without restarting the service
+      description: >-
+        Purchase and resource-exchange circuits are independent, durable, and
+        drain admitted work before a close operation completes. Dependency
+        drift can still close the effective write gate while read APIs remain available.
+      operationId: setEconomySafetyCircuit
+      parameters:
+        - name: feature
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [purchase, resource-exchange]
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EconomyCircuitUpdateRequest"
+      responses:
+        "200":
+          description: Durable state of both independent economy circuits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomySafetyGateState"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/new-player-activities:
+    get:
+      tags: [ExtractionAdmin]
+      summary: List immutable and draft new-player activity versions
+      operationId: listNewPlayerActivityVersions
+      parameters:
+        - name: activityKey
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/NewPlayerActivityKey"
+      responses:
+        "200":
+          description: Activity versions visible to an EconomyAdmin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivityList"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/new-player-activities/{activityKey}/versions:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Create the next draft version of a new-player activity
+      description: >-
+        Always creates a draft with the next monotonically increasing version.
+        Published and closed versions are never edited in place.
+      operationId: createNewPlayerActivityDraft
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPlayerActivityDefinition"
+      responses:
+        "201":
+          description: Newly created draft version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivity"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/new-player-activities/{activityKey}/versions/{version}:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Read one new-player activity version
+      operationId: getNewPlayerActivityVersion
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+        - $ref: "#/components/parameters/NewPlayerActivityVersion"
+      responses:
+        "200":
+          description: Requested version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivity"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+    put:
+      tags: [ExtractionAdmin]
+      summary: Update a draft new-player activity version
+      description: Published and closed versions fail with a stable conflict code.
+      operationId: updateNewPlayerActivityDraft
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+        - $ref: "#/components/parameters/NewPlayerActivityVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateNewPlayerActivityDraftRequest"
+      responses:
+        "200":
+          description: Updated draft version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivity"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/new-player-activities/{activityKey}/versions/{version}/publish:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Publish a draft into the current weekly world
+      description: >-
+        High-risk EconomyAdmin operation. Publication freezes the active season
+        id, exact world GUID, rewards, and content. A previous published version
+        of the same activity key must be closed first.
+      operationId: publishNewPlayerActivityVersion
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+        - $ref: "#/components/parameters/NewPlayerActivityVersion"
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      responses:
+        "200":
+          description: Published immutable version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivity"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/new-player-activities/{activityKey}/versions/{version}/close:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Close a published new-player activity version
+      description: High-risk EconomyAdmin operation recorded by the administrator audit middleware.
+      operationId: closeNewPlayerActivityVersion
+      parameters:
+        - $ref: "#/components/parameters/NewPlayerActivityKey"
+        - $ref: "#/components/parameters/NewPlayerActivityVersion"
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      responses:
+        "200":
+          description: Closed immutable version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewPlayerActivity"
+        default:
+          $ref: "#/components/responses/ExtractionError"
   /extraction/overview:
     get:
       tags: [Extraction]
@@ -2464,8 +2973,10 @@ paths:
       tags: [Extraction]
       summary: Consume quoted loot and settle an extraction run
       description: >-
-        Dispatches the allowlisted RCON deletion, requires a matching REST
-        inventory readback, and only then credits the current-season voucher.
+        In production, dispatches an exact Native inventory.consume request,
+        persists and validates the complete removal receipt, and only then
+        credits the current-season voucher. The RCON compatibility adapter is
+        restricted to explicitly configured Development environments.
       operationId: settleExtractionRun
       parameters:
         - $ref: "#/components/parameters/ExtractionRunId"
@@ -2492,6 +3003,8 @@ paths:
       description: Loopback-only operator endpoint. Delta cannot be zero.
       operationId: adjustExtractionWallet
       parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
         - name: Idempotency-Key
           in: header
           required: true
@@ -2522,6 +3035,8 @@ paths:
       summary: Manually resolve an uncertain shop delivery during maintenance
       operationId: reconcileExtractionOrder
       parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
         - name: orderId
           in: path
           required: true
@@ -2556,6 +3071,8 @@ paths:
       summary: Manually resolve an uncertain extraction run during maintenance
       operationId: reconcileExtractionRun
       parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
         - name: runId
           in: path
           required: true
@@ -2577,18 +3094,33 @@ paths:
                 $ref: "#/components/schemas/ExtractionRun"
         default:
           $ref: "#/components/responses/ExtractionError"
-  /extraction/admin/rcon/status:
+  /extraction/admin/settlement/status:
     get:
       tags: [ExtractionAdmin]
-      summary: Probe extraction RCON configuration and authentication
-      operationId: getExtractionRconStatus
+      summary: Probe the active resource-settlement adapter
+      operationId: getExtractionSettlementStatus
       responses:
         "200":
-          description: RCON capability probe
+          description: Adapter-neutral Native or development-RCON settlement status
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ExtractionRconStatus"
+                $ref: "#/components/schemas/ExtractionSettlementStatus"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/rcon/status:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Deprecated alias for the adapter-neutral settlement status
+      deprecated: true
+      operationId: getExtractionRconStatus
+      responses:
+        "200":
+          description: Adapter-neutral settlement status (deprecated path)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionSettlementStatus"
         default:
           $ref: "#/components/responses/ExtractionError"
   /extraction/admin/rollover/maintenance:
@@ -2596,6 +3128,9 @@ paths:
       tags: [ExtractionAdmin]
       summary: Open or close the extraction write gate
       operationId: setExtractionRolloverMaintenance
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
       requestBody:
         required: true
         content:
@@ -2645,6 +3180,9 @@ paths:
       summary: Bind a DedicatedServerName to the current extraction season
       description: The write gate must already be in maintenance mode.
       operationId: commitExtractionRollover
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
       requestBody:
         required: true
         content:
@@ -2660,8 +3198,438 @@ paths:
                 $ref: "#/components/schemas/ExtractionRolloverCommitResponse"
         default:
           $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/capacity:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Estimate authoritative-state backup capacity without deleting data
+      operationId: getEconomyContinuityCapacity
+      responses:
+        "200":
+          description: Current bytes, retained estimate, required free space and capacity decision
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/retention-plan:
+    get:
+      tags: [ExtractionAdmin]
+      summary: List old economy backups eligible for separately approved cleanup
+      operationId: planEconomyBackupRetention
+      responses:
+        "200":
+          description: Plan-only result; this endpoint never deletes a backup or world
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleteAutomatically, candidates]
+                properties:
+                  deleteAutomatically:
+                    type: boolean
+                    const: false
+                  candidates:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/snapshots:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Create a WAL-consistent economy snapshot under maintenance
+      operationId: createEconomySnapshot
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [serverId, worldId]
+              properties:
+                serverId:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                worldId:
+                  type: string
+                  pattern: "^[A-Fa-f0-9]{32}$"
+                idempotencyKey:
+                  type: [string, "null"]
+                  minLength: 16
+                  maxLength: 128
+                  description: Use the durable rollover economy-backup step key.
+      responses:
+        "200":
+          description: Verified snapshot manifest; an idempotent replay returns the same backupId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomySnapshotManifest"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/snapshots/{serverId}/{backupId}/verify:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Verify snapshot manifest, files and SQLite integrity
+      operationId: verifyEconomySnapshot
+      parameters:
+        - name: serverId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: backupId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Verified snapshot manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomySnapshotManifest"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/snapshots/{serverId}/{backupId}/stage:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Restore one economy snapshot to an isolated fail-closed staging directory
+      description: >-
+        A replay for the same backup and expected world revalidates and returns
+        the already atomically published staging result. It never creates a
+        second staging copy or promotes staging into production.
+      operationId: stageEconomySnapshot
+      parameters:
+        - name: serverId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: backupId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedWorldId]
+              properties:
+                expectedWorldId:
+                  type: string
+                  pattern: "^[A-Fa-f0-9]{32}$"
+      responses:
+        "200":
+          description: Hash, integrity, replay, active-world, ledger and fail-closed result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/economy-continuity/snapshots/{serverId}/{backupId}/post-snapshot:
+    get:
+      tags: [ExtractionAdmin]
+      summary: List events and unresolved transactions requiring recovery reconciliation
+      operationId: listPostEconomySnapshotTransactions
+      parameters:
+        - name: serverId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: backupId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reconciliation items after the snapshot sequence plus current blockers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EconomyPendingTransaction"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/weekly-rollover/operations:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Prepare or replay a deterministic persistent weekly rollover
+      operationId: prepareWeeklyRollover
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [serverId, fromSeasonId, fromWorldId, targetWorldId, rulesVersion]
+              properties:
+                serverId:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                fromSeasonId:
+                  type: string
+                  format: uuid
+                fromWorldId:
+                  type: string
+                  pattern: "^[A-Fa-f0-9]{32}$"
+                targetWorldId:
+                  type: string
+                  pattern: "^[A-Fa-f0-9]{32}$"
+                rulesVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "200":
+          description: Persistent operation and deterministic key for the required phase
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeeklyRolloverResponse"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/weekly-rollover/operations/active:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Resume the server's one incomplete weekly rollover after restart
+      operationId: getActiveWeeklyRollover
+      parameters:
+        - name: serverId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Incomplete rollover and its required step key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeeklyRolloverResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /admin/weekly-rollover/operations/{operationId}:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Get one persistent weekly rollover
+      operationId: getWeeklyRollover
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Rollover state and its required step key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeeklyRolloverResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /admin/weekly-rollover/operations/{operationId}/steps/{step}:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Commit verified evidence for exactly the currently required rollover phase
+      operationId: completeWeeklyRolloverStep
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: step
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/WeeklyRolloverStep"
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [stepKey, evidence]
+              properties:
+                stepKey:
+                  type: string
+                  pattern: "^[a-f0-9]{64}$"
+                evidence:
+                  $ref: "#/components/schemas/WeeklyRolloverEvidence"
+      responses:
+        "200":
+          description: Applied transition or byte-for-byte idempotent evidence replay
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/season-settlement-jobs/voucher-expiry:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Freeze the one versioned SeasonVoucher-expiry job for a season
+      operationId: prepareSeasonVoucherExpiry
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [seasonId, rulesVersion]
+              properties:
+                seasonId:
+                  type: string
+                  format: uuid
+                rulesVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "200":
+          description: Frozen per-account expiry job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeasonSettlementJob"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/season-settlement-jobs/rewards:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Freeze a versioned idempotent weekly reward batch
+      operationId: prepareSeasonRewardJob
+      parameters:
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceSeasonId, rulesVersion, rewardBatchKey, grants]
+              properties:
+                sourceSeasonId:
+                  type: string
+                  format: uuid
+                rulesVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                rewardBatchKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                grants:
+                  type: array
+                  maxItems: 100000
+                  items:
+                    $ref: "#/components/schemas/SeasonRewardGrant"
+      responses:
+        "200":
+          description: Frozen reward job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeasonSettlementJob"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /admin/season-settlement-jobs/{jobId}:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Inspect one season settlement job and its frozen items
+      operationId: getSeasonSettlementJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current job projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeasonSettlementJob"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /admin/season-settlement-jobs/{jobId}/run:
+    post:
+      tags: [ExtractionAdmin]
+      summary: Resume a frozen season job under maintenance using ledger idempotency
+      operationId: runSeasonSettlementJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/AdminTotp"
+        - $ref: "#/components/parameters/AdminReason"
+      responses:
+        "200":
+          description: Running or completed job projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeasonSettlementJob"
+        default:
+          $ref: "#/components/responses/ExtractionError"
 components:
   securitySchemes:
+    adminApiKey:
+      type: apiKey
+      in: header
+      name: X-Pal-Admin-Key
+      description: >-
+        Administrator API key. Configure only a SHA-256 digest at rest; never
+        store the plaintext key in repository configuration or logs.
     bearerAuth:
       type: http
       scheme: bearer
@@ -2677,6 +3645,23 @@ components:
         identity is derived exclusively from this cookie, never from a userId
         query parameter or business request body.
   parameters:
+    AdminTotp:
+      name: X-Pal-Admin-Totp
+      in: header
+      required: true
+      description: Six-digit RFC 6238 TOTP code required for privileged writes.
+      schema:
+        type: string
+        pattern: "^[0-9]{6}$"
+    AdminReason:
+      name: X-Pal-Admin-Reason
+      in: header
+      required: true
+      description: Human-entered audit reason for the privileged operation.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
     ServerId:
       name: serverId
       in: path
@@ -2730,6 +3715,20 @@ components:
         type: string
         minLength: 8
         maxLength: 128
+    NewPlayerActivityKey:
+      name: activityKey
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/NewPlayerActivityKey"
+    NewPlayerActivityVersion:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000000
     PlayerPortalOrigin:
       name: Origin
       in: header
@@ -2822,6 +3821,12 @@ components:
   responses:
     Unauthorized:
       description: Missing or invalid access token
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Forbidden:
+      description: Authenticated principal does not have the required role or security proof
       content:
         application/problem+json:
           schema:
@@ -2956,6 +3961,152 @@ components:
           schema:
             $ref: "#/components/schemas/PalDefenderCommandRequest"
   schemas:
+    AdminSession:
+      type: object
+      additionalProperties: false
+      required: [subject, roles, authenticationMethod]
+      properties:
+        subject:
+          type: string
+          minLength: 1
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [Viewer, Operator, EconomyAdmin, SeasonAdmin, Owner]
+        authenticationMethod:
+          type: string
+          enum: [api_key, development_loopback]
+    AdminAuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - auditId
+        - correlationId
+        - phase
+        - subject
+        - roles
+        - sourceIp
+        - method
+        - path
+        - requestHash
+        - serviceVersion
+        - occurredAt
+      properties:
+        auditId:
+          type: string
+          format: uuid
+        correlationId:
+          type: string
+          format: uuid
+        phase:
+          type: string
+          enum: [started, completed, failed]
+        subject:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        sourceIp:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+        requestHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        reason:
+          type: [string, "null"]
+        beforeJson:
+          type: [string, "null"]
+        afterJson:
+          type: [string, "null"]
+        serviceVersion:
+          type: string
+        resultStatus:
+          type: [integer, "null"]
+        occurredAt:
+          type: string
+          format: date-time
+    AdminAuditList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminAuditEvent"
+    PlayerIdentitySecurityAuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - sequence
+        - eventId
+        - correlationId
+        - eventType
+        - outcome
+        - reasonCode
+        - riskLevel
+        - subjectFingerprint
+        - sourceIpFingerprint
+        - affectedSessions
+        - occurredAt
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        eventId:
+          type: string
+          format: uuid
+        correlationId:
+          type: string
+          minLength: 1
+        eventType:
+          type: string
+          enum:
+            - login_code_request
+            - login_code_verification
+            - session_rejected
+            - session_logout
+            - administrative_session_revocation
+            - administrative_ban
+            - administrative_unban
+        outcome:
+          type: string
+          enum: [succeeded, denied, failed, ignored]
+        reasonCode:
+          type: string
+          pattern: "^[a-z0-9_-]{1,64}$"
+        riskLevel:
+          type: string
+          enum: [normal, suspicious, high]
+        subjectFingerprint:
+          type: [string, "null"]
+          pattern: "^[0-9A-F]{64}$"
+        sourceIpFingerprint:
+          type: [string, "null"]
+          pattern: "^[0-9A-F]{64}$"
+        affectedSessions:
+          type: integer
+          minimum: 0
+        occurredAt:
+          type: string
+          format: date-time
+    PlayerIdentitySecurityAuditList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerIdentitySecurityAuditEvent"
     ServerConfigurationDocument:
       type: object
       additionalProperties: false
@@ -3345,6 +4496,10 @@ components:
           minimum: 100
           maximum: 599
         error:
+          description: >-
+            Adapter-neutral failure using SETTLEMENT_PROBE_FAILED or
+            SETTLEMENT_PROBE_UNCERTAIN; transport secrets and raw commands are
+            never returned.
           oneOf:
             - $ref: "#/components/schemas/ApiError"
             - type: "null"
@@ -5243,10 +6398,32 @@ components:
     PlayerLoginCodeRequest:
       type: object
       additionalProperties: false
-      required: [userId]
       properties:
         userId:
-          $ref: "#/components/schemas/PlayerPortalUserId"
+          oneOf:
+            - $ref: "#/components/schemas/PlayerPortalUserId"
+            - type: "null"
+          description: >-
+            Required only in TrustedGameCode mode. OpenIdThenGameCode derives the
+            subject from the pending HttpOnly Steam identity cookie.
+    PlayerAuthenticationMode:
+      type: object
+      additionalProperties: false
+      required:
+        - authenticationMode
+        - steamOpenIdRequired
+        - pendingPlatformIdentity
+        - trustedGameCodeFallback
+      properties:
+        authenticationMode:
+          type: string
+          enum: [trustedGameCode, openIdThenGameCode]
+        steamOpenIdRequired:
+          type: boolean
+        pendingPlatformIdentity:
+          type: boolean
+        trustedGameCodeFallback:
+          type: boolean
     PlayerLoginChallenge:
       type: object
       additionalProperties: false
@@ -5487,6 +6664,404 @@ components:
       type: string
       pattern: "^[a-z][a-z0-9]{1,15}_[a-z0-9-]{3,100}$"
       examples: [steam_76561198000000000]
+    ExtractionWriteCapability:
+      type: object
+      additionalProperties: false
+      required: [enabled, blockers, circuit]
+      properties:
+        enabled:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiError"
+        circuit:
+          $ref: "#/components/schemas/EconomyCircuitState"
+    EconomyCircuitUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [writesEnabled, reason]
+      properties:
+        writesEnabled:
+          type: boolean
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    EconomyCircuitState:
+      type: object
+      additionalProperties: false
+      required: [writesEnabled, reason, actor, updatedAt]
+      properties:
+        writesEnabled:
+          type: boolean
+        reason:
+          type: string
+        actor:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    EconomySafetyGateState:
+      type: object
+      additionalProperties: false
+      required: [purchase, resourceExchange]
+      properties:
+        purchase:
+          $ref: "#/components/schemas/EconomyCircuitState"
+        resourceExchange:
+          $ref: "#/components/schemas/EconomyCircuitState"
+    EconomyLatencyMetric:
+      type: object
+      additionalProperties: false
+      required: [sampleCount, averageSeconds, maximumSeconds, p95Seconds]
+      properties:
+        sampleCount:
+          type: integer
+          minimum: 0
+        averageSeconds:
+          type: number
+          minimum: 0
+        maximumSeconds:
+          type: number
+          minimum: 0
+        p95Seconds:
+          type: number
+          minimum: 0
+    EconomyStateMetric:
+      type: object
+      additionalProperties: false
+      required: [count, latency]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        latency:
+          $ref: "#/components/schemas/EconomyLatencyMetric"
+    EconomyStateMetricMap:
+      type: object
+      description: Lower-case durable state name mapped to current count and state latency.
+      additionalProperties:
+        $ref: "#/components/schemas/EconomyStateMetric"
+    EconomyQueueObservability:
+      type: object
+      additionalProperties: false
+      required: [ready, pending, capacity, utilizationPercent, oldestAgeSeconds, states]
+      properties:
+        ready:
+          type: boolean
+        pending:
+          type: integer
+          minimum: 0
+        capacity:
+          type: integer
+          minimum: 0
+        utilizationPercent:
+          type: number
+          minimum: 0
+        oldestAgeSeconds:
+          type: [number, "null"]
+          minimum: 0
+        states:
+          type: [object, "null"]
+          additionalProperties:
+            type: integer
+            minimum: 0
+    EconomyUncertainObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - orders
+        - deliveries
+        - deliveryReceipts
+        - partialDeliveryReceipts
+        - resourceSettlements
+        - outbox
+      properties:
+        orders: { type: integer, minimum: 0 }
+        deliveries: { type: integer, minimum: 0 }
+        deliveryReceipts: { type: integer, minimum: 0 }
+        partialDeliveryReceipts: { type: integer, minimum: 0 }
+        resourceSettlements: { type: integer, minimum: 0 }
+        outbox: { type: integer, minimum: 0 }
+    EconomyInvariantObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - ledgerStreamCount
+        - ledgerMismatchCount
+        - settlementCreditMismatchCount
+        - conserved
+      properties:
+        ledgerStreamCount: { type: integer, minimum: 0 }
+        ledgerMismatchCount: { type: integer, minimum: 0 }
+        settlementCreditMismatchCount: { type: integer, minimum: 0 }
+        conserved: { type: boolean }
+    EconomyIdentityObservability:
+      type: object
+      additionalProperties: false
+      description: Aggregate counts only; no identity or identity fingerprint is exported.
+      required:
+        - structuralConflictCount
+        - lifetimeRejectedConflictCount
+        - recentRejectedConflictCount
+        - windowMinutes
+        - consistent
+      properties:
+        structuralConflictCount: { type: integer, minimum: 0 }
+        lifetimeRejectedConflictCount: { type: integer, minimum: 0 }
+        recentRejectedConflictCount: { type: integer, minimum: 0 }
+        windowMinutes: { type: integer, minimum: 1 }
+        consistent: { type: boolean }
+    EconomyRuntimeDependencyObservability:
+      type: object
+      additionalProperties: false
+      description: Stable blocker codes only; exception messages and dependency addresses are not exported.
+      required:
+        - consistent
+        - purchaseBlockerCodes
+        - resourceExchangeBlockerCodes
+      properties:
+        consistent:
+          type: boolean
+        purchaseBlockerCodes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Z][A-Z0-9_]+$"
+        resourceExchangeBlockerCodes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Z][A-Z0-9_]+$"
+    EconomyConsistencyObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - consistent
+        - blockerCodes
+        - purchaseBlockerCodes
+        - resourceExchangeBlockerCodes
+        - gameVersion
+        - nativeConnected
+        - nativeProtocolVersion
+        - nativeGameBuild
+        - nativeModVersion
+      properties:
+        consistent:
+          type: boolean
+        blockerCodes:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        purchaseBlockerCodes:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        resourceExchangeBlockerCodes:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        gameVersion:
+          type: [string, "null"]
+        nativeConnected:
+          type: boolean
+        nativeProtocolVersion:
+          type: [string, "null"]
+        nativeGameBuild:
+          type: [string, "null"]
+        nativeModVersion:
+          type: [string, "null"]
+    EconomyBackupAgeObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - latestCreatedAt
+        - ageSeconds
+        - maximumAgeSeconds
+        - requiredForWrites
+        - fresh
+      properties:
+        available: { type: boolean }
+        latestCreatedAt:
+          type: [string, "null"]
+          format: date-time
+        ageSeconds:
+          type: [number, "null"]
+          minimum: 0
+        maximumAgeSeconds:
+          type: number
+          minimum: 1
+        requiredForWrites: { type: boolean }
+        fresh: { type: boolean }
+    EconomyObservabilityAlert:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - severity
+        - active
+        - autoCircuit
+        - affects
+        - value
+        - threshold
+        - message
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]+$"
+        severity:
+          type: string
+          enum: [warning, critical]
+        active:
+          type: boolean
+        autoCircuit:
+          type: boolean
+        affects:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [purchase, resourceExchange]
+        value:
+          type: [number, "null"]
+        threshold:
+          type: [number, "null"]
+        message:
+          type: string
+    EconomyCircuitObservability:
+      type: object
+      additionalProperties: false
+      description: Circuit status without the free-text operator reason or identity.
+      required: [writesEnabled, updatedAt, source]
+      properties:
+        writesEnabled:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+          enum: [manual, automatic]
+    EconomyCircuitsObservability:
+      type: object
+      additionalProperties: false
+      required: [purchase, resourceExchange]
+      properties:
+        purchase:
+          $ref: "#/components/schemas/EconomyCircuitObservability"
+        resourceExchange:
+          $ref: "#/components/schemas/EconomyCircuitObservability"
+    EconomyObservabilitySnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - status
+        - collectedAt
+        - gameplayMode
+        - orders
+        - resourceSettlements
+        - deliveries
+        - deliveryQueue
+        - resourceSettlementQueue
+        - outbox
+        - uncertain
+        - ledger
+        - identity
+        - dependencyConsistency
+        - versionConsistency
+        - worldConsistency
+        - gameBackup
+        - economyBackup
+        - circuits
+        - alerts
+        - collectionErrorCode
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        status:
+          type: string
+          enum: [healthy, warning, critical]
+        collectedAt:
+          type: string
+          format: date-time
+        gameplayMode:
+          type: string
+          const: weekly-resource-economy
+        orders:
+          $ref: "#/components/schemas/EconomyStateMetricMap"
+        resourceSettlements:
+          $ref: "#/components/schemas/EconomyStateMetricMap"
+        deliveries:
+          $ref: "#/components/schemas/EconomyStateMetricMap"
+        deliveryQueue:
+          $ref: "#/components/schemas/EconomyQueueObservability"
+        resourceSettlementQueue:
+          $ref: "#/components/schemas/EconomyQueueObservability"
+        outbox:
+          $ref: "#/components/schemas/EconomyQueueObservability"
+        uncertain:
+          $ref: "#/components/schemas/EconomyUncertainObservability"
+        ledger:
+          $ref: "#/components/schemas/EconomyInvariantObservability"
+        identity:
+          $ref: "#/components/schemas/EconomyIdentityObservability"
+        dependencyConsistency:
+          $ref: "#/components/schemas/EconomyRuntimeDependencyObservability"
+        versionConsistency:
+          $ref: "#/components/schemas/EconomyConsistencyObservability"
+        worldConsistency:
+          $ref: "#/components/schemas/EconomyConsistencyObservability"
+        gameBackup:
+          $ref: "#/components/schemas/EconomyBackupAgeObservability"
+        economyBackup:
+          $ref: "#/components/schemas/EconomyBackupAgeObservability"
+        circuits:
+          $ref: "#/components/schemas/EconomyCircuitsObservability"
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyObservabilityAlert"
+        collectionErrorCode:
+          type: [string, "null"]
+          pattern: "^[A-Z][A-Z0-9_]+$"
+    ExtractionWriteCapabilities:
+      type: object
+      additionalProperties: false
+      required: [purchase, resourceExchange]
+      properties:
+        purchase:
+          $ref: "#/components/schemas/ExtractionWriteCapability"
+        resourceExchange:
+          $ref: "#/components/schemas/ExtractionWriteCapability"
+    ExtractionCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        - gameplayMode
+        - readReady
+        - maintenance
+        - writes
+        - evaluatedAt
+      properties:
+        gameplayMode:
+          type: string
+          const: weekly-resource-economy
+        readReady:
+          type: boolean
+        maintenance:
+          type: boolean
+        writes:
+          $ref: "#/components/schemas/ExtractionWriteCapabilities"
+        evaluatedAt:
+          type: string
+          format: date-time
     ExtractionCurrency:
       type: string
       enum: [merchantCoin, weeklyTicket]
@@ -5608,6 +7183,227 @@ components:
         persistence:
           type: string
           const: sqlite-event-store
+    NewPlayerActivityKey:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"
+    NewPlayerActivityRewards:
+      type: object
+      additionalProperties: false
+      required: [merchantCoin, weeklyTicket]
+      properties:
+        merchantCoin:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        weeklyTicket:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+    NewPlayerActivityDefinition:
+      type: object
+      additionalProperties: false
+      required: [title, description, marketCoin, seasonVoucher]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        marketCoin:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        seasonVoucher:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+    UpdateNewPlayerActivityDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [title, description, marketCoin, seasonVoucher, expectedRevision]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        marketCoin:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        seasonVoucher:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+    NewPlayerActivity:
+      type: object
+      additionalProperties: false
+      required:
+        - activityId
+        - activityKey
+        - version
+        - state
+        - title
+        - description
+        - rewards
+        - revision
+        - createdBy
+        - createdAt
+        - publishedSeasonId
+        - publishedWorldId
+        - publishedBy
+        - publishedAt
+        - closedBy
+        - closedAt
+      properties:
+        activityId:
+          type: string
+          format: uuid
+        activityKey:
+          $ref: "#/components/schemas/NewPlayerActivityKey"
+        version:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [draft, published, closed]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        rewards:
+          $ref: "#/components/schemas/NewPlayerActivityRewards"
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        publishedSeasonId:
+          type: [string, "null"]
+          format: uuid
+        publishedWorldId:
+          type: [string, "null"]
+          pattern: "^[A-Fa-f0-9]{32}$"
+        publishedBy:
+          type: [string, "null"]
+        publishedAt:
+          type: [string, "null"]
+          format: date-time
+        closedBy:
+          type: [string, "null"]
+        closedAt:
+          type: [string, "null"]
+          format: date-time
+    NewPlayerActivityList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NewPlayerActivity"
+    NewPlayerActivityGrant:
+      type: object
+      additionalProperties: false
+      required:
+        - grantId
+        - activityId
+        - activityKey
+        - activityVersion
+        - seasonId
+        - worldId
+        - rewards
+        - balancesAfter
+        - claimedAt
+      properties:
+        grantId:
+          type: string
+          format: uuid
+        activityId:
+          type: string
+          format: uuid
+        activityKey:
+          $ref: "#/components/schemas/NewPlayerActivityKey"
+        activityVersion:
+          type: integer
+          minimum: 1
+        seasonId:
+          type: string
+          format: uuid
+        worldId:
+          type: string
+          pattern: "^[A-Fa-f0-9]{32}$"
+        rewards:
+          $ref: "#/components/schemas/NewPlayerActivityRewards"
+        balancesAfter:
+          $ref: "#/components/schemas/ExtractionBalances"
+        claimedAt:
+          type: string
+          format: date-time
+    NewPlayerActivityAvailability:
+      type: object
+      additionalProperties: false
+      required: [activity, claimed, grant]
+      properties:
+        activity:
+          $ref: "#/components/schemas/NewPlayerActivity"
+        claimed:
+          type: boolean
+        grant:
+          oneOf:
+            - $ref: "#/components/schemas/NewPlayerActivityGrant"
+            - type: "null"
+    NewPlayerActivityAvailabilityList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NewPlayerActivityAvailability"
+    NewPlayerActivityClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [activity, grant, balances, created, idempotentReplay]
+      properties:
+        activity:
+          $ref: "#/components/schemas/NewPlayerActivity"
+        grant:
+          $ref: "#/components/schemas/NewPlayerActivityGrant"
+        balances:
+          $ref: "#/components/schemas/ExtractionBalances"
+        created:
+          type: boolean
+        idempotentReplay:
+          type: boolean
     ExtractionProductPrice:
       type: object
       additionalProperties: false
@@ -6029,18 +7825,22 @@ components:
         confirmation:
           type: string
           description: Exact RUN-{runId:N}-{FAILED|SETTLED} operator confirmation.
-    ExtractionRconStatus:
+    ExtractionSettlementStatus:
       type: object
       additionalProperties: false
-      required: [enabled, connected, outcome, error]
+      required: [adapter, enabled, connected, outcome, error]
       properties:
+        adapter:
+          type: string
+          enum: [native, development-rcon]
+          description: Production uses Native; development-rcon is an explicit development-only compatibility path.
         enabled:
           type: boolean
         connected:
           type: boolean
         outcome:
           type: string
-          enum: [disabled, success, failed, uncertain]
+          enum: [success, failed, uncertain]
         error:
           oneOf:
             - $ref: "#/components/schemas/ApiError"
@@ -6189,6 +7989,270 @@ components:
           type: integer
           format: int64
           minimum: 1
+    EconomyPendingTransaction:
+      type: object
+      additionalProperties: false
+      required: [kind, id, state, updatedAt]
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+        state:
+          type: string
+        updatedAt:
+          type: [string, "null"]
+          format: date-time
+    EconomySnapshotFile:
+      type: object
+      additionalProperties: false
+      required: [relativePath, role, bytes, sha256]
+      properties:
+        relativePath:
+          type: string
+        role:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+    EconomySnapshotManifest:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - backupId
+        - serverId
+        - worldId
+        - createdAt
+        - lastEconomySequence
+        - sqliteUserVersion
+        - walLogFrames
+        - walCheckpointedFrames
+        - pendingTransactions
+        - files
+        - contentHash
+        - rpoMinutes
+        - targetRtoMinutes
+        - idempotencyKeyHash
+      properties:
+        schemaVersion:
+          type: integer
+          minimum: 1
+        backupId:
+          type: string
+        serverId:
+          type: string
+        worldId:
+          type: string
+          pattern: "^[A-F0-9]{32}$"
+        createdAt:
+          type: string
+          format: date-time
+        lastEconomySequence:
+          type: integer
+          format: int64
+          minimum: 0
+        sqliteUserVersion:
+          type: integer
+          minimum: 0
+        walLogFrames:
+          type: integer
+          minimum: 0
+        walCheckpointedFrames:
+          type: integer
+          minimum: 0
+        pendingTransactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyPendingTransaction"
+        files:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EconomySnapshotFile"
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        rpoMinutes:
+          type: integer
+          minimum: 1
+        targetRtoMinutes:
+          type: integer
+          minimum: 5
+        idempotencyKeyHash:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+    WeeklyRolloverStep:
+      type: string
+      enum:
+        - Preflight
+        - Drain
+        - GameBackup
+        - EconomyBackup
+        - Stop
+        - NewWorld
+        - Probe
+        - Commit
+        - Reopen
+        - Completed
+    WeeklyRolloverEvidence:
+      type: object
+      additionalProperties: false
+      required: [verified, evidenceType, evidenceReference, evidenceHash]
+      properties:
+        verified:
+          type: boolean
+        evidenceType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        evidenceReference:
+          type: string
+          minLength: 1
+          maxLength: 256
+        evidenceHash:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+        observedWorldId:
+          type: [string, "null"]
+          pattern: "^[A-Fa-f0-9]{32}$"
+        blockingTransactions:
+          type: integer
+          minimum: 0
+          default: 0
+        allGatesPassed:
+          type: boolean
+          default: false
+        blockerCodes:
+          type: [array, "null"]
+          items:
+            type: string
+    WeeklyRolloverOperation:
+      type: object
+      additionalProperties: true
+      required:
+        - operationId
+        - serverId
+        - fromSeasonId
+        - fromWorldId
+        - targetWorldId
+        - rulesVersion
+        - currentStep
+        - revision
+        - newSeasonCommitted
+        - completedSteps
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+        fromSeasonId:
+          type: string
+          format: uuid
+        fromWorldId:
+          type: string
+          pattern: "^[A-F0-9]{32}$"
+        targetWorldId:
+          type: string
+          pattern: "^[A-F0-9]{32}$"
+        rulesVersion:
+          type: string
+        currentStep:
+          $ref: "#/components/schemas/WeeklyRolloverStep"
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        newSeasonCommitted:
+          type: boolean
+        completedSteps:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    WeeklyRolloverResponse:
+      type: object
+      additionalProperties: false
+      required: [operation, requiredStepKey]
+      properties:
+        operation:
+          $ref: "#/components/schemas/WeeklyRolloverOperation"
+        requiredStepKey:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+    SeasonRewardGrant:
+      type: object
+      additionalProperties: false
+      required: [accountId, currency, targetSeasonId, amount, rewardKey]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        currency:
+          type: string
+          enum: [MarketCoin, SeasonVoucher]
+        targetSeasonId:
+          type: [string, "null"]
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        rewardKey:
+          type: string
+          minLength: 1
+          maxLength: 64
+    SeasonSettlementJob:
+      type: object
+      additionalProperties: true
+      required:
+        - jobId
+        - kind
+        - sourceSeasonId
+        - rulesVersion
+        - frameworkVersion
+        - jobKey
+        - payloadHash
+        - state
+        - revision
+        - items
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [SeasonVoucherExpiry, Reward]
+        sourceSeasonId:
+          type: string
+          format: uuid
+        rulesVersion:
+          type: string
+        frameworkVersion:
+          type: string
+        jobKey:
+          type: string
+        payloadHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        state:
+          type: string
+          enum: [Prepared, Running, Completed]
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
     ApiError:
       type: object
       required: [code, message]
@@ -6199,4 +8263,5 @@ components:
           type: string
         traceId:
           type: [string, "null"]
-security: []
+security:
+  - adminApiKey: []

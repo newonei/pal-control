@@ -12,6 +12,6 @@
     "cmake": "3.31.6",
     "rustc": "1.97.0",
     "msvc": "19.44.35217",
-    "palControlNativeDllSha256": "a367645b1a55f5431c50a6c43ca032632d879568f22b09c0580f1352833aaecb"
+    "palControlNativeDllSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
   }
 }

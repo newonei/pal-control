@@ -1,7 +1,7 @@
 # Pal Control MOD 能力与接口维护手册
 
 > 适用项目：幻兽商域 Palworld Windows Dedicated Server 控制台
-> 文档基线日期：2026-07-11
+> 文档基线日期：2026-07-15
 > Control API 协议：HTTP JSON + SSE
 > Native Bridge 协议：Named Pipe `1.0`
 
@@ -13,10 +13,10 @@
 | --- | --- | --- |
 | 服务器名称 | `幻兽商域` | 来自官方 REST `/info` |
 | 游戏版本 | `v1.0.0.100427` | Native 适配目标版本 |
-| 当前进程已加载 MOD | `0.3.0-dev.35` | Bridge `/status` 已于 2026-07-12 验证 |
-| 源码声明版本 | `0.3.0-dev.35` | 含实验性 `inventory.consume` 与只读公开撤离点聊天查询 |
-| 服务器磁盘 DLL | `0.3.0-dev.35` | SHA-256 `A64676FC...D00EEDE` |
-| `Info.template.json` | `0.3.0-dev.35` | 与当前源码、Workshop staging 和运行 DLL 一致 |
+| 当前进程已加载 MOD | `0.3.0-dev.36` | Bridge 只读探针已于 2026-07-15 验证 |
+| 源码声明版本 | `0.3.0-dev.36` | 含受限静态槽清空的实验性 `inventory.consume` 与只读公开撤离点聊天查询 |
+| 服务器磁盘 DLL | `0.3.0-dev.36` | SHA-256 `6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A` |
+| `Info.template.json` | `0.3.0-dev.36` | 与当前源码和运行 DLL 版本一致；尚未据此发布 Workshop 包 |
 | Native 协议 | `1.0` | 长度前缀 UTF-8 JSON |
 | Control API | `http://127.0.0.1:5180` | 仅回环地址 |
 | Web 控制台 | `http://127.0.0.1:5174` | 当前主开发端口 |
@@ -29,8 +29,8 @@
 
 ### 当前开发模式约定
 
-1. 当前运行服、磁盘 DLL、源码和 Workshop staging 均为 `0.3.0-dev.35`；Bridge 已验证连接，UE4SS 日志已确认只读 `!撤离` 与 `!extract` 公开聊天别名 Hook 注册成功。Palworld 保留 `/` 给管理员命令，不能向普通玩家宣传 `/撤离`。能力判断仍以 Bridge `/status` 和运行日志为准；`inventory.consume.experimental` 仍不得在缺少独立结算验收时用于公开经济入账。
-2. 当前属于开发模式，PalServer 需要重启时可直接停止并重新启动，不要求额外执行保存或正常关服流程。
+1. 当前运行服、磁盘 DLL、源码和模板均为 `0.3.0-dev.36`；Bridge 已验证连接、完整槽元数据可读且不再声明 `inventory.consume.partial-stack-only`。Palworld 保留 `/` 给管理员命令，不能向普通玩家宣传 `/撤离`。`inventory.consume.experimental` 尚未经过“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收，仍不得用于公开经济入账。
+2. 即使处于开发模式，PalServer 重启也必须先确认无人在线，再通过官方 REST 保存和正常关服；禁止为替换 DLL 强杀进程。
 3. 客户端浮层只读探针已验证 `PalGameStateInGame:BroadcastServerNotice` 的参数区为 16 字节、FunctionFlags 为 `0x24CC0`，`publishClientOverlay=true`。
 
 ## 2. 系统结构
@@ -50,7 +50,7 @@ flowchart LR
 安全边界：
 
 - 浏览器只能调用 Control API。
-- Control API 当前没有独立登录认证，因此绝对不能直接暴露到公网。
+- Control API 管理域使用独立 API Key、RBAC 与高风险 TOTP，但仍绝对不能直接暴露到公网。
 - 官方 REST 凭据只保存在本机 `appsettings.Local.json`，不要提交到版本库。
 - Native MOD 不监听 TCP；只创建本机 Named Pipe。
 - 所有 Unreal UObject 查询与修改都在 `UEngine::Tick` 游戏线程执行。
@@ -63,7 +63,7 @@ pal-control/
 ├─ services/control-api/             ASP.NET Core Control API
 │  ├─ appsettings.json               非敏感默认配置
 │  ├─ appsettings.Local.json         本机密码等敏感配置，禁止提交
-│  └─ data/                          公告事件、命令队列和审计 JSONL
+│  └─ data/                          SQLite 经济/发货 outbox、非经济命令 side state 与审计
 ├─ mods/pal-control-native/          UE4SS C++ MOD 源码
 ├─ packages/contracts/               HTTP 与 Named Pipe 契约
 ├─ deploy/windows/                   Windows 启动与部署示例
@@ -108,8 +108,8 @@ C:\PalServerRuntime\Pal\Binaries\Win64\ue4ss\UE4SS.log
 | 客户端浮层 | `PalGameStateInGame:BroadcastServerNotice` | 可用 | 发布前可调用只读兼容性探针；无逐客户端 ACK |
 | 公告持久化 | 草稿、排期、幂等队列、审计 | 可用 | 不确定结果禁止自动重发 |
 | 在线地图 | 实时显示在线玩家位置 | 可用 | 每秒读取官方 REST；不包含离线玩家 |
-| 玩家撤离地图 | 本人位置、撤离点、范围圈、距离和路线 | 可用 | `/api/v1/player/me/extraction-zones`；身份只取玩家会话，每 5 秒刷新 |
-| 撤离点聊天查询 | 普通玩家 `!撤离`、`!extract`（兼容无前缀文本） | 可用 | 只回复发起者；2 秒限流；`/` 是管理员前缀；坐标配置变更后需要同步重编 Native MOD |
+| 玩家资源兑换点地图 | 本人位置、兑换点、范围圈、距离和路线 | 可用 | 兼容路径 `/api/v1/player/me/extraction-zones`；身份只取玩家会话，每 5 秒刷新 |
+| 资源兑换点聊天查询 | 普通玩家兼容别名 `!撤离`、`!extract`（兼容无前缀文本） | 可用 | 只回复发起者；2 秒限流；`/` 是管理员前缀；坐标配置变更后需要同步重编 Native MOD |
 | 存档管理 | 保存、原生备份只读目录、独立备份与 SHA-256 校验 | 可用 | 不支持恢复、删除、上传和原始 `.sav` 编辑 |
 
 ## 5. HTTP API 通用约定
@@ -120,9 +120,14 @@ C:\PalServerRuntime\Pal\Binaries\Win64\ue4ss\UE4SS.log
 $BaseUrl = "http://127.0.0.1:5180"
 $Api = "$BaseUrl/api/v1"
 $ServerId = "local"
+$AdminApiKey = Read-Host "Control API 管理密钥" -AsSecureString
+$AdminCredential = [pscredential]::new("operator", $AdminApiKey)
+$AdminHeaders = @{
+  "X-Pal-Admin-Key" = $AdminCredential.GetNetworkCredential().Password
+}
 ```
 
-除 `/health/*` 外，所有业务接口都带 `/api/v1` 前缀。
+除 `/health/*` 外，所有业务接口都带 `/api/v1` 前缀并要求管理员身份。密钥只从密码管理器输入当前 `SecureString` 提示；不要写进脚本、命令参数、仓库或截图。高风险端点还要求对应角色、`X-Pal-Admin-Totp` 和 `X-Pal-Admin-Reason`，具体以运行手册和 OpenAPI 为准。
 
 ### 5.2 写接口公共要求
 
@@ -139,7 +144,8 @@ $ServerId = "local"
 推荐生成幂等键：
 
 ```powershell
-$Headers = @{
+$Headers = $AdminHeaders.Clone()
+$Headers += @{
   "Content-Type" = "application/json"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
@@ -232,7 +238,7 @@ $Headers = @{
 ### 7.1 查看当前能力
 
 ```powershell
-Invoke-RestMethod "$Api/servers/local/capabilities" |
+Invoke-RestMethod "$Api/servers/local/capabilities" -Headers $AdminHeaders |
   ConvertTo-Json -Depth 8
 ```
 
@@ -251,7 +257,7 @@ publishClientOverlay
 ### 7.2 查看当前实际 MOD 版本
 
 ```powershell
-Invoke-RestMethod "$Api/servers/local/bridge/status" |
+Invoke-RestMethod "$Api/servers/local/bridge/status" -Headers $AdminHeaders |
   Select-Object connected, protocolVersion, gameBuild, modVersion,
     capabilities, probes, lastSeenAt, lastError
 ```
@@ -259,8 +265,8 @@ Invoke-RestMethod "$Api/servers/local/bridge/status" |
 ### 7.3 玩家与指标
 
 ```powershell
-$Players = Invoke-RestMethod "$Api/servers/local/players"
-$Metrics = Invoke-RestMethod "$Api/servers/local/metrics"
+$Players = Invoke-RestMethod "$Api/servers/local/players" -Headers $AdminHeaders
+$Metrics = Invoke-RestMethod "$Api/servers/local/metrics" -Headers $AdminHeaders
 $Players.items
 $Metrics
 ```
@@ -268,7 +274,7 @@ $Metrics
 ### 7.4 读取帕鲁技能目录
 
 ```powershell
-$Catalog = Invoke-RestMethod "$Api/servers/local/pals/skill-catalog"
+$Catalog = Invoke-RestMethod "$Api/servers/local/pals/skill-catalog" -Headers $AdminHeaders
 $Catalog.passiveSkills |
   Where-Object { -not $_.internal } |
   Select-Object id, name, description, rank, polarity, effects
@@ -303,7 +309,8 @@ $Catalog.passiveSkills |
 ```powershell
 $PlayerId = "<OwnerPlayerUId 或 8 位短 UID>"
 $Progression = Invoke-RestMethod `
-  "$Api/servers/local/players/$PlayerId/progression"
+  "$Api/servers/local/players/$PlayerId/progression" `
+  -Headers $AdminHeaders
 $Progression | ConvertTo-Json -Depth 8
 ```
 
@@ -318,7 +325,8 @@ $Progression | ConvertTo-Json -Depth 8
 增加经验的预演请求：
 
 ```powershell
-$Headers = @{
+$Headers = $AdminHeaders.Clone()
+$Headers += @{
   "Content-Type" = "application/json"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
@@ -364,7 +372,7 @@ StatusName_AddCaptureLevel
 
 ```powershell
 $PlayerId = "<ownerPlayerUId 或 playerId>"
-$Inventory = Invoke-RestMethod "$Api/servers/local/players/$PlayerId/inventory"
+$Inventory = Invoke-RestMethod "$Api/servers/local/players/$PlayerId/inventory" -Headers $AdminHeaders
 $Inventory.containers | ForEach-Object {
   $_.slots | Select-Object @{n="containerKind";e={$_.PSParentPath}}, slotId, itemId, quantity
 }
@@ -383,7 +391,8 @@ $Inventory.containers | ForEach-Object {
 
 ```powershell
 $PlayerId = "<ownerPlayerUId>"
-$Headers = @{
+$Headers = $AdminHeaders.Clone()
+$Headers += @{
   "Content-Type" = "application/json"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
@@ -432,7 +441,7 @@ Invoke-RestMethod `
 读取全部已加载帕鲁：
 
 ```powershell
-$Probe = Invoke-RestMethod "$Api/servers/local/pals/native-probe"
+$Probe = Invoke-RestMethod "$Api/servers/local/pals/native-probe" -Headers $AdminHeaders
 $Probe.pals | Select-Object instanceId, ownerPlayerUId, characterId,
   nickname, level, rank, exp, passiveSkills, activeSkills, revision
 ```
@@ -441,7 +450,7 @@ $Probe.pals | Select-Object instanceId, ownerPlayerUId, characterId,
 
 ```powershell
 $PlayerId = "<ownerPlayerUId>"
-Invoke-RestMethod "$Api/servers/local/players/$PlayerId/pals"
+Invoke-RestMethod "$Api/servers/local/players/$PlayerId/pals" -Headers $AdminHeaders
 ```
 
 帕鲁 `revision` 在 HTTP 返回中是字符串，调用写接口时不要转成 JavaScript Number，避免 64 位整数精度丢失。
@@ -453,7 +462,8 @@ $PlayerId = "<ownerPlayerUId>"
 $InstanceId = "<pal-instance-id>"
 $Revision = "<刚读取的 revision 字符串>"
 
-$Headers = @{
+$Headers = $AdminHeaders.Clone()
+$Headers += @{
   "Content-Type" = "application/json"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
@@ -560,7 +570,8 @@ $Body = @{
 ### 10.1 创建公告草稿
 
 ```powershell
-$Headers = @{
+$Headers = $AdminHeaders.Clone()
+$Headers += @{
   "Content-Type" = "application/json"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
@@ -595,7 +606,8 @@ $Announcement = Invoke-RestMethod `
 ### 10.2 发布公告
 
 ```powershell
-$PublishHeaders = @{
+$PublishHeaders = $AdminHeaders.Clone()
+$PublishHeaders += @{
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
 
@@ -604,7 +616,7 @@ $Command = Invoke-RestMethod `
   -Uri "$Api/servers/local/announcements/$($Announcement.announcementId)/publish" `
   -Headers $PublishHeaders
 
-Invoke-RestMethod "$BaseUrl$($Command.statusUrl)"
+Invoke-RestMethod "$BaseUrl$($Command.statusUrl)" -Headers $AdminHeaders
 ```
 
 公告命令状态：
@@ -789,23 +801,44 @@ dotnet build .\services\control-api\PalControl.ControlApi.csproj `
 
 ### 14.3 Native MOD
 
-```powershell
-$Root = (Resolve-Path .).Path
-$MsBuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe"
-$Solution = "$Root\third_party\UE4SSCPPTemplate\build-palcontrol\MyCPPMods.sln"
+Native 构建必须使用 `mods/pal-control-native/dependencies.lock.json` 锁定的 UE4SS
+提交。构建入口不会为调用者 clone、fetch 或 checkout UE4SS，也不会复制 DLL、停止或重启
+PalServer。执行前应准备完整的 UE4SS 子模块，并在其
+`cppmods/CMakeLists.txt` 中接入指向当前源码的 `PalControlNative` 目录。
+上游 UE4SS CMake 在首次生成独立构建目录时，仍可能在该目录内下载其自身锁定的第三方
+编译依赖。
 
-& $MsBuild $Solution `
-  /m `
-  /p:Configuration=Game__Shipping__Win64 `
-  /p:Platform=x64 `
-  /verbosity:minimal
+```powershell
+Set-Location "C:\src\pal-control"
+
+.\mods\pal-control-native\scripts\Build-PalControlNative.ps1 `
+  -Ue4ssRoot .\third_party\RE-UE4SS-Palworld-c2ac246
 ```
 
-输出文件：
+脚本会同时校验：
+
+- `RE-UE4SS` 当前 HEAD 必须等于锁文件中的完整 `sourceCommit`；
+- `deps/first/Unreal` 当前 HEAD 必须等于该 UE4SS 提交记录的 gitlink；
+- UE4SS 的 `cppmods/PalControlNative` 必须与仓库中的 Native 源码一致；
+- CMake、Rust 版本必须等于锁文件版本。
+
+任一版本不符都会立即失败，且不会替调用者切换版本。只检查依赖和源码接入、不执行
+CMake 时可使用：
+
+```powershell
+.\mods\pal-control-native\scripts\Build-PalControlNative.ps1 `
+  -Ue4ssRoot .\third_party\RE-UE4SS-Palworld-c2ac246 `
+  -GuardOnly
+```
+
+默认使用按 UE4SS commit 隔离且位于 UE4SS 源码树外的构建目录。输出文件：
 
 ```text
-third_party\RE-UE4SS-Palworld-c2ac246\build-palcontrol\Game__Shipping__Win64\bin\PalControlNative.dll
+.agent-build\native\pal-control-native-c2ac246447a8\Game__Shipping__Win64\bin\PalControlNative.dll
 ```
+
+重复执行同一命令会复用这个提交专属的 CMake 缓存并进行增量构建。若显式传入
+`-BuildDirectory`，脚本仍会拒绝 UE4SS 源码树内部的目录以及来源不一致的旧缓存。
 
 ### 14.4 发布 Native MOD
 
@@ -845,7 +878,7 @@ Get-CimInstance Win32_Process |
 ### Bridge 未连接
 
 ```powershell
-Invoke-RestMethod "$Api/servers/local/bridge/status"
+Invoke-RestMethod "$Api/servers/local/bridge/status" -Headers $AdminHeaders
 Get-Content C:\PalServerRuntime\Pal\Binaries\Win64\ue4ss\UE4SS.log -Tail 200
 ```
 
@@ -862,7 +895,7 @@ Get-Content C:\PalServerRuntime\Pal\Binaries\Win64\ue4ss\UE4SS.log -Tail 200
 页面首次加载可能早于 API/Bridge 握手，等待 1–2 秒或刷新页面。也可验证 Vite 代理：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:5174/api/v1/servers/local/capabilities
+Invoke-RestMethod http://127.0.0.1:5174/api/v1/servers/local/capabilities -Headers $AdminHeaders
 ```
 
 ### 帕鲁或背包列表为空
@@ -940,15 +973,15 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 
 ## 18. 当前已知限制与后续维护方向
 
-- Control API 尚未接入登录认证和 RBAC，只能本机访问。
+- Control API 已接入独立管理员 API Key、五级 RBAC、高风险 TOTP 与持久审计，并继续强制仅本机访问；玩家 Cookie 不属于管理身份。
 - 当前读取的是运行时已加载对象，不是完整离线存档索引。
-- Native 槽位编辑仍不能新增物品或清空普通槽位；PalDefender 已提供发放物品，摸金模块另以白名单 RCON `delitems` 回收撤离战利品。装备耐久和任意容器编辑仍未开放。
+- Native 通用槽位编辑仍不能新增物品；资源兑换专用 `inventory.consume` 可以减少既有普通静态堆叠，并在完整动态元数据可验证时安全清空最后一件。动态/腐化槽位、装备耐久和任意容器编辑仍未开放；发放物品继续使用 PalDefender 结构化 grant receipt。
 - 帕鲁等级、Rank、IV 和主动技能学习保持只读。
 - 中文目录中的内部技能可能不适合普通帕鲁，网页默认隐藏。
 - 客户端浮层没有逐客户端应用层 ACK；Native 成功表示可靠多播 RPC 已在游戏线程调用，实际显示仍以客户端观察为准。
 - MOD 管理和通用日志审计页面仍有未接入入口；在线地图与存档中心已经接入。
-- REST `8212` 当前由防火墙规则 `Palworld REST API - Block all inbound TCP 8212` 阻止入站连接，而不是 PalServer 只绑定回环地址；Domain、Private、Public 三个防火墙配置文件均已启用，Windows loopback 探针已通过，修改规则或网卡类别时必须重新核对。
-- RCON `25575/TCP` 当前为摸金撤离启用且监听 `0.0.0.0`，依赖 Windows 防火墙规则 `Palworld RCON - Block all inbound TCP 25575` 在所有配置文件阻断入站连接；Windows loopback 不经过该过滤且本机探针已通过。严禁外网映射。
+- Palworld 的 REST `8212/TCP` 可能监听 `0.0.0.0`；Control API 使用 loopback 地址并不等于远程隔离。每次部署都必须确认 Windows 防火墙没有对 PalServer 放行该 TCP 端口，且路由器/云安全组没有映射。
+- 可选 RCON `25575/TCP` 同样可能监听所有接口，只能用于 Development 诊断或人工应急；必须阻断所有远程入站并严禁外网映射。正式资源兑换不依赖 RCON。
 
 ## 19. 源码定位
 
@@ -970,35 +1003,37 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 | 帕鲁管理界面 | `apps/console-web/src/features/pals/PalPanel.tsx` |
 | 存档中心界面 | `apps/console-web/src/features/saves/SaveManagement.tsx` |
 | 技能选择弹窗 | `apps/console-web/src/features/pals/PassiveSkillPicker.tsx` |
-| 玩家撤离地图 | `apps/player-web/src/ExtractionMap.tsx` |
+| 玩家资源兑换点地图 | `apps/player-web/src/ExtractionMap.tsx` |
 | HTTP OpenAPI 草案 | `packages/contracts/openapi/control-api.yaml` |
 | Pipe JSON Schema | `packages/contracts/bridge/message.schema.json` |
 
-## 20. 摸金搜打撤能力快照（2026-07-12）
+## 20. 周世界资源经济能力快照（2026-07-15）
 
 完整方案、接口和换档手册见 [`extraction-mode/README.md`](../extraction-mode/README.md)。当前本机实现包括：
 
+- 产品已由 ADR-0001 固定为方案 A：当前周世界允许容器中的任意白名单资源都可出售，不建立逐局行动、死亡结算或战利品来源归因。
 - 每周世界档、每日 `04:00` 确定性轮换价；永久商域币和当前周战备券分账。
-- 单进程 SQLite 事务事件数据库：账户、赛季、钱包、账本、商品、限购、订单和发货；撤离运行记录使用独立原子快照。旧 JSONL 经济事件首次启动会自动迁移并只读保留。
-- 商城发货前保存背包基线，PalDefender 命令成功后回读实际增量；明确失败自动退款，`uncertain` 不重发不退款。
-- 撤离在配置圆形区域连续采样两次，读取 `Items/Food/DropSlot` 白名单，生成 30 秒价格快照。
-- RCON 适配器没有任意命令入口，只暴露命令探针、`DeleteItemsAsync` 和人工应急容器清理接口；自动流程只调用 `delitems`。
-- 扣物后 REST 数量必须精确等于报价前数量减去报价数量，才以撤离 `runId` 的幂等键增加战备券。
-- PalDefender RCON 当前只返回 `Success.` 而不返回实际删除数量；REST 差值不能排除玩家并发丢弃/转移物品。因此该撤离通道仅限本机开发服，公开经济测试必须改用 Native 同 Tick 原子消费或服务端托管容器。
-- 维护闸门会同时拒绝新订单、报价和结算；readiness 会阻止存在派发中/不确定订单或撤离时换档。
-- [`Invoke-WeeklyRollover.ps1`](../extraction-mode/scripts/Invoke-WeeklyRollover.ps1) 支持只读 `-PlanOnly`、优雅保存停服、生成新 `DedicatedServerName`、启动验证和赛季 worldId 提交。
+- 单进程 `extraction-commerce.db` 承载账户、赛季、钱包、账本、商品、限购、订单、resource settlement、PalDefender command outbox、管理审计与换档调度。旧经济/PalDefender JSONL 仅一次性事务导入，成功后改名保留；公告、通知和 save side state 仍使用非经济 JSONL。
+- 商城以逐物品结构化 receipt 归因发货；同一 `serverId + idempotencyKey` 跨重启返回同一结果，partial/`uncertain` 不重发，dead-letter 会告警并自动关闭购买。扣款/订单与 command accepted 虽在同库，仍是由持久 delivery/receipt 衔接的两个事务，不能宣称一次原子提交。
+- 资源报价在配置圆形区域连续采样两次，读取 `Items/Food/DropSlot` 的完整 Native 槽元数据，为全部白名单资源生成 30 秒整单快照。
+- Production 结算只调用 Native `inventory.consume`：同 Tick 比较完整快照、执行全成或全败扣物、逐行与聚合回读并持久化 run 结果；RCON `/delitems` 只保留为显式 Development 诊断，不能作为生产降级。
+- 当前 Native dev36 只发布 `inventory.consume.experimental` 且 `persistenceVerified=false`。在真实“扣物 → 保存 → 停服 → 重启 → 重登”验收前，生产资源兑换 Safety Gate 必须保持关闭。
+- settlement 使用 lease/CAS、终态单调、同库唯一 credit 和保守恢复；派发后无法证明结果时进入 `uncertain`，不重扣、不入账并等待人工对账。
+- 维护闸门会同时拒绝新订单、报价和结算；readiness 会阻止存在派发中、`uncertain`、dead-letter、过期备份、版本/世界漂移或未终结 settlement 时换档。
+- [`Invoke-WeeklyRollover.ps1`](../extraction-mode/scripts/Invoke-WeeklyRollover.ps1) 默认只读生成计划；显式 `-Execute` 时由服务端持久化的 operation/step key 驱动双备份、优雅停服、冻结目标 `DedicatedServerName`、启动探针、赛季 worldId 提交和恢复。脚本结构性拒绝移动或删除旧世界。
 
-真实验收记录：商城同键重放返回同一订单；新兵补给实际到账；5 个 `Leather` 经 RCON 删除后 REST 槽位归零，战备券从 300 增至 310；相同撤离键重放后余额保持 310。
+自动化已经覆盖身份、商城、SQLite outbox、Native 结算、故障边界、备份和换档客户端。早期真实联调仅证明商城同键重放、新兵补给到账，以及 5 个 `Leather` 经旧 RCON 路径删除后余额唯一增加；该历史记录不能替代当前 Native 持久化、正式域名 Steam 回调或连续 3 次真实周换档验收。
 
 ## 21. 玩家自助商城能力快照（2026-07-12）
 
 玩家入口与运营控制台已经拆分，完整部署、安全和验收资料见 [`docs/player-portal/README.md`](player-portal/README.md)。
 
-- 玩家通过平台 UserId 请求游戏内 8 位验证码；角色必须在线，RCON 必须精确提供 `send:3`，游戏与 PalDefender 版本必须在批准清单中。通知使用受控 UTF-8 中文文本“幻兽商域登录验证码：……。5分钟内有效，请勿向任何人透露。”，RCON 适配层会拒绝控制字符、未批准标点和超长消息。
+- 公网 Steam 服先经官方 OpenID 建立短时待绑定身份；可信好友服可显式使用平台 UserId fallback。两种模式都要求角色在线、RCON 精确提供 `send:3`，且游戏与 PalDefender 版本在批准清单中。通知使用受控 UTF-8 中文文本，RCON 适配层会拒绝控制字符、未批准标点和超长消息。
+- Steam 回调严格校验一次性 state Cookie、官方 OP、claimed ID/identity、精确 HTTPS realm/return_to、签名字段、服务端 `check_authentication` 和有时效 nonce；PublicSteam 即使运行在 Development 也不能使用 fake/HTTP provider。OpenID 成功后仍需验证码实时写入当前 `worldId + PlayerUID` 绑定才签发正式会话。
 - 验证码有效 5 分钟、最多尝试 5 次，只在内存中保存 HMAC 摘要；用户与 IP 双重限流且缓存有硬上限。
 - 验证成功后使用 12 小时随机 `HttpOnly`、`SameSite=Strict` Cookie；服务重启会要求重新登录。
 - 所有 `/api/v1/player/me/*` 身份只来自会话，不接受浏览器指定玩家；全部 POST 校验严格 Origin，业务写操作额外校验 CSRF，购买与结算继续要求幂等键。
-- `GET /api/v1/player/me/extraction-zones` 返回静态撤离点以及当前会话玩家自己的在线位置、最近撤离点、中心/边界距离和范围状态；离线或位置不可用时仍可查看静态地图，不返回其他玩家位置。
-- `apps/player-web` 只包含本人钱包、商城、订单、流水、撤离地图和撤离记录，不加载玩家目录或任何管理员组件。撤离地图每 5 秒更新，并在可靠位置进入范围后显示“已进入撤离区域”。
-- Native MOD 监听原生 `BroadcastChatMessage`，普通玩家输入 `!撤离` 或 `!extract`（兼容直接输入 `撤离`、`extract`）时只通过可靠 `ClientMessage` 向发起者回复两行撤离点情报；`/` 前缀会在该 Hook 之前进入管理员命令解析器；详细验收见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
+- 兼容路径 `GET /api/v1/player/me/extraction-zones` 返回静态资源兑换点以及当前会话玩家自己的在线位置、最近兑换点、中心/边界距离和范围状态；离线或位置不可用时仍可查看静态地图，不返回其他玩家位置。
+- `apps/player-web` 只包含本人钱包、商城、订单、流水、资源兑换点地图和兑换记录，不加载玩家目录或任何管理员组件。地图每 5 秒更新，并在可靠位置进入范围后显示“已进入资源兑换区域”。
+- Native MOD 监听原生 `BroadcastChatMessage`，普通玩家输入兼容别名 `!撤离` 或 `!extract`（兼容直接输入 `撤离`、`extract`）时只通过可靠 `ClientMessage` 向发起者回复两行资源兑换点情报；`/` 前缀会在该 Hook 之前进入管理员命令解析器；详细验收见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
 - 公网 Caddy 只反代 `/api/v1/player/*`；其他 `/api` 直接返回 404。`5174`、`5180`、`8212`、`17993`、`25575` 继续禁止公网映射。

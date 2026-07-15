@@ -1,11 +1,11 @@
 # 游戏内撤离点查询命令
 
 基线版本：Palworld `v1.0.0.100427`、PalDefender `1.8.1`、PalControlNative
-`0.3.0-dev.35`。
+`0.3.0-dev.36`。
 
-本机部署状态（2026-07-12）：运行 DLL、源码与 Workshop staging 均为
-`0.3.0-dev.35`，DLL SHA-256 为
-`A64676FC34175A755702531CF9FE960961807F0FDA69A5DD713774DB1D00EEDE`；Bridge
+本机部署状态（2026-07-15）：运行 DLL、源码与模板均为
+`0.3.0-dev.36`，DLL SHA-256 为
+`6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A`；Bridge
 已连接，`UE4SS.log` 已确认公开聊天别名 Hook 注册成功。仍需由普通玩家在游戏内发送命令，完成
 “只回复发起者”的人工可见性验收。
 

@@ -15,6 +15,8 @@ $playerOverviewPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\PlayerPortalEndpoints.cs"
 $openApiPath = Join-Path $repositoryRoot `
     "packages\contracts\openapi\control-api.yaml"
+$operatorEconomyUiPath = Join-Path $repositoryRoot `
+    "apps\console-web\src\features\extraction\ExtractionCenter.tsx"
 
 function Assert-Contract([bool] $condition, [string] $message) {
     if (-not $condition) {
@@ -143,6 +145,15 @@ Assert-ContainsOrdinal $coordinatorSource `
     'public const string GameplayMode = "weekly-resource-economy";' `
     "the API gameplay mode is not pinned to Scheme A."
 
+$operatorEconomyUi = [IO.File]::ReadAllText($operatorEconomyUiPath, $utf8)
+Assert-ContainsOrdinal $operatorEconomyUi `
+    "Native" `
+    "the operator resource-exchange UI does not describe the Native-only production boundary."
+Assert-Contract ($operatorEconomyUi.IndexOf(
+        "RCON",
+        [StringComparison]::Ordinal) -lt 0) `
+    "the operator UI still advertises RCON as the Scheme A settlement path."
+
 $overviewFields = @(
     "settledExchanges",
     "failedSettlements",
@@ -161,7 +172,31 @@ foreach ($overviewPath in @($adminOverviewPath, $playerOverviewPath)) {
     }
 }
 
+$adminSource = [IO.File]::ReadAllText($adminOverviewPath, $utf8)
+Assert-ContainsOrdinal $adminSource 'group.MapGet("/capabilities"' `
+    "the extraction compatibility capability endpoint is missing."
+Assert-ContainsOrdinal $adminSource "purchase = new" `
+    "purchase does not have an independent write capability."
+Assert-ContainsOrdinal $adminSource "resourceExchange = new" `
+    "resource exchange does not have an independent write capability."
+
 $openApi = [IO.File]::ReadAllText($openApiPath, $utf8)
+Assert-ContainsOrdinal $openApi "  /extraction/capabilities:" `
+    "OpenAPI does not expose the extraction capability compatibility path."
+$capabilitiesSchema = Get-OpenApiSchemaBlock $openApi "ExtractionCapabilities"
+foreach ($field in @("gameplayMode", "readReady", "maintenance", "writes", "evaluatedAt")) {
+    Assert-Contract ([regex]::IsMatch(
+            $capabilitiesSchema,
+            "(?m)^        - $field\s*$")) `
+        "OpenAPI ExtractionCapabilities does not require '$field'."
+}
+$writeCapabilitiesSchema = Get-OpenApiSchemaBlock $openApi "ExtractionWriteCapabilities"
+foreach ($field in @("purchase", "resourceExchange")) {
+    Assert-Contract ([regex]::IsMatch(
+            $writeCapabilitiesSchema,
+            "(?m)^        ${field}:\s*$")) `
+        "OpenAPI ExtractionWriteCapabilities does not define '$field'."
+}
 $statsSchema = Get-OpenApiSchemaBlock $openApi "ExtractionSeasonStats"
 foreach ($field in $overviewFields) {
     Assert-Contract ([regex]::IsMatch(

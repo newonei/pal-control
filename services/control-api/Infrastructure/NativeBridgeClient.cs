@@ -90,7 +90,19 @@ public sealed class NativeBridgeState
     }
 }
 
-public sealed class NativeBridgeClient : BackgroundService
+public interface INativeBridgeCommandTransport
+{
+    Task<NativeBridgeResult> SendCommandAsync(
+        string serverId,
+        string operation,
+        object payload,
+        string reason,
+        CancellationToken cancellationToken,
+        long expectedRevision = 0,
+        string? idempotencyKey = null);
+}
+
+public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommandTransport
 {
     private readonly NativeBridgeOptions _options;
     private readonly NativeBridgeState _state;

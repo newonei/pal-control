@@ -11,6 +11,15 @@ public sealed class ExtractionRconOptions
 {
     public bool Enabled { get; init; }
 
+    /// <summary>
+    /// Enables the legacy /delitems resource-settlement adapter for an
+    /// explicitly isolated local Development diagnostic only. The shared
+    /// runtime policy additionally requires Security:DevelopmentMode=true,
+    /// PlayerPortal:PublicSteam=false, RCON enabled, and Native settlement not
+    /// to be required. It is never a production fallback.
+    /// </summary>
+    public bool AllowDevelopmentSettlement { get; init; }
+
     public string Host { get; init; } = "127.0.0.1";
 
     public int Port { get; init; } = 25575;
@@ -32,6 +41,49 @@ public sealed class ExtractionRconOptions
     /// trailing CR/LF sequence is ignored.
     /// </summary>
     public string? PasswordFile { get; init; }
+
+    public bool IsValid(out string? error)
+    {
+        if (!Enabled)
+        {
+            error = null;
+            return true;
+        }
+        if (!string.Equals(Host, "localhost", StringComparison.OrdinalIgnoreCase) &&
+            (!System.Net.IPAddress.TryParse(Host, out var address) ||
+             !System.Net.IPAddress.IsLoopback(address)))
+        {
+            error = "An enabled extraction RCON adapter must use a loopback host.";
+            return false;
+        }
+        if (Port is < 1 or > 65535 || TimeoutSeconds is < 1 or > 30)
+        {
+            error = "An enabled extraction RCON adapter requires a valid port and a 1-30 second timeout.";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(ApprovedGameVersion) ||
+            string.IsNullOrWhiteSpace(ApprovedPalDefenderVersion) ||
+            ApprovedGameVersion.Length > 128 ||
+            ApprovedPalDefenderVersion.Length > 128)
+        {
+            error = "An enabled extraction RCON adapter requires explicit approved game and PalDefender versions.";
+            return false;
+        }
+        var hasInlinePassword = !string.IsNullOrWhiteSpace(Password);
+        var hasPasswordFile = !string.IsNullOrWhiteSpace(PasswordFile);
+        if (hasInlinePassword == hasPasswordFile)
+        {
+            error = "An enabled extraction RCON adapter requires exactly one password source.";
+            return false;
+        }
+        if (hasPasswordFile && !Path.IsPathRooted(PasswordFile!))
+        {
+            error = "ExtractionMode:Rcon:PasswordFile must be an absolute path when enabled.";
+            return false;
+        }
+        error = null;
+        return true;
+    }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<RconOperationOutcome>))]

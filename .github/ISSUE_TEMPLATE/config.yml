@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私下报告安全漏洞
+    url: https://github.com/newonei/pal-control/security/advisories/new
+    about: 认证绕过、命令执行、存档/经济破坏或敏感数据泄露请勿公开提交。

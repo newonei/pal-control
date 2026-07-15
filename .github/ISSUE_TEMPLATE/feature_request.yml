@@ -1,0 +1,33 @@
+name: 功能建议
+description: 提议与周世界资源经济服定位一致的改进
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述玩家或管理员当前遇到的具体问题。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明预期交互、经济规则和验收方式。
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: 安全与经济影响
+      description: 是否涉及身份、发货、扣物、账本、存档、换档或公网边界？
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 我已阅读 ADR-0001，建议没有把方案 B 的行动/死亡结算语义混入当前 MVP。
+          required: true

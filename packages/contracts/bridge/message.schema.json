@@ -103,8 +103,9 @@
     "inventoryConsumePayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ownerPlayerId", "items", "expectedContainers"],
+      "required": ["snapshotVersion", "ownerPlayerId", "items", "expectedContainers"],
       "properties": {
+        "snapshotVersion": { "const": 1 },
         "ownerPlayerId": {
           "anyOf": [
             { "type": "string", "format": "uuid" },
@@ -161,26 +162,68 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["slotIndex", "itemId", "quantity"],
+          "required": [
+            "slotIndex",
+            "itemId",
+            "quantity",
+            "dynamicCreatedWorldId",
+            "dynamicLocalIdInCreatedWorld",
+            "hasDynamicItemData",
+            "corruptionProgress",
+            "corruptionProgressBits"
+          ],
           "properties": {
             "slotIndex": { "type": "integer", "minimum": 0 },
             "itemId": { "const": "None" },
-            "quantity": { "const": 0 }
+            "quantity": { "const": 0 },
+            "dynamicCreatedWorldId": { "$ref": "#/$defs/completeGuid" },
+            "dynamicLocalIdInCreatedWorld": { "$ref": "#/$defs/completeGuid" },
+            "hasDynamicItemData": { "type": "boolean" },
+            "corruptionProgress": { "type": "number" },
+            "corruptionProgressBits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["slotIndex", "itemId", "quantity"],
+          "required": [
+            "slotIndex",
+            "itemId",
+            "quantity",
+            "dynamicCreatedWorldId",
+            "dynamicLocalIdInCreatedWorld",
+            "hasDynamicItemData",
+            "corruptionProgress",
+            "corruptionProgressBits"
+          ],
           "properties": {
             "slotIndex": { "type": "integer", "minimum": 0 },
             "itemId": {
               "type": "string",
               "pattern": "^(?!None$)[A-Za-z0-9_-]{1,128}$"
             },
-            "quantity": { "type": "integer", "minimum": 1, "maximum": 999999 }
+            "quantity": { "type": "integer", "minimum": 1, "maximum": 999999 },
+            "dynamicCreatedWorldId": { "$ref": "#/$defs/completeGuid" },
+            "dynamicLocalIdInCreatedWorld": { "$ref": "#/$defs/completeGuid" },
+            "hasDynamicItemData": { "type": "boolean" },
+            "corruptionProgress": { "type": "number" },
+            "corruptionProgressBits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
           }
         }
+      ]
+    },
+    "completeGuid": {
+      "anyOf": [
+        { "type": "string", "format": "uuid" },
+        { "type": "string", "pattern": "^[A-Fa-f0-9]{32}$" }
       ]
     },
     "result": {

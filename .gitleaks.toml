@@ -1,0 +1,31 @@
+title = "Pal Control secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic integration-test idempotency keys; path and exact value must both match."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^tests/integration/save-backup-smoke\.ps1$''',
+  '''^tests/integration/in-game-notification-smoke\.ps1$''',
+  '''^tests/integration/announcement-publish-smoke\.ps1$'''
+]
+regexes = [
+  '''^(save-flush-(smoke|uncertain)-0001|notification-(null-id|schedule)-01|publish-(banner-test-00001|combined-test-01))$'''
+]
+
+[[allowlists]]
+description = "RFC 6238 TOTP fixture and deterministic integration-test API-key digest; path and exact value must both match."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^tests/admin-security/Program\.cs$''',
+  '''^tests/integration/admin-auth-smoke\.ps1$''',
+  '''^tests/integration/control-api-boundary-smoke\.ps1$''',
+  '''^tests/integration/player-economy-security-smoke\.ps1$'''
+]
+regexes = [
+  '''^(GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ|87052f5138109134ec8e8b25a5e18545e39c90244679e52b6c40c364cb671060)$'''
+]

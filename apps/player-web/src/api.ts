@@ -14,6 +14,13 @@ export type CodeChallenge = {
   retryAfterSeconds: number;
 };
 
+export type PlayerAuthenticationMode = {
+  authenticationMode: "trustedGameCode" | "openIdThenGameCode";
+  steamOpenIdRequired: boolean;
+  pendingPlatformIdentity: boolean;
+  trustedGameCodeFallback: boolean;
+};
+
 export type Currency = "merchantCoin" | "weeklyTicket";
 
 export type Overview = {
@@ -180,7 +187,15 @@ export class ApiClientError extends Error {
   }
 }
 
-export function requestCode(userId: string) {
+export function getAuthenticationMode() {
+  return request<PlayerAuthenticationMode>("/auth/mode", { method: "GET" });
+}
+
+export function steamLoginStartUrl() {
+  return `${root}/auth/steam/start`;
+}
+
+export function requestCode(userId: string | null) {
   return request<CodeChallenge>("/auth/request-code", {
     method: "POST",
     json: { userId }

@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      frontend-and-tooling:
+        patterns: ["*"]
+
+  - package-ecosystem: nuget
+    directory: /services/control-api
+    schedule:
+      interval: weekly
+    groups:
+      control-api:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

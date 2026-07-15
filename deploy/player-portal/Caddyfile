@@ -28,7 +28,12 @@
 
 	# This is the only public API namespace. The path is preserved upstream.
 	@player_api path /api/v1/player/*
+	@openid_callback path /api/v1/player/auth/steam/callback
 	@hidden_file path_regexp hidden_file (^|/)\.
+
+	# OpenID assertions and response_nonce arrive in the callback query string.
+	# Never write that raw query to the edge access log.
+	log_skip @openid_callback
 
 	# Explicitly intercept every other /api route before the SPA fallback.
 	@blocked_api path /api /api/*
@@ -50,6 +55,7 @@
 			# The Control API remains loopback-only and sees an approved Host.
 			header_up Host 127.0.0.1
 			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {host}
 
 			transport http {
 				dial_timeout 2s

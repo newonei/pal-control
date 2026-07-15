@@ -318,7 +318,7 @@ export function ExtractionCenter({ userId = "", onSelectPlayer }: ExtractionCent
         <div>
           <p className="extraction-eyebrow">RESOURCE SETTLEMENT</p>
           <h3>白名单资源兑换</h3>
-          <p>进入资源回收区后扫描 Items、Food 与 DropSlot。系统先用 RCON 扣除白名单资源，REST 回读证明后才发放战备券。</p>
+          <p>进入资源回收区后扫描 Items、Food 与 DropSlot。正式结算由 Native 原子扣除完整报价，并在逐槽位、完整快照与聚合回读全部一致后发放战备券。</p>
           {!settlementEnabled && settlementReason ? <small>{settlementReason}</small> : null}
         </div>
         <span className={settlementEnabled ? "ready" : "locked"}>{settlementEnabled ? "结算链路已就绪" : "结算链路未启用"}</span>

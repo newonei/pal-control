@@ -1,3 +1,7 @@
+// All Console API calls pass through the credential boundary. The alias keeps
+// this large typed client fail-closed when new requests are added.
+import { adminFetch as fetch } from "./adminFetch";
+
 export type ServerCapabilities = {
   serverId: string;
   officialRestConnected: boolean;

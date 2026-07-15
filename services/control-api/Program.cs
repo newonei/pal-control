@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using System.Net;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using PalControl.ControlApi.Domain;
 using PalControl.ControlApi.Extraction;
@@ -20,8 +22,21 @@ builder.Configuration.AddEnvironmentVariables();
 builder.Configuration.AddCommandLine(args);
 
 builder.Services.AddProblemDetails();
-builder.Services.Configure<CommandPersistenceOptions>(
-    builder.Configuration.GetSection("CommandPersistence"));
+var startupSecuritySection = builder.Configuration.GetSection(
+    "Security:StartupValidation");
+var startupSecurity = startupSecuritySection.Get<StartupSecurityValidationOptions>() ?? new();
+builder.Services.AddOptions<StartupSecurityValidationOptions>()
+    .Bind(startupSecuritySection)
+    .ValidateOnStart();
+builder.Services.AddSingleton<
+    Microsoft.Extensions.Options.IValidateOptions<StartupSecurityValidationOptions>,
+    StartupSecurityValidator>();
+builder.Services.AddOptions<CommandPersistenceOptions>()
+    .Bind(builder.Configuration.GetSection("CommandPersistence"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Command persistence directory and PalDefender queue capacity must be valid.")
+    .ValidateOnStart();
 builder.Services.AddSingleton<AnnouncementStore>();
 builder.Services.AddSingleton<AnnouncementCommandQueue>();
 builder.Services.AddHostedService(services =>
@@ -44,6 +59,8 @@ builder.Services.Configure<NativeBridgeOptions>(
     builder.Configuration.GetSection("Palworld:Bridge"));
 builder.Services.AddSingleton<NativeBridgeState>();
 builder.Services.AddSingleton<NativeBridgeClient>();
+builder.Services.AddSingleton<INativeBridgeCommandTransport>(services =>
+    services.GetRequiredService<NativeBridgeClient>());
 builder.Services.AddHostedService(services =>
     services.GetRequiredService<NativeBridgeClient>());
 builder.Services.AddHttpClient<PalworldRestClient>((services, client) =>
@@ -72,11 +89,37 @@ builder.Services.AddOptions<ExtractionModeOptions>()
         static options => options.IsValid(out _),
         "Extraction mode cadence, balances, timezone, and poll interval must be valid.")
     .ValidateOnStart();
-builder.Services.Configure<ExtractionPersistenceOptions>(
-    builder.Configuration.GetSection("ExtractionMode:Persistence"));
-builder.Services.Configure<ExtractionRconOptions>(
-    builder.Configuration.GetSection("ExtractionMode:Rcon"));
-builder.Services.AddSingleton<IExtractionRepository>(services =>
+builder.Services.AddOptions<ExtractionPersistenceOptions>()
+    .Bind(builder.Configuration.GetSection("ExtractionMode:Persistence"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Extraction persistence directory must be valid.")
+    .ValidateOnStart();
+builder.Services.AddOptions<ExtractionRconOptions>()
+    .Bind(builder.Configuration.GetSection("ExtractionMode:Rcon"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Enabled extraction RCON must be loopback-only and have approved versions and exactly one password source.")
+    .ValidateOnStart();
+builder.Services.AddOptions<EconomySafetyOptions>()
+    .Bind(builder.Configuration.GetSection("ExtractionMode:Safety"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Economy safety-gate versions, capacities, and optional Native requirements must be valid.")
+    .ValidateOnStart();
+builder.Services.AddOptions<EconomyContinuityOptions>()
+    .Bind(builder.Configuration.GetSection("ExtractionMode:Continuity"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Economy backup roots, retention, capacity, RPO and RTO must be valid.")
+    .ValidateOnStart();
+builder.Services.AddOptions<EconomyObservabilityOptions>()
+    .Bind(builder.Configuration.GetSection("ExtractionMode:Observability"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Economy observability thresholds and evaluation cadence must be valid.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<SqliteExtractionRepository>(services =>
 {
     var options = services
         .GetRequiredService<Microsoft.Extensions.Options.IOptions<ExtractionPersistenceOptions>>()
@@ -87,20 +130,92 @@ builder.Services.AddSingleton<IExtractionRepository>(services =>
         : Path.Combine(environment.ContentRootPath, options.DataDirectory));
     return new SqliteExtractionRepository(dataDirectory);
 });
+builder.Services.AddSingleton<IExtractionRepository>(services =>
+    services.GetRequiredService<SqliteExtractionRepository>());
+builder.Services.AddSingleton<IPlayerIdentityBindingStore>(services =>
+    services.GetRequiredService<SqliteExtractionRepository>());
+builder.Services.AddSingleton<IExtractionSettlementPersistence>(services =>
+    services.GetRequiredService<SqliteExtractionRepository>());
 builder.Services.AddSingleton<ExtractionCommerceService>();
 builder.Services.AddSingleton<ExtractionModeCoordinator>();
 builder.Services.AddSingleton<ExtractionDeliveryEvidenceStore>();
+builder.Services.AddSingleton<ExtractionDeliveryReceiptStore>();
+builder.Services.AddSingleton<PalDefenderItemGrantAdapter>();
 builder.Services.AddSingleton<ExtractionRunStore>();
+builder.Services.AddSingleton<IExtractionNativeInventoryAdapter, ExtractionNativeInventoryAdapter>();
 builder.Services.AddSingleton<ExtractionSettlementService>();
+builder.Services.AddSingleton<IExtractionSettlementExecutor>(services =>
+    services.GetRequiredService<ExtractionSettlementService>());
+builder.Services.AddSingleton<ExtractionSettlementQueue>();
+builder.Services.AddHostedService(services =>
+    services.GetRequiredService<ExtractionSettlementQueue>());
 builder.Services.AddSingleton<ExtractionOperationGate>();
-builder.Services.AddSingleton<IShopDeliveryCommandDispatcher, PalDefenderShopDeliveryDispatcher>();
+builder.Services.AddSingleton<EconomyContinuityService>();
+builder.Services.AddSingleton<WeeklyRolloverStateStore>();
+builder.Services.AddSingleton<SeasonSettlementJobStore>();
+builder.Services.AddSingleton<SeasonSettlementJobService>();
+builder.Services.AddSingleton<IEconomySafetyDependencyProbe, EconomySafetyDependencyProbe>();
+builder.Services.AddSingleton<EconomySafetyGate>();
 builder.Services.AddSingleton<IExtractionRconAdapter, ExtractionRconAdapter>();
 builder.Services.AddSingleton(TimeProvider.System);
+var adminAuthenticationSection = builder.Configuration.GetSection(
+    "Security:AdminAuthentication");
+builder.Services.AddOptions<AdminAuthenticationOptions>(
+        AdminAuthenticationDefaults.Scheme)
+    .Bind(adminAuthenticationSection)
+    .Validate(
+        static options => options.IsValid(out _),
+        "Administrator API-key principals, role assignments, and TOTP secrets must be valid.")
+    .Validate(
+        options => !options.EnableLoopbackDevelopmentPrincipal ||
+            builder.Configuration.GetValue<bool>("Security:DevelopmentMode"),
+        "The loopback administrator principal is allowed only in explicit development mode.")
+    .ValidateOnStart();
+builder.Services
+    .AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme = AdminAuthenticationDefaults.Scheme;
+        options.DefaultChallengeScheme = AdminAuthenticationDefaults.Scheme;
+        options.DefaultForbidScheme = AdminAuthenticationDefaults.Scheme;
+    })
+    .AddScheme<AdminAuthenticationOptions, AdminApiKeyAuthenticationHandler>(
+        AdminAuthenticationDefaults.Scheme,
+        _ => { });
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AdminPolicies.ApiAccess, policy => policy
+        .AddAuthenticationSchemes(AdminAuthenticationDefaults.Scheme)
+        .RequireAuthenticatedUser()
+        .AddRequirements(new AdminApiAccessRequirement()));
+    AddRolePolicy(options, AdminPolicies.Viewer, AdminRoles.Viewer);
+    AddRolePolicy(options, AdminPolicies.Operator, AdminRoles.Operator);
+    AddRolePolicy(options, AdminPolicies.EconomyAdmin, AdminRoles.EconomyAdmin);
+    AddRolePolicy(options, AdminPolicies.SeasonAdmin, AdminRoles.SeasonAdmin);
+    AddRolePolicy(options, AdminPolicies.Owner, AdminRoles.Owner);
+    AddHighRiskPolicy(
+        options,
+        AdminPolicies.EconomyHighRisk,
+        AdminRoles.EconomyAdmin);
+    AddHighRiskPolicy(
+        options,
+        AdminPolicies.SeasonHighRisk,
+        AdminRoles.SeasonAdmin);
+});
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IAuthorizationHandler, AdminApiAccessAuthorizationHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, AdminTotpAuthorizationHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, AdminReasonAuthorizationHandler>();
+builder.Services.AddSingleton<AdminAuditStore>();
 builder.Services.AddOptions<PlayerPortalOptions>()
     .Bind(builder.Configuration.GetSection("PlayerPortal"))
     .Validate(
         static options => options.IsValid(out _),
         "Player portal cookie, challenge, session, cooldown, and rate-limit settings must be valid.")
+    .Validate(
+        options => options.IsValidForEnvironment(
+            builder.Environment.IsDevelopment(),
+            out _),
+        "Production/public Steam portals require the official HTTPS OpenID provider; development fakes require explicit opt-in.")
     .Validate(
         options => !options.Enabled ||
             builder.Configuration.GetValue<bool>("ExtractionMode:Enabled"),
@@ -121,13 +236,28 @@ builder.Services.AddOptions<PlayerPortalOptions>()
             builder.Configuration.GetValue<bool>("Security:DevelopmentMode"),
         "An enabled non-development PlayerPortal requires a Secure session cookie.")
     .ValidateOnStart();
+builder.Services.AddHttpClient<ISteamOpenIdProviderClient, SteamOpenIdProviderClient>(
+    (services, client) =>
+    {
+        var options = services
+            .GetRequiredService<Microsoft.Extensions.Options.IOptions<PlayerPortalOptions>>()
+            .Value.OpenId;
+        client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.ProviderTimeoutSeconds, 1, 10));
+    });
 builder.Services.AddSingleton<PlayerPortalAuthenticationService>();
+builder.Services.AddSingleton<SteamOpenIdAuthenticationService>();
+builder.Services.AddSingleton<PlayerPortalSessionRegistry>();
+builder.Services.AddSingleton<PlayerIdentitySecurityStore>();
+builder.Services.AddSingleton<PlayerIdentitySecurityService>();
 builder.Services.AddSingleton<PlayerPortalTrafficGuard>();
 builder.Services.AddHostedService<ExtractionDeliveryWorker>();
 builder.Services.AddHostedService<ExtractionSettlementRecoveryWorker>();
 builder.Services.Configure<SaveManagementOptions>(
     builder.Configuration.GetSection("SaveManagement"));
 builder.Services.AddSingleton<SaveManagementService>();
+builder.Services.AddSingleton<EconomyObservabilityService>();
+builder.Services.AddHostedService(services =>
+    services.GetRequiredService<EconomyObservabilityService>());
 builder.Services.AddSingleton<ServerConfigurationService>();
 builder.Services.AddSingleton<SaveCommandQueue>();
 builder.Services.AddHostedService(services => services.GetRequiredService<SaveCommandQueue>());
@@ -154,19 +284,36 @@ builder.Services.AddCors(options =>
 });
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
-    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor;
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedProto |
+        ForwardedHeaders.XForwardedHost;
     options.ForwardLimit = 1;
     options.KnownProxies.Clear();
     options.KnownProxies.Add(IPAddress.Loopback);
     options.KnownProxies.Add(IPAddress.IPv6Loopback);
+    if (startupSecurity.AllowNonLoopbackListenerBehindTrustedProxy)
+    {
+        foreach (var address in StartupSecurityValidator.ParseTrustedProxyAddresses(
+                     startupSecurity))
+        {
+            options.KnownProxies.Add(address);
+        }
+    }
 });
 
 var app = builder.Build();
-// Only a loopback reverse proxy may supply one X-Forwarded-For hop. Public
+// Only loopback or an explicitly allow-listed reverse proxy may supply one
+// forwarded hop. Public
 // proxy routes must expose /api/v1/player only, never the extraction admin,
 // PalDefender, save-management, official REST, RCON, or native bridge routes.
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
+// Release packages place the built operator console in wwwroot and the
+// optional player portal in wwwroot/player. Development builds can omit the
+// directory; the API continues to run normally when no static files exist.
+app.UseDefaultFiles();
+app.UseStaticFiles();
 // Every API surface except the purpose-built player portal is operator-only.
 // Enforce the documented loopback boundary in code as defense in depth: a
 // reverse-proxy routing mistake must not expose wallet adjustments, settlement
@@ -183,10 +330,13 @@ app.Use(async (context, next) =>
     }
     await next(context);
 });
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<AdminAuditMiddleware>();
 // The player-portal traffic guard must run after trusted X-Forwarded-For has
 // replaced the loopback proxy address, but before any public player endpoint.
 app.UseMiddleware<PlayerPortalTrafficGuardMiddleware>();
-app.UseCors();
 
 app.MapGet("/health/live", () => Results.Ok(new
 {
@@ -242,10 +392,32 @@ app.MapGet("/health/ready", async (
     });
 });
 
-var api = app.MapGroup("/api/v1");
+var api = app.MapGroup("/api/v1")
+    .RequireAuthorization(AdminPolicies.ApiAccess);
 api.MapPalDefenderEndpoints();
 api.MapExtractionModeEndpoints();
-api.MapPlayerPortalEndpoints();
+api.MapPlayerPortalEndpoints().AllowAnonymous();
+api.MapPlayerIdentitySecurityEndpoints();
+api.MapEconomyContinuityEndpoints();
+api.MapEconomyObservabilityEndpoints();
+api.MapNewPlayerActivityAdminEndpoints();
+
+api.MapGet("/admin/session", (HttpContext context) => Results.Ok(new
+{
+    subject = AdminIdentity.RequireSubject(context),
+    roles = AdminIdentity.Roles(context),
+    authenticationMethod = context.User.FindFirst(
+        "pal_control_authentication_method")?.Value
+}));
+
+api.MapGet("/admin/audit", async (
+    int? limit,
+    AdminAuditStore audit,
+    CancellationToken cancellationToken) => Results.Ok(new
+    {
+        items = await audit.ListAsync(limit ?? 100, cancellationToken)
+    }))
+    .RequireAuthorization(AdminPolicies.Owner);
 
 api.MapGet(
     "/servers/{serverId}/game-catalog",
@@ -2694,6 +2866,23 @@ static string GetActor(HttpRequest request)
     }
     return $"local:{request.HttpContext.Connection.RemoteIpAddress ?? System.Net.IPAddress.Loopback}";
 }
+
+static void AddRolePolicy(
+    AuthorizationOptions options,
+    string policyName,
+    string role) => options.AddPolicy(policyName, policy => policy
+    .AddAuthenticationSchemes(AdminAuthenticationDefaults.Scheme)
+    .RequireAuthenticatedUser()
+    .RequireRole(role));
+
+static void AddHighRiskPolicy(
+    AuthorizationOptions options,
+    string policyName,
+    string role) => options.AddPolicy(policyName, policy => policy
+    .AddAuthenticationSchemes(AdminAuthenticationDefaults.Scheme)
+    .RequireAuthenticatedUser()
+    .RequireRole(role)
+    .AddRequirements(new AdminTotpRequirement(), new AdminReasonRequirement()));
 
 static IResult BridgeUnavailable(string code, string message) => Results.Json(
     new ApiError(code, message),

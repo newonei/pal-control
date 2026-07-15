@@ -28,8 +28,8 @@
 4. PalDefender 把物资发入当前在线角色的背包。
 5. 玩家在常驻周世界中自由采集、战斗、生产、交易和积累资源。
 6. 玩家携带任意来源的白名单资源进入指定资源兑换区，在网页申请整单报价。
-7. 服务端确认玩家位置和背包快照，以白名单 RCON `/delitems` 回收报价中的全部合格资源。
-8. REST 后快照证明目标数量确实消失后，数据库增加战备券；周任务和赛季结算可发放少量商域币。
+7. 服务端确认玩家位置和完整背包快照，通过 Native Bridge 的稳定 `inventory.consume` 能力在游戏线程内校验并回收报价中的全部合格资源。
+8. Native 返回数量、完整槽位前后快照、会话与持久化验收均通过后，数据库才增加战备券；周任务和赛季结算可发放少量商域币。
 
 ```mermaid
 flowchart LR
@@ -38,8 +38,8 @@ flowchart LR
     Grant --> Gather["采集 / 战斗 / 生产 / 交易"]
     Gather --> Zone["进入资源兑换区"]
     Zone --> Quote["锁定背包快照与报价"]
-    Quote --> Consume["本机 RCON 定向扣物"]
-    Consume --> Verify["REST 背包回读证明"]
+    Quote --> Consume["Native 整单原子校验与扣物"]
+    Consume --> Verify["完整槽位回读与持久化证明"]
     Verify --> Credit["数据库入账"]
     Credit --> Buy
 ```
@@ -80,20 +80,18 @@ MVP 不包含：
 - PalDefender `GET players`：在线状态、平台 `UserId`、本周 `PlayerUID` 和地图位置。
 - PalDefender `GET items/{playerIdentifier}`：`Items`、`KeyItems`、`Weapons`、`Armor`、`Food`、`DropSlot` 六类容器。
 - PalDefender `POST give/items/{playerIdentifier}`：向在线玩家发物品。
-- PalDefender RCON `/delitems <UserId> ItemId:Amount...`：按平台 UserId 定向删除物品；MVP 通过新建的受限本机适配器调用。
-- PalDefender RCON `/clearinv`：可以清空背包，但范围过大，只保留给开发服或人工应急，不进入自动资源兑换流程。
-- Pal Control PalDefender 命令队列：`Idempotency-Key`、`accepted -> dispatched -> succeeded/failed/uncertain`、重启恢复和审计。
+- Pal Control SQLite PalDefender outbox：`Idempotency-Key`、`accepted -> dispatched -> succeeded/failed/uncertain`、租约、dead-letter、重启恢复和不可变审计事件。
 - 官方 REST 与存档中心：公告、保存、稳定快照和 SHA-256 校验。
-- Native Bridge：游戏线程上的精细背包读写与 revision 校验机制，可作为未来更强的精确槽位消费后端。
+- Native Bridge：已实现游戏线程上的完整槽位快照、revision 校验、整单预检、安全清空普通静态资源槽位和写后回读；动态、腐坏中或元数据不可证明的槽位在写入前整单拒绝。
+- PalDefender RCON `/send`：只在本机受限通道向在线角色发送登录验证码；`/delitems` 与 `/clearinv` 仅保留为开发诊断或经批准的人工应急能力，不参与正式资源兑换。
 
 ### 2.2 不能误判为现成能力
 
 - `POST give/items` 只能发放，不能回收资源兑换物品。
-- RCON 文本响应没有结构化 revision、事务和幂等 ACK；发送中断后不能判断命令是否执行，必须进入 `uncertain`，禁止重发。
-- `/delitems` 不是跨 ItemID 原子事务；REST 后快照出现部分删除时必须人工对账，不能按比例自动入账。
-- 当前 Native 背包修改不允许数量归零，也不覆盖全部容器，因此首版不把它当作资源兑换扣物后端。
+- Native 开发版已实现扣物语义，但在完成真实玩家“扣物 → 保存 → 停服 → 重启 → 重登”验收前仅声明 `inventory.consume.experimental`，生产资源兑换闸门必须保持关闭。
+- Native 不能验证全部请求槽位、实际扣除数量不等于请求、回读不完整、持久化证据缺失或连接结果不确定时，一律不入账且不自动重扣。
 - 存档中心只保存和备份，不会自动创建/切换新世界。
-- 当前 Control API 没有玩家公网认证，不能直接暴露为商城后端。
+- 当前已实现 Steam OpenID 与游戏内验证码双层绑定、HttpOnly Cookie、CSRF、Origin/限流和当前周 PlayerUID 绑定；Production/PublicSteam 强制官方 HTTPS OP 与精确 realm/return_to，但仍需在正式域名完成 TLS、代理回调、Cookie 和重放黑盒验收。
 - HTTP `202` 只表示持久接收；HTTP `200` 命令查询也必须结合命令状态判断，不能视为游戏操作一定完成。
 
 ## 3. 目标组件
@@ -103,14 +101,14 @@ flowchart TB
     Player["玩家浏览器"] -->|"HTTPS + 安全 Cookie"| Portal["Player Portal API"]
     Operator["运营控制台"] -->|"loopback / 管理 VPN"| Control["Pal Control API"]
     Portal --> Economy["Resource Economy Service"]
-    Economy --> PG[("PostgreSQL\n账户 / 钱包 / 订单 / 赛季")]
+    Economy --> DB[("SQLite 单机事务库\n账户 / 钱包 / 订单 / 赛季")]
     Economy --> Outbox["Outbox Workers"]
     Outbox --> Control
     Control -->|"loopback REST"| PD["PalDefender"]
-    Control -->|"loopback RCON + command allowlist"| RCON["PalDefender RCON"]
-    Control -->|"Named Pipe"| Native["PalControl Native"]
+    Control -->|"Named Pipe + versioned contract"| Native["PalControl Native"]
+    Control -.->|"仅开发诊断"| RCON["PalDefender RCON"]
     Control --> Official["Palworld Official REST"]
-    Rollover["Season Rollover Worker"] --> PG
+    Rollover["Season Rollover Worker"] --> DB
     Rollover --> Control
     Rollover --> Launcher["受保护 Windows 启停脚本"]
 ```
@@ -119,11 +117,11 @@ flowchart TB
 
 - Player Portal：登录、CSRF、防刷、仅访问自己的钱包/订单/资源兑换。
 - Economy Service：价格、限购、账本事务、状态机和对账；不保存上游 token。
-- Pal Control：唯一游戏控制入口，继续保持本机监听；RCON 适配器只接受结构化 consume DTO，不接受任意命令字符串。
+- Pal Control：唯一游戏控制入口；生产 consume 只调用版本锁定、能力探针通过的 Native 结构化契约，不接受任意命令字符串。
 - PalDefender REST：读玩家/背包和发放物品。
-- PalDefender RCON：MVP 仅允许 `/delitems`；`/clearinv` 不进入自动白名单。
-- Native MOD：长期可实现 `inventory.consume` 替换 RCON 后端，API 与账本状态机不变；禁止暴露任意反射或任意函数调用。
-- PostgreSQL：经济事实来源；游戏存档不是永久钱包来源。
+- PalDefender RCON：本机受限 `/send` 是游戏内验证码通道；其他白名单命令只用于开发诊断/人工应急，不进入生产资源兑换路径。
+- Native MOD：在游戏 Tick 内完成完整预检、扣除和回读；API 与账本状态机保留幂等/不确定语义，禁止暴露任意反射或任意函数调用。
+- SQLite：当前单实例经济事实来源；游戏存档不是永久钱包来源。只有转为多 Control API/worker 实例时才迁移至 PostgreSQL 等支持多节点锁与 lease 的存储。
 
 ## 4. 玩家身份
 
@@ -160,12 +158,12 @@ MVP 使用配置化圆形区域：`map_x`、`map_y`、`radius`、开放时段。
 ## 6. 安全原则
 
 - 当前 Control API、PalDefender `17993`、官方 REST 和 Named Pipe 均不暴露公网。
-- 当前开发服已启用 RCON，并用 Windows 防火墙阻断非 loopback 来源；`25575` 绝不能做端口映射。Palworld RCON 与 `AdminPassword` 共用凭据，正式服应把该凭据移出普通配置、交给仅服务账户可读的 Secret Store，并定期轮换。
+- RCON 即使为诊断而启用，`25575` 也必须阻断所有远程入站且绝不做端口映射；`AdminPassword` 必须交给仅服务账户可读的 Secret Store 并定期轮换。
 - 玩家门户与运营控制台使用不同监听地址、不同认证和不同权限。
 - 玩家门户要求 HTTPS、`HttpOnly + Secure + SameSite=Lax` Cookie、CSRF token、登录与购买限流。
 - 商品价格、玩家 ID、余额、资源兑换价值全部由服务端计算；客户端只提交 offer ID、数量或 quote ID。
 - 所有游戏写操作在调用前持久化，调用后按状态机终结。
 - `uncertain` 不自动退款、不自动重发、不自动入账，进入人工或只读自动对账。
-- RCON 命令只由服务端从批准 ItemID 和正整数数量构造；禁止把网页文本拼接为命令，禁止按昵称定位玩家。
-- 版本、世界身份、玩家在线会话、位置、RCON 本机隔离或背包快照任一不匹配，经济写入关闭。
+- 网页不提交 ItemID、数量或槽位明细；服务端只从冻结的白名单报价构造 Native consume 请求，禁止按昵称定位玩家。
+- 版本、世界身份、玩家在线会话、位置、Native 稳定能力、完整快照或持久化证据任一不匹配，资源兑换写入关闭。
 - 高风险人工调整必须填写原因并产生不可变账本条目，禁止直接 `UPDATE wallets.balance`。

@@ -6,7 +6,7 @@ using PalControl.ControlApi.Extraction;
 
 namespace PalControl.ControlApi.Infrastructure;
 
-public sealed class ExtractionSettlementService
+public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
 {
     private static readonly IReadOnlyDictionary<string, LootDefinition> LootCatalog =
         new Dictionary<string, LootDefinition>(StringComparer.OrdinalIgnoreCase)
@@ -41,7 +41,10 @@ public sealed class ExtractionSettlementService
     private readonly IExtractionRconAdapter _rcon;
     private readonly ExtractionModeOptions _options;
     private readonly ExtractionRconOptions _rconOptions;
+    private readonly EconomySafetyGate _economySafety;
     private readonly ILogger<ExtractionSettlementService> _logger;
+    private readonly IExtractionNativeInventoryAdapter? _nativeInventory;
+    private readonly bool _useDevelopmentRconSettlement;
 
     public ExtractionSettlementService(
         ExtractionModeCoordinator coordinator,
@@ -51,7 +54,12 @@ public sealed class ExtractionSettlementService
         IExtractionRconAdapter rcon,
         IOptions<ExtractionModeOptions> options,
         IOptions<ExtractionRconOptions> rconOptions,
-        ILogger<ExtractionSettlementService> logger)
+        EconomySafetyGate economySafety,
+        ILogger<ExtractionSettlementService> logger,
+        IExtractionNativeInventoryAdapter? nativeInventory = null,
+        IWebHostEnvironment? environment = null,
+        IOptions<EconomySafetyOptions>? safetyOptions = null,
+        IConfiguration? configuration = null)
     {
         _coordinator = coordinator;
         _commerce = commerce;
@@ -60,13 +68,34 @@ public sealed class ExtractionSettlementService
         _rcon = rcon;
         _options = options.Value;
         _rconOptions = rconOptions.Value;
+        _economySafety = economySafety;
         _logger = logger;
+        _nativeInventory = nativeInventory;
+        _useDevelopmentRconSettlement = DevelopmentRconSettlementPolicy.IsAllowed(
+            environment,
+            configuration,
+            _rconOptions,
+            safetyOptions?.Value);
     }
 
-    public bool SettlementEnabled => _rconOptions.Enabled;
+    public bool SettlementEnabled => _useDevelopmentRconSettlement
+        ? _rconOptions.Enabled
+        : _nativeInventory?.StableSettlementAvailable == true;
+
+    public string SettlementAdapter => _useDevelopmentRconSettlement
+        ? "development-rcon"
+        : "native";
 
     public async Task<RconOperationResult> ProbeSettlementAsync(CancellationToken cancellationToken)
     {
+        if (!_useDevelopmentRconSettlement)
+        {
+            return _nativeInventory?.StableSettlementAvailable == true
+                ? RconOperationResult.Succeeded("inventory.probe inventory.consume")
+                : RconOperationResult.Rejected(
+                    "native_inventory_consume_capability_missing",
+                    "Production resource settlement requires stable inventory.probe and inventory.consume capabilities; experimental is rejected.");
+        }
         if (!_rconOptions.Enabled)
         {
             return RconOperationResult.Rejected(
@@ -129,27 +158,46 @@ public sealed class ExtractionSettlementService
         string userId,
         CancellationToken cancellationToken)
     {
-        var capability = await ProbeSettlementAsync(cancellationToken);
-        if (!capability.Success)
-        {
-            throw new ExtractionModeException(
-                capability.ErrorCode ?? "RCON_UNAVAILABLE",
-                capability.ErrorMessage ?? "资源兑换 RCON 当前不可用。",
-                StatusCodes.Status503ServiceUnavailable);
-        }
         var context = await _coordinator.GetAccountContextAsync(
             userId,
             requireOnline: true,
             cancellationToken);
+        using var safetyLease = await _economySafety.AcquireAsync(
+            EconomyWriteFeature.ResourceExchange,
+            EconomySafetyContext.FromAccount(context),
+            queue: null,
+            cancellationToken);
         await _coordinator.EnsureSeasonMatchesActiveWorldAsync(context.Season, cancellationToken);
         var zone = await RequireStableExtractionZoneAsync(userId, cancellationToken);
-        var inventory = await ReadSellableInventoryAsync(userId, cancellationToken);
+        ExtractionNativeInventoryQuoteSnapshot? nativeSnapshot = null;
+        InventorySnapshot inventory;
+        if (_useDevelopmentRconSettlement)
+        {
+            inventory = await ReadSellableInventoryAsync(userId, cancellationToken);
+        }
+        else
+        {
+            var native = RequireNativeInventoryAdapter();
+            var playerUid = context.IdentityBinding?.PlayerUid ?? throw new ExtractionModeException(
+                "PLAYER_BINDING_REQUIRED",
+                "Native 资源报价要求当前周世界的完整 PlayerUID 绑定。",
+                StatusCodes.Status409Conflict);
+            nativeSnapshot = await native.CaptureQuoteSnapshotAsync(
+                _options.ServerId,
+                playerUid,
+                cancellationToken);
+            inventory = new InventorySnapshot(
+                ExtractionNativeInventoryCanonicalizer.AggregateTotals(nativeSnapshot));
+        }
         var lines = inventory.Totals
             .Where(item => item.Value > 0 && LootCatalog.ContainsKey(item.Key))
             .OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
             .Select(item =>
             {
-                if (item.Value > int.MaxValue)
+                var maximumQuantity = _useDevelopmentRconSettlement
+                    ? int.MaxValue
+                    : 999_999;
+                if (item.Value > maximumQuantity)
                 {
                     throw new ExtractionModeException(
                         "EXTRACTION_ITEM_COUNT_TOO_LARGE",
@@ -172,6 +220,14 @@ public sealed class ExtractionSettlementService
                 "Items、Food 和 DropSlot 中没有可出售的白名单资源。",
                 StatusCodes.Status422UnprocessableEntity);
         }
+        if (!_useDevelopmentRconSettlement &&
+            lines.Sum(line => (long)line.Quantity) > 16_000_000)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_TOTAL_ITEM_COUNT_TOO_LARGE",
+                "本次可售资源总数超过 Native 原子扣物的安全上限。",
+                StatusCodes.Status422UnprocessableEntity);
+        }
         return await _runs.CreateQuoteAsync(
             context.Account.AccountId,
             context.Season.SeasonId,
@@ -179,12 +235,13 @@ public sealed class ExtractionSettlementService
             zone.Id,
             zone.DisplayName,
             lines,
-            HashSnapshot(inventory.Totals),
+            nativeSnapshot?.SnapshotHash ?? HashSnapshot(inventory.Totals),
             DateTimeOffset.UtcNow.AddSeconds(_options.ExtractionQuoteSeconds),
-            cancellationToken);
+            cancellationToken,
+            nativeSnapshot);
     }
 
-    public async Task<ExtractionSettlementRun> SettleAsync(
+    public async Task<ExtractionSettlementRun> ExecuteSettlementAsync(
         Guid runId,
         string userId,
         string idempotencyKey,
@@ -193,6 +250,11 @@ public sealed class ExtractionSettlementService
         var context = await _coordinator.GetAccountContextAsync(
             userId,
             requireOnline: true,
+            cancellationToken);
+        using var safetyLease = await _economySafety.AcquireAsync(
+            EconomyWriteFeature.ResourceExchange,
+            EconomySafetyContext.FromAccount(context),
+            queue: null,
             cancellationToken);
         await _coordinator.EnsureSeasonMatchesActiveWorldAsync(context.Season, cancellationToken);
         var existing = await _runs.GetAsync(runId, cancellationToken)
@@ -223,6 +285,14 @@ public sealed class ExtractionSettlementService
             return existing;
         }
         _ = await RequireStableExtractionZoneAsync(userId, cancellationToken);
+        if (!_useDevelopmentRconSettlement)
+        {
+            return await ExecuteNativeSettlementAsync(
+                context,
+                existing,
+                idempotencyKey,
+                cancellationToken);
+        }
         var inventory = await ReadSellableInventoryAsync(userId, cancellationToken);
         if (!string.Equals(
                 existing.QuoteSnapshotHash,
@@ -263,6 +333,13 @@ public sealed class ExtractionSettlementService
         using var criticalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(
             Math.Clamp(_rconOptions.TimeoutSeconds + 30, 15, 90)));
         var settlementToken = criticalTimeout.Token;
+        using var heartbeatStop = new CancellationTokenSource();
+        var heartbeatTask = MaintainSettlementLeaseAsync(
+            start.Run,
+            leaseId,
+            "http-settlement",
+            criticalTimeout,
+            heartbeatStop.Token);
         try
         {
             var deletion = await _rcon.DeleteItemsAsync(
@@ -271,6 +348,7 @@ public sealed class ExtractionSettlementService
                 settlementToken);
             if (deletion.Outcome == RconOperationOutcome.Failed)
             {
+                await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
                 var failed = await _runs.TryMarkFailedAsync(
                     runId,
                     start.Run.Revision,
@@ -282,6 +360,7 @@ public sealed class ExtractionSettlementService
             }
             if (deletion.Outcome == RconOperationOutcome.Uncertain)
             {
+                await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
                 var uncertain = await _runs.TryMarkUncertainAsync(
                     runId,
                     start.Run.Revision,
@@ -297,6 +376,7 @@ public sealed class ExtractionSettlementService
                 var verified = await TryVerifyRemovalAsync(start.Run, settlementToken);
                 if (verified)
                 {
+                    await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
                     var removed = await _runs.TryMarkRemovedAsync(
                         runId,
                         start.Run.Revision,
@@ -311,6 +391,7 @@ public sealed class ExtractionSettlementService
                     await Task.Delay(250, settlementToken);
                 }
             }
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
             var mismatch = await _runs.TryMarkUncertainAsync(
                 runId,
                 start.Run.Revision,
@@ -322,6 +403,7 @@ public sealed class ExtractionSettlementService
         }
         catch (OperationCanceledException exception)
         {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
             var current = await TryMarkCriticalSectionUncertainAsync(
                 start.Run,
                 leaseId,
@@ -336,6 +418,7 @@ public sealed class ExtractionSettlementService
         }
         catch (Exception exception)
         {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
             _ = await TryMarkCriticalSectionUncertainAsync(
                 start.Run,
                 leaseId,
@@ -343,6 +426,10 @@ public sealed class ExtractionSettlementService
                 "资源扣除收尾异常，已停止自动入账并转人工核对。",
                 exception);
             throw;
+        }
+        finally
+        {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
         }
     }
 
@@ -368,9 +455,11 @@ public sealed class ExtractionSettlementService
         Guid runId,
         string resolution,
         string reason,
+        string actor,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
         var normalizedReason = reason.Trim();
         if (normalizedReason.Length is < 3 or > 500 || normalizedReason.Any(char.IsControl))
         {
@@ -402,6 +491,7 @@ public sealed class ExtractionSettlementService
                 runId,
                 run.Revision,
                 normalizedReason,
+                actor,
                 cancellationToken);
             if (!failed.Applied && failed.Run.State != ExtractionSettlementState.Failed)
             {
@@ -433,6 +523,7 @@ public sealed class ExtractionSettlementService
                 runId,
                 run.Revision,
                 normalizedReason,
+                actor,
                 cancellationToken);
             if (!removed.Applied)
             {
@@ -558,7 +649,8 @@ public sealed class ExtractionSettlementService
         }
         var claimed = lease.Run;
         var leaseId = RequireLeaseId(claimed);
-        if (claimed.State == ExtractionSettlementState.Removed)
+        if (claimed.State is
+            ExtractionSettlementState.Removed or ExtractionSettlementState.Credited)
         {
             var reconciliationReason = string.Equals(
                 claimed.ErrorCode,
@@ -575,6 +667,39 @@ public sealed class ExtractionSettlementService
         {
             return claimed;
         }
+        if (claimed.NativeConsumeReceipt is { } nativeReceipt)
+        {
+            if (nativeReceipt.Disposition == ExtractionNativeConsumeDisposition.Succeeded)
+            {
+                var removed = await _runs.TryMarkRemovedFromRecordedNativeAsync(
+                    claimed.RunId,
+                    claimed.Revision,
+                    leaseId,
+                    cancellationToken);
+                return removed.Applied
+                    ? await CreditRemovedRunAsync(removed.Run, null, cancellationToken)
+                    : removed.Run;
+            }
+            if (nativeReceipt.Disposition == ExtractionNativeConsumeDisposition.Failed)
+            {
+                var failed = await _runs.TryMarkFailedAsync(
+                    claimed.RunId,
+                    claimed.Revision,
+                    leaseId,
+                    nativeReceipt.ErrorCode ?? "NATIVE_INVENTORY_CONSUME_FAILED",
+                    nativeReceipt.ErrorMessage ?? "Native 明确拒绝资源扣除。",
+                    cancellationToken);
+                return failed.Run;
+            }
+            var recordedUncertain = await _runs.TryMarkUncertainAsync(
+                claimed.RunId,
+                claimed.Revision,
+                leaseId,
+                nativeReceipt.ErrorCode ?? "NATIVE_INVENTORY_CONSUME_UNCERTAIN",
+                nativeReceipt.ErrorMessage ?? "Native 扣物结果不确定，禁止自动重试或入账。",
+                cancellationToken);
+            return recordedUncertain.Run;
+        }
         // Consuming does not prove that RCON was dispatched or acknowledged.
         // A lower aggregate inventory total could also come from the player
         // dropping or consuming items, so recovery must never infer a credit
@@ -586,8 +711,10 @@ public sealed class ExtractionSettlementService
                 claimed.RunId,
                 claimed.Revision,
                 leaseId,
-                "RCON_DELETE_RECOVERY_UNPROVEN",
-                "服务中断后无法证明扣物命令是否执行，已停止自动重试和入账。",
+                claimed.NativeInventorySnapshot is null
+                    ? "RCON_DELETE_RECOVERY_UNPROVEN"
+                    : "NATIVE_INVENTORY_CONSUME_RECOVERY_UNPROVEN",
+                "服务中断后没有持久化的扣物回执，已停止自动重试和入账。",
                 cancellationToken);
             return uncertain.Run;
         }
@@ -597,6 +724,69 @@ public sealed class ExtractionSettlementService
             leaseId,
             cancellationToken);
         return released.Run;
+    }
+
+    private async Task MaintainSettlementLeaseAsync(
+        ExtractionSettlementRun run,
+        Guid leaseId,
+        string leaseOwner,
+        CancellationTokenSource criticalTimeout,
+        CancellationToken stoppingToken)
+    {
+        try
+        {
+            var interval = TimeSpan.FromSeconds(_options.SettlementLeaseHeartbeatSeconds);
+            while (true)
+            {
+                await Task.Delay(interval, stoppingToken);
+                using var pulseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var pulseToken = CancellationTokenSource.CreateLinkedTokenSource(
+                    stoppingToken,
+                    pulseTimeout.Token);
+                var heartbeat = await _runs.TryHeartbeatLeaseAsync(
+                    run.RunId,
+                    run.Revision,
+                    leaseId,
+                    leaseOwner,
+                    pulseToken.Token);
+                if (!heartbeat.Applied)
+                {
+                    _logger.LogError(
+                        "Resource settlement {RunId} lost lease {LeaseId} during a long operation; cancelling the critical section.",
+                        run.RunId,
+                        leaseId);
+                    criticalTimeout.Cancel();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown after the external operation completes.
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Resource settlement {RunId} could not persist its lease heartbeat; cancelling the critical section.",
+                run.RunId);
+            criticalTimeout.Cancel();
+        }
+    }
+
+    private static async Task StopLeaseHeartbeatAsync(
+        CancellationTokenSource heartbeatStop,
+        Task heartbeatTask)
+    {
+        heartbeatStop.Cancel();
+        try
+        {
+            await heartbeatTask;
+        }
+        catch (OperationCanceledException)
+        {
+            // The heartbeat task observes this token only as a stop signal.
+        }
     }
 
     private async Task<ExtractionSettlementRun?> TryMarkCriticalSectionUncertainAsync(
@@ -638,55 +828,231 @@ public sealed class ExtractionSettlementService
         string? reconciliationReason,
         CancellationToken cancellationToken)
     {
-        if (run.State != ExtractionSettlementState.Removed)
+        if (run.State is not
+            (ExtractionSettlementState.Removed or ExtractionSettlementState.Credited))
         {
             return run;
         }
         var leaseId = RequireLeaseId(run);
-        // Every path uses the exact same immutable request. The wallet store can
-        // therefore replay this key after a crash without creating a second entry
-        // or conflicting with a later manual reconciliation.
-        var referenceId = run.RunId.ToString("N");
-        var existingCredit = await _commerce.FindLedgerEntryByReferenceAsync(
-            run.AccountId,
-            ExtractionCurrency.SeasonVoucher,
-            run.SeasonId,
-            "extraction_run",
-            referenceId,
-            cancellationToken);
-        if (existingCredit is not null && existingCredit.Delta != run.TotalValue)
+        var credited = run;
+        if (run.State == ExtractionSettlementState.Removed)
         {
-            throw new InvalidDataException(
-                $"Extraction run '{run.RunId}' has a wallet credit for {existingCredit.Delta}, expected {run.TotalValue}.");
-        }
-        if (existingCredit is null)
-        {
-            var result = await _commerce.GrantSeasonVoucherAsync(
-                run.AccountId,
-                run.SeasonId,
-                run.TotalValue,
-                "extraction_run",
-                referenceId,
-                $"extraction-credit-{run.RunId:N}",
-                "extraction-settlement",
-                // Keep the original immutable request text for compatibility with
-                // credits committed before the public terminology changed.
-                $"撤离结算 {run.RunId:N}",
+            var credit = await _runs.TryCreditRemovedAsync(
+                run.RunId,
+                run.Revision,
+                leaseId,
                 cancellationToken);
-            if (result.ErrorCode is not null)
+            if (!credit.Applied)
             {
-                throw new IOException(
-                    $"Extraction wallet credit failed: {result.ErrorCode}: {result.ErrorMessage}");
+                return credit.Run;
             }
+            credited = credit.Run;
         }
         var settled = await _runs.TryMarkSettledAsync(
-            run.RunId,
-            run.Revision,
+            credited.RunId,
+            credited.Revision,
             leaseId,
             reconciliationReason,
             cancellationToken);
         return settled.Run;
     }
+
+    private async Task<ExtractionSettlementRun> ExecuteNativeSettlementAsync(
+        ExtractionAccountContext context,
+        ExtractionSettlementRun quote,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        var native = RequireNativeInventoryAdapter();
+        if (!native.StableSettlementAvailable)
+        {
+            throw new ExtractionModeException(
+                "NATIVE_INVENTORY_CONSUME_CAPABILITY_MISSING",
+                "Native Bridge 未声明稳定 inventory.consume；experimental 能力不能用于资源入账。",
+                StatusCodes.Status503ServiceUnavailable);
+        }
+        var snapshot = quote.NativeInventorySnapshot ?? throw new ExtractionModeException(
+            "NATIVE_QUOTE_SNAPSHOT_MISSING",
+            "该报价不包含可用于原子扣物的完整 Native 背包快照，请重新报价。",
+            StatusCodes.Status409Conflict);
+        if (!string.Equals(
+                snapshot.OwnerPlayerUid,
+                context.IdentityBinding?.PlayerUid,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                quote.QuoteSnapshotHash,
+                ExtractionNativeInventoryCanonicalizer.Hash(snapshot),
+                StringComparison.Ordinal))
+        {
+            throw new ExtractionModeException(
+                "NATIVE_QUOTE_SNAPSHOT_INVALID",
+                "报价中的 PlayerUID 或完整背包快照哈希不再可信，请重新报价。",
+                StatusCodes.Status409Conflict);
+        }
+
+        var totals = ExtractionNativeInventoryCanonicalizer.AggregateTotals(snapshot);
+        foreach (var line in quote.Items)
+        {
+            if (totals.GetValueOrDefault(line.ItemId) < line.Quantity)
+            {
+                throw new ExtractionModeException(
+                    "NATIVE_QUOTE_SNAPSHOT_INSUFFICIENT",
+                    "报价快照中的资源数量不足，不能构造原子扣物请求。",
+                    StatusCodes.Status409Conflict);
+            }
+        }
+        var preDeleteTotals = quote.Items.ToDictionary(
+            line => line.ItemId,
+            line => totals.GetValueOrDefault(line.ItemId),
+            StringComparer.OrdinalIgnoreCase);
+        var payload = native.CreateConsumePayload(snapshot, quote.Items);
+        var requestHash = native.ComputeRequestHash(quote.RunId, _options.ServerId, payload);
+        var start = await _runs.StartConsumptionAsync(
+            quote.RunId,
+            context.Account.ExternalUserId,
+            idempotencyKey,
+            preDeleteTotals,
+            cancellationToken,
+            requestHash);
+        if (start.IdempotencyConflict)
+        {
+            throw new ExtractionModeException(
+                "IDEMPOTENCY_CONFLICT",
+                "该 Idempotency-Key 已绑定不同的 Native 扣物请求。",
+                StatusCodes.Status409Conflict);
+        }
+        if (!start.Started)
+        {
+            return start.Run;
+        }
+
+        var leaseId = RequireLeaseId(start.Run);
+        using var criticalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(
+            Math.Clamp(_options.SettlementQueueOperationTimeoutSeconds, 30, 600)));
+        var settlementToken = criticalTimeout.Token;
+        using var heartbeatStop = new CancellationTokenSource();
+        var heartbeatTask = MaintainSettlementLeaseAsync(
+            start.Run,
+            leaseId,
+            "http-settlement",
+            criticalTimeout,
+            heartbeatStop.Token);
+        var receiptPersisted = false;
+        try
+        {
+            var outcome = await native.ConsumeAsync(
+                _options.ServerId,
+                payload,
+                requestHash,
+                idempotencyKey,
+                settlementToken);
+            var recorded = await _runs.TryRecordNativeConsumeReceiptAsync(
+                start.Run.RunId,
+                start.Run.Revision,
+                leaseId,
+                outcome.Receipt,
+                settlementToken);
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
+            if (!recorded.Applied && recorded.Run.NativeConsumeReceipt is null)
+            {
+                return recorded.Run;
+            }
+            receiptPersisted = true;
+            using var finalizationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            return await FinalizeRecordedNativeOutcomeAsync(
+                recorded.Run,
+                leaseId,
+                recorded.Run.NativeConsumeReceipt ?? outcome.Receipt,
+                finalizationTimeout.Token);
+        }
+        catch (Exception exception) when (receiptPersisted)
+        {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
+            _logger.LogWarning(
+                exception,
+                "Native consume receipt for extraction run {RunId} is durable; recovery will resume finalization without dispatching another consume command.",
+                start.Run.RunId);
+            return await _runs.GetAsync(start.Run.RunId, CancellationToken.None) ?? start.Run;
+        }
+        catch (OperationCanceledException exception)
+        {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
+            var current = await TryMarkCriticalSectionUncertainAsync(
+                start.Run,
+                leaseId,
+                "NATIVE_INVENTORY_CONSUME_CANCELLED",
+                "Native 扣物是否完成无法确认，已停止自动重试和入账。",
+                exception);
+            if (current is not null)
+            {
+                return current;
+            }
+            throw;
+        }
+        catch (Exception exception)
+        {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
+            _ = await TryMarkCriticalSectionUncertainAsync(
+                start.Run,
+                leaseId,
+                "NATIVE_INVENTORY_CONSUME_FINALIZATION_FAILED",
+                "Native 扣物回执持久化或收尾失败，已转人工对账。",
+                exception);
+            throw;
+        }
+        finally
+        {
+            await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
+        }
+    }
+
+    private async Task<ExtractionSettlementRun> CompleteRecordedNativeSuccessAsync(
+        ExtractionSettlementRun run,
+        Guid leaseId,
+        CancellationToken cancellationToken)
+    {
+        var removed = await _runs.TryMarkRemovedAsync(
+            run.RunId,
+            run.Revision,
+            leaseId,
+            cancellationToken);
+        return removed.Applied
+            ? await CreditRemovedRunAsync(removed.Run, null, cancellationToken)
+            : removed.Run;
+    }
+
+    private async Task<ExtractionSettlementRun> FinalizeRecordedNativeOutcomeAsync(
+        ExtractionSettlementRun run,
+        Guid leaseId,
+        ExtractionNativeConsumeReceipt receipt,
+        CancellationToken cancellationToken) =>
+        receipt.Disposition switch
+        {
+            ExtractionNativeConsumeDisposition.Succeeded =>
+                await CompleteRecordedNativeSuccessAsync(run, leaseId, cancellationToken),
+            ExtractionNativeConsumeDisposition.Failed =>
+                (await _runs.TryMarkFailedAsync(
+                    run.RunId,
+                    run.Revision,
+                    leaseId,
+                    receipt.ErrorCode ?? "NATIVE_INVENTORY_CONSUME_FAILED",
+                    receipt.ErrorMessage ?? "Native 明确拒绝资源扣除。",
+                    cancellationToken)).Run,
+            _ =>
+                (await _runs.TryMarkUncertainAsync(
+                    run.RunId,
+                    run.Revision,
+                    leaseId,
+                    receipt.ErrorCode ?? "NATIVE_INVENTORY_CONSUME_UNCERTAIN",
+                    receipt.ErrorMessage ?? "Native 扣物证据不确定，禁止自动重试或入账。",
+                    cancellationToken)).Run
+        };
+
+    private IExtractionNativeInventoryAdapter RequireNativeInventoryAdapter() =>
+        _nativeInventory ?? throw new ExtractionModeException(
+            "NATIVE_INVENTORY_ADAPTER_NOT_CONFIGURED",
+            "正式资源结算要求 Control API Native 背包 adapter。",
+            StatusCodes.Status503ServiceUnavailable);
 
     private static Guid RequireLeaseId(ExtractionSettlementRun run) =>
         run.LeaseId ?? throw new InvalidDataException(

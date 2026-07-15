@@ -71,6 +71,46 @@ public sealed record ExtractionAccount(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
+/// <summary>
+/// A server-observed mapping between a cross-world platform subject and the
+/// player's complete identity in one weekly world. Display names are
+/// intentionally not part of the authorization identity.
+/// </summary>
+public sealed record PlayerIdentityBinding(
+    Guid BindingId,
+    string PlatformSubject,
+    Guid SeasonId,
+    string WorldId,
+    string PlayerUid,
+    Guid AccountId,
+    DateTimeOffset FirstBoundAt,
+    DateTimeOffset LastVerifiedAt);
+
+public sealed record PlayerIdentityBindingRequest(
+    string PlatformSubject,
+    Guid SeasonId,
+    string WorldId,
+    string PlayerUid,
+    Guid AccountId);
+
+public sealed record PlayerIdentityBindingResult(
+    PlayerIdentityBinding? Binding,
+    bool Created,
+    bool Verified,
+    string? ErrorCode,
+    string? ErrorMessage);
+
+public sealed record PlayerIdentityBindingHistoryEntry(
+    Guid HistoryId,
+    Guid BindingId,
+    string PlatformSubject,
+    Guid SeasonId,
+    string WorldId,
+    string PlayerUid,
+    Guid AccountId,
+    string Action,
+    DateTimeOffset OccurredAt);
+
 public sealed record WalletBalance(
     Guid AccountId,
     ExtractionCurrency Currency,
@@ -158,7 +198,9 @@ public sealed record ShopPurchaseRequest(
     IReadOnlyList<ShopPurchaseLineInput> Lines,
     string IdempotencyKey,
     string Actor,
-    string Reason);
+    string Reason,
+    string? PlayerUid = null,
+    string? WorldId = null);
 
 public sealed record ShopOrderCharge(ExtractionCurrency Currency, long Amount);
 
@@ -188,7 +230,9 @@ public sealed record ShopOrder(
     string Actor,
     string Reason,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? PlayerUid = null,
+    string? WorldId = null);
 
 public sealed record ShopDelivery(
     Guid DeliveryId,
@@ -211,7 +255,9 @@ public sealed record ShopDeliveryWorkItem(
     string UpstreamPath,
     string IdempotencyKey,
     IReadOnlyList<ShopItemGrant> Items,
-    int Attempt);
+    int Attempt,
+    string? PlayerUid = null,
+    string? WorldId = null);
 
 public sealed record ShopPurchaseResult(
     ShopOrder? Order,

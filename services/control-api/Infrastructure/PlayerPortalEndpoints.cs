@@ -39,17 +39,70 @@ public static class PlayerPortalEndpoints
         });
         var auth = player.MapGroup("/auth");
 
-        auth.MapPost("/request-code", async (
-            RequestPlayerLoginCode request,
+        auth.MapGet("/mode", (
             HttpContext httpContext,
-            PlayerPortalAuthenticationService authentication,
+            SteamOpenIdAuthenticationService steamOpenId) =>
+        {
+            try
+            {
+                return Results.Ok(steamOpenId.GetStatus(httpContext));
+            }
+            catch (Exception exception)
+            {
+                return ToPortalError(httpContext, exception, anonymous: true);
+            }
+        });
+
+        auth.MapGet("/steam/start", (
+            HttpContext httpContext,
+            SteamOpenIdAuthenticationService steamOpenId) =>
+        {
+            try
+            {
+                var start = steamOpenId.Start(httpContext);
+                return Results.Redirect(start.AuthorizationUrl, permanent: false);
+            }
+            catch (Exception exception)
+            {
+                return ToPortalError(httpContext, exception, anonymous: true);
+            }
+        });
+
+        auth.MapGet("/steam/callback", async (
+            HttpContext httpContext,
+            SteamOpenIdAuthenticationService steamOpenId,
             CancellationToken cancellationToken) =>
         {
             try
             {
-                var challenge = await authentication.RequestCodeAsync(
+                var callback = await steamOpenId.CompleteCallbackAsync(
+                    httpContext,
+                    cancellationToken);
+                return Results.Redirect(callback.RedirectUrl, permanent: false);
+            }
+            catch (Exception exception)
+            {
+                return ToPortalError(httpContext, exception, anonymous: true);
+            }
+        });
+
+        auth.MapPost("/request-code", async (
+            RequestPlayerLoginCode request,
+            HttpContext httpContext,
+            PlayerPortalAuthenticationService authentication,
+            SteamOpenIdAuthenticationService steamOpenId,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var userId = steamOpenId.ResolveCodeRequestUserId(
+                    httpContext,
                     request.UserId,
+                    "openid_game_code");
+                var challenge = await authentication.RequestCodeAsync(
+                    userId,
                     httpContext.Connection.RemoteIpAddress?.ToString() ?? "unavailable",
+                    httpContext.TraceIdentifier,
                     cancellationToken);
                 return Results.Accepted(value: new
                 {
@@ -65,15 +118,39 @@ public static class PlayerPortalEndpoints
             }
         });
 
-        auth.MapPost("/verify", (
+        auth.MapPost("/verify", async (
             VerifyPlayerLoginCode request,
             HttpContext httpContext,
-            PlayerPortalAuthenticationService authentication) =>
+            PlayerPortalAuthenticationService authentication,
+            SteamOpenIdAuthenticationService steamOpenId,
+            CancellationToken cancellationToken) =>
         {
             try
             {
-                var creation = authentication.Verify(request.ChallengeId, request.Code);
-                authentication.AppendSessionCookie(httpContext.Response, creation);
+                var expectedUserId = authentication.RequiresSteamOpenId
+                    ? steamOpenId.ResolveCodeRequestUserId(
+                        httpContext,
+                        null,
+                        "openid_binding")
+                    : null;
+                var creation = await authentication.VerifyAsync(
+                    request.ChallengeId,
+                    request.Code,
+                    httpContext.Connection.RemoteIpAddress?.ToString(),
+                    httpContext.TraceIdentifier,
+                    expectedUserId,
+                    cancellationToken);
+                if (authentication.RequiresSteamOpenId &&
+                    (expectedUserId is null ||
+                     !steamOpenId.CompletePendingBinding(httpContext, expectedUserId)))
+                {
+                    authentication.RevokeCreatedSession(creation);
+                    throw new PlayerPortalException(
+                        "STEAM_OPENID_PENDING_SESSION_EXPIRED",
+                        "Steam 待绑定会话已失效，请重新开始登录。",
+                        StatusCodes.Status401Unauthorized);
+                }
+                authentication.AppendSessionCookie(httpContext, creation);
                 return Results.Ok(new
                 {
                     authenticated = true,
@@ -404,7 +481,8 @@ public static class PlayerPortalEndpoints
                     settlementEnabled = settlementProbe.Success,
                     reason = settlementProbe.Success
                         ? null
-                        : settlementProbe.ErrorMessage ?? "资源兑换结算当前不可用。"
+                        : settlementProbe.ErrorMessage ??
+                          "Native 稳定扣物/持久化证据不可用；未证明资源已移除前绝不入账。"
                 });
             }
             catch (Exception exception)
@@ -447,6 +525,7 @@ public static class PlayerPortalEndpoints
                     product,
                     request.Quantity,
                     idempotencyKey,
+                    $"player:{context.Account.IdentityProvider}:{context.Account.ExternalUserId}",
                     cancellationToken);
                 if (purchase.ErrorCode is not null || purchase.Order is null)
                 {
@@ -486,7 +565,7 @@ public static class PlayerPortalEndpoints
             Guid runId,
             HttpContext httpContext,
             PlayerPortalAuthenticationService authentication,
-            ExtractionSettlementService settlement,
+            ExtractionSettlementQueue settlementQueue,
             ExtractionOperationGate operationGate,
             CancellationToken cancellationToken) =>
         {
@@ -497,7 +576,7 @@ public static class PlayerPortalEndpoints
                 authentication.RequireCsrf(httpContext, session);
                 var idempotencyKey = RequireIdempotencyKey(httpContext.Request);
                 using var operationLease = operationGate.AcquireOperation();
-                var run = await settlement.SettleAsync(
+                var run = await settlementQueue.EnqueueAsync(
                     runId,
                     session.UserId,
                     idempotencyKey,
@@ -510,7 +589,132 @@ public static class PlayerPortalEndpoints
             }
         });
 
+        me.MapGet("/new-player-activities", async (
+            HttpContext httpContext,
+            PlayerPortalAuthenticationService authentication,
+            ExtractionModeCoordinator coordinator,
+            SqliteExtractionRepository repository,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                RejectIdentityOverride(httpContext);
+                var session = authentication.RequireSession(httpContext);
+                var context = await coordinator.GetAccountContextAsync(
+                    session.UserId,
+                    requireOnline: false,
+                    cancellationToken);
+                if (context.Season.WorldId is null)
+                {
+                    return Results.Ok(new { items = Array.Empty<object>() });
+                }
+                var activities = await repository.ListAvailableNewPlayerActivitiesAsync(
+                    context.Account.AccountId,
+                    context.Season.SeasonId,
+                    context.Season.WorldId,
+                    cancellationToken);
+                return Results.Ok(new
+                {
+                    items = activities.Select(
+                        NewPlayerActivityEndpoints.AvailabilityDto).ToArray()
+                });
+            }
+            catch (Exception exception)
+            {
+                return ToPortalError(httpContext, exception, anonymous: false);
+            }
+        });
+
+        me.MapPost(
+            "/new-player-activities/{activityKey}/versions/{version:int}/claim",
+            async (
+                string activityKey,
+                int version,
+                HttpContext httpContext,
+                PlayerPortalAuthenticationService authentication,
+                ExtractionModeCoordinator coordinator,
+                SqliteExtractionRepository repository,
+                EconomySafetyGate safetyGate,
+                CancellationToken cancellationToken) =>
+            {
+                try
+                {
+                    RejectIdentityOverride(httpContext);
+                    var session = authentication.RequireSession(httpContext);
+                    authentication.RequireCsrf(httpContext, session);
+                    var idempotencyKey = RequireIdempotencyKey(httpContext.Request);
+                    var context = await coordinator.GetAccountContextAsync(
+                        session.UserId,
+                        requireOnline: true,
+                        cancellationToken);
+                    var binding = context.IdentityBinding;
+                    if (binding is null ||
+                        !SamePlayerUid(session.PlayerUid, binding.PlayerUid))
+                    {
+                        throw new PlayerPortalException(
+                            "PLAYER_SESSION_BINDING_MISMATCH",
+                            "The authenticated session no longer matches the current-world player identity.",
+                            StatusCodes.Status403Forbidden);
+                    }
+
+                    using var safetyLease = await safetyGate.AcquireAsync(
+                        EconomyWriteFeature.ResourceExchange,
+                        EconomySafetyContext.FromAccount(context),
+                        queue: null,
+                        cancellationToken);
+                    var result = await repository.ClaimNewPlayerActivityAsync(
+                        new NewPlayerActivityClaimRequest(
+                            activityKey,
+                            version,
+                            context.Account.AccountId,
+                            context.Season.SeasonId,
+                            binding.WorldId,
+                            binding.PlayerUid,
+                            context.Account.ExternalUserId,
+                            idempotencyKey,
+                            $"player:{context.Account.IdentityProvider}:{context.Account.ExternalUserId}"),
+                        cancellationToken);
+                    if (result.ErrorCode is not null ||
+                        result.Activity is null ||
+                        result.Grant is null ||
+                        result.Wallet is null)
+                    {
+                        throw ClaimFailure(result);
+                    }
+                    return Results.Ok(NewPlayerActivityEndpoints.ClaimDto(result));
+                }
+                catch (Exception exception)
+                {
+                    return ToPortalError(httpContext, exception, anonymous: false);
+                }
+            });
+
         return player;
+    }
+
+    private static bool SamePlayerUid(string? first, string second) =>
+        Guid.TryParse(first, out var firstUid) &&
+        Guid.TryParse(second, out var secondUid) &&
+        firstUid != Guid.Empty &&
+        firstUid == secondUid;
+
+    private static PlayerPortalException ClaimFailure(NewPlayerActivityClaimResult result)
+    {
+        var status = result.ErrorCode switch
+        {
+            "NEW_PLAYER_ACTIVITY_NOT_FOUND" => StatusCodes.Status404NotFound,
+            "NEW_PLAYER_ACTIVITY_IDENTITY_BINDING_REQUIRED" or
+            "NEW_PLAYER_ACTIVITY_ACCOUNT_MISMATCH" => StatusCodes.Status403Forbidden,
+            "IDEMPOTENCY_CONFLICT" or
+            "NEW_PLAYER_ACTIVITY_ALREADY_CLAIMED" or
+            "NEW_PLAYER_ACTIVITY_NOT_AVAILABLE" or
+            "NEW_PLAYER_ACTIVITY_WORLD_MISMATCH" => StatusCodes.Status409Conflict,
+            _ => StatusCodes.Status422UnprocessableEntity
+        };
+        return new PlayerPortalException(
+            result.ErrorCode ?? "NEW_PLAYER_ACTIVITY_CLAIM_FAILED",
+            result.ErrorMessage ?? "The new-player activity claim failed.",
+            status);
     }
 
     private static string RequireIdempotencyKey(HttpRequest request)
@@ -563,6 +767,9 @@ public static class PlayerPortalEndpoints
                 ExtractionModeException modeException => Results.Json(
                     new ApiError(modeException.Code, modeException.Message),
                     statusCode: modeException.StatusCode),
+                NewPlayerActivityException activityException => Results.Json(
+                    new ApiError(activityException.Code, activityException.Message),
+                    statusCode: activityException.StatusCode),
                 ArgumentException => Results.BadRequest(
                     new ApiError(
                         "INVALID_EXTRACTION_REQUEST",

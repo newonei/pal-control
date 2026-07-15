@@ -1,6 +1,6 @@
 # 幻兽商域玩法 TODO
 
-> 审计基线：2026-07-13，`main` 分支。本文只描述当前仓库能够证明的能力，以及从“本机开发服原型”走到“可长期运营的周世界资源经济服”仍需完成的工作。设计文档、单次手工演示或页面截图不等于功能完成。
+> 审计基线：2026-07-15，`main` 分支。本文只描述当前仓库能够证明的能力，以及从“本机开发服原型”走到“可长期运营的周世界资源经济服”仍需完成的工作。设计文档、单次手工演示或页面截图不等于功能完成。
 
 ## 当前结论
 
@@ -15,26 +15,26 @@
 - 当前周世界、允许容器中的任意白名单资源均可出售，不追踪其采集时间、交易、制作或掉落来源；
 - 死亡和断线不是资源兑换成功/失败状态，也不生成“行动成功率”。
 
-公开经济测试所需的 Native 原子扣物、管理员 RBAC、平台身份绑定、故障注入、恢复演练和监控仍未闭环。
+平台身份/本周角色绑定、管理员 RBAC、SQLite 发货 outbox、Native 原子扣物代码、服务级故障注入和经济监控已经完成本地自动化闭环。当前硬阻断项是 Native 真实保存/停服/重启/重登持久化证据、世界与经济独立恢复、连续 3 次真实周换档、正式域名 Steam/TLS/代理验收及 5–10 人完整 7 天试运行。
 
 因此，现阶段应继续标记为 **仅限可信本机/好友开发服的原型**，不能直接作为公网经济服开放。
 
 ## 当前实际可玩流程
 
-1. 玩家输入平台 UserId/SteamID64，在线角色通过游戏内私信收到 8 位验证码。
-2. 验证成功后建立玩家门户会话；首次访问创建跨周账户，并按开发配置发放 1000 商域币和 300 战备券。
+1. 公网 Steam 服先经 Steam OpenID 建立短时待绑定身份；可信好友服可显式使用平台 UserId fallback。两种模式都由本机受限 RCON `/send` 向在线角色私发 8 位验证码。
+2. 验证码成功且实时确认当前 `worldId + PlayerUID` 后建立玩家门户会话。首次访问创建跨周账户；1000 商域币/300 战备券只属于 `legacy-v1` 开发兼容配置，正式奖励必须通过版本化活动显式领取。
 3. 玩家浏览 5 个硬编码战备商品；商品基础价格每天按确定性种子调整到 90%–110%。
-4. 购买时先扣数据库钱包，再由 PalDefender 发放物品；确定失败退款，结果无法证明时进入 `uncertain`。
+4. 购买时先在 SQLite 提交扣款/订单，再以确定性 key 接入同库 PalDefender outbox 发货；两者是可恢复的两个事务而非一次原子提交。确定失败退款，部分或无法证明的结果进入人工对账，派发后绝不盲重发。
 5. 玩家回到常驻 Palworld 周世界自行采集、战斗、生产、交易和积累资源。
 6. 玩家门户地图每 5 秒更新位置；默认配置只有 1 个开发服资源兑换点。
 7. 进入资源兑换区后，服务端间隔 2 秒进行两次位置采样。
 8. 系统读取 `Items`、`Food`、`DropSlot`，对约 21 种白名单资源的**全部数量**生成 30 秒报价；当前不能选择只出售一部分。
-9. 玩家确认后由 RCON `/delitems` 扣物，再用 PalDefender REST 回读总量。
-10. 只有回读证明目标总量按报价减少后，系统才唯一增加战备券；无法证明则冻结兑换并等待人工对账。
+9. 玩家确认后，Control API 以持久 run key 向 Native `inventory.consume` 发送一次完整快照消费命令；Production 不允许 RCON `/delitems` fallback。
+10. 只有 Native 逐行差值、完整 after 快照和聚合回读全部证明实际扣物与报价一致时，系统才在 SQLite 单事务内唯一增加战备券；明确失败不入账，`uncertain` 不重试并进入人工对账。当前能力仍为 experimental，真实持久化验收前 Production 闸门保持关闭。
 11. 玩家使用战备券继续购买补给，形成“采集/战斗 -> 资源出售 -> 战备采购”的循环。
-12. 周档结束后由管理员运行换档脚本，保存旧世界、启动新世界并提交新赛季。
+12. 周档结束后，管理员先运行默认 plan-only 的换档脚本；显式 `-Execute` 才会按持久步骤执行游戏备份、经济快照/复核、停服、新世界探针和赛季提交，脚本不会移动或删除旧世界。
 
-这条流程已经证明了基础交易链，但目前真实验收证据仍主要是一次商城发货和一次 5 个皮革资源兑换，尚未证明完整周档、并发和故障恢复。
+26 个统一 contract/integration 脚本已经覆盖身份、商城、发货、兑换、并发、故障边界、恢复、Windows 配置保留和换档客户端；真实游戏证据仍主要是早期一次商城发货与一次 5 个皮革 RCON 历史联调，不能替代当前 Native 持久化、完整周档和生产回调验收。
 
 ## 当前已经具备的基础
 
@@ -42,14 +42,14 @@
 
 | 模块 | 当前能力 | 判断 |
 | --- | --- | --- |
-| 玩家入口 | 游戏内 8 位验证码、HttpOnly/SameSite Cookie、CSRF、Origin 白名单、用户/IP/并发限流 | 已实现；会话和限流仍是进程内状态 |
+| 玩家入口 | 可选 Steam OpenID + 游戏内 8 位验证码、本周 PlayerUID 绑定、HttpOnly/SameSite Cookie、CSRF、Origin 白名单、用户/IP/并发限流 | 已实现；OpenID state、待绑定身份、会话和限流仍是进程内状态，正式域名回调待验收 |
 | 账户与钱包 | SQLite 事件库、双货币、不可负余额、幂等账本、退款与人工调账 | 单机基础可用 |
-| 商城 | 5 个硬编码商品、个人周限购、先扣款、PalDefender 发货、确定失败退款、`uncertain` 不重发 | happy path 可用；发货归因仍不够强 |
-| 资源兑换 | 1 个固定兑换点、位置双采样、30 秒报价、约 21 种白名单资源、RCON 扣物、REST 回读、唯一入账 | 仅可信开发服可用 |
+| 商城 | 5 个硬编码商品、个人周限购、先扣款、PalDefender 逐物品结构化 receipt、确定失败退款、partial/`uncertain` 不重发 | 单机闭环已具备；真实 PalDefender 回执语义仍需按固定版本验收 |
+| 资源兑换 | 1 个固定兑换点、位置双采样、30 秒完整 Native 报价快照、约 21 种白名单资源、原子扣物与唯一入账 | 代码/假桥闭环完成；真实保存/重启/重登前保持 fail-closed |
 | 内容刷新 | 每个业务日按确定性种子对基础价格做 90%–110% 调整 | 只有价格变化，不是完整日轮换 |
-| 周换档 | 维护闸门、readiness/commit API、保存/停服/新世界脚本 | 尚未形成可恢复的持久状态机，也未完成三次演练 |
-| Native | `inventory.consume.experimental` 已实现同 Tick 校验与回滚 | 未支持可靠清空槽位、未完成保存/重启验证、Control API 尚未接入 |
-| 存档 | 稳定快照、独立备份、逐文件 SHA-256 与篡改检测 | 缺少正式恢复流程和经济状态一致性备份 |
+| 周换档 | 持久化阶段状态机、确定性 step key、默认 plan-only 受控客户端、经济快照/RPO/未决交易阻断、expiry/reward 幂等框架 | 自动化故障恢复与运维客户端已具备；三次真实演练仍未完成 |
+| Native | dev36 `inventory.consume.experimental` 已支持完整槽元数据、同 Tick 全单校验/回滚和安全清空普通静态槽位，Control API 已接入 | 未完成真实保存/重启/重登验证，不能提升为 stable |
+| 存档 | 游戏稳定快照、经济一致性快照、manifest/SHA-256、staging 复核与恢复后默认关门 | 缺少世界/经济各一次真实独立恢复和生产切换演练 |
 
 ## 已冻结的玩法基线：方案 A
 
@@ -99,12 +99,13 @@ removed -> credited -> settled
 
 ### P0-02 持久化平台身份与本周角色绑定 `[BE][SECURITY]`
 
-- [ ] 增加 `(platformSubject, seasonId, worldId, playerUid, accountId)` 绑定模型和双向唯一约束。
-- [ ] 新周档必须重新绑定当前世界的完整 `PlayerUID`；旧世界的绑定立即失效。
-- [ ] 购买、生成报价和确认兑换前都校验实时 PlayerUID 与绑定一致。
-- [ ] 昵称变化不能创建新账户或改变授权主体。
-- [ ] 正式决定 Steam OpenID/平台登录方案；游戏内验证码可作为可信好友服或其他平台 fallback。
-- [ ] 增加绑定历史、会话撤销、封禁联动和异常登录审计。
+- [x] 增加 `(platformSubject, seasonId, worldId, playerUid, accountId)` 绑定模型和双向唯一约束。
+- [x] 新周档必须重新绑定当前世界的完整 `PlayerUID`；旧世界的绑定立即失效。
+- [x] 购买、生成报价和确认兑换前都校验实时 PlayerUID 与绑定一致。
+- [x] 昵称变化不能创建新账户或改变授权主体。
+- [x] 通过 [ADR-0002](docs/architecture/decisions/0002-steam-openid-and-world-binding.md) 决定：公网 Steam 服先用 Steam OpenID 建立平台身份，再用游戏内验证码绑定本周 `PlayerUID`；可信好友服/其他平台可显式使用验证码 fallback。
+- [x] 已实现可选 Steam OpenID 开始/回调、服务端有界 `check_authentication`、一次性 state/nonce 重放防护、固定 HTTPS realm/return_to 和与游戏验证码的双层绑定；公网/Production 配置会强制 `OpenIdThenGameCode`，可信好友服才能显式使用 `TrustedGameCode` fallback。
+- [x] 增加绑定历史、会话撤销、封禁联动和异常登录审计。
 
 验收标准：
 
@@ -114,13 +115,13 @@ removed -> credited -> settled
 
 ### P0-04 稳定并接入 Native 原子 `inventory.consume` `[NATIVE][BE]`
 
-- [ ] 完成可靠清空最后一个槽位，移除 `inventory.consume.partial-stack-only`。
+- [x] 完成可靠清空最后一个槽位，移除 `inventory.consume.partial-stack-only`；只允许完整元数据可验证的普通静态槽位，动态/腐化/不可验证槽位在写前拒绝。
 - [ ] 完成“保存世界 → 停服 → 重启 → 重登”的持久化验证，只有通过后才把能力从 experimental 提升为 stable。
-- [ ] 报价时保存 `inventory.probe` 返回的三个完整容器，以及每项 `containerId`、`slotIndex`、`ItemID`、数量和规范化快照 hash；`beforeRevision/observedRevision` 仅作为 consume 结果证据。
-- [ ] 结算时在同一个游戏 Tick 内比较全部预期槽位并全成或全败。
-- [ ] 逐行验证 `actualConsumed == requestedQuantity`，任一不一致不得入账。
-- [ ] 相同幂等键返回原结果；同键不同 payload 拒绝；跨 Control API 重启仍保持最终幂等。
-- [ ] 正式模式禁用 RCON `delitems` fallback，RCON 只保留开发诊断和人工应急。
+- [x] 报价时保存 `inventory.probe` 返回的三个完整容器，以及每项 `containerId`、`slotIndex`、`ItemID`、数量、动态元数据、腐化值 bit pattern 和规范化快照 hash；`beforeRevision/observedRevision` 仅作为 consume 结果证据。
+- [x] 结算时在同一个游戏 Tick 内比较全部预期槽位并全成或全败。
+- [x] 逐行验证 `actualConsumed == requestedQuantity`、前后数量差、完整快照和聚合回读，任一不一致不得入账。
+- [x] 相同幂等键返回持久化原结果；同键不同 payload 或跨 run 重用拒绝；跨 Control API 重启仍保持最终幂等。
+- [x] 正式模式禁用 RCON `delitems` fallback；旧路径只允许宿主为 Development、`Security:DevelopmentMode=true`、`PlayerPortal:PublicSteam=false`、显式设置 `AllowDevelopmentSettlement=true`、启用 RCON 且未强制 Native 的隔离诊断环境。
 
 验收标准：
 
@@ -130,17 +131,17 @@ removed -> credited -> settled
 
 ### P0-05 修复资源兑换 saga 的并发与终态倒退 `[BE]`
 
-本轮已堵住旧快照覆盖和“未知 RCON dispatch 仅凭背包下降自动入账”两条高风险路径；跨存储原子提交、完整故障注入和消费队列仍未完成，因此本项尚不能整体关闭。
+本轮已堵住旧快照覆盖和“未知 RCON dispatch 仅凭背包下降自动入账”两条高风险路径，并完成同库原子 credit、心跳、消费队列、背压及服务级故障注入；真实 Palworld 持久化仍由 P0-04 单独阻断。
 
 - [x] 为 run 增加向后兼容的 `revision`、`leaseId`、`leaseOwner`、`leaseExpiresAt` 和状态变更时间。
-- [ ] 增加 attempt 计数和长操作最后心跳；当前关键区使用 90 秒内部超时且 lease 为 2 分钟。
+- [x] 增加 attempt 计数和长操作最后心跳；当前关键区使用 90 秒内部超时且 lease 为 2 分钟。
 - [x] 原请求持有有效 lease 时，恢复任务不能接管；只允许回收过期 lease。
 - [x] 所有状态转换都携带 expected state、revision 和适用的 lease fence，使用 compare-and-swap。
 - [x] `Settled`、`Failed`、`Cancelled` 等终态不可降级回 `Removed`、`Uncertain` 或其他中间态。
 - [x] `Consuming` 恢复不再依据聚合背包下降自动入账；只有 HTTP 持有者确认成功并持久化为 `Removed` 后，恢复任务才可继续 credit。
-- [ ] 钱包 credit、唯一账本记录和 `Removed -> Credited` 在同一数据库事务提交；`Credited -> Settled` 可安全恢复。
+- [x] 钱包 credit、唯一账本记录和 `Removed -> Credited` 在同一数据库事务提交；`Credited -> Settled` 可安全恢复。
 - [x] 若账本已经存在该 run 的 credit，自动或人工路径不会再标记 failed、退款或重复入账；稳定 reference/幂等键支持 credit 后崩溃恢复。
-- [ ] 增加每玩家串行锁、全服有界消费队列和 backpressure。
+- [x] 增加每玩家串行锁、全服有界消费队列和 backpressure。
 
 验收标准：
 
@@ -150,14 +151,14 @@ removed -> credited -> settled
 
 ### P0-06 让商城发货具备可归因的结构化 receipt `[BE][PALDEFENDER/NATIVE]`
 
-当前按背包总量 `current >= baseline + expectedDelta` 判断发货，玩家自然拾取相同物品可能误判成功；收到后立即使用又可能误进 `uncertain`。
+旧版按背包总量判断发货会受自然拾取或立即消耗干扰；当前已改为绑定 delivery key 的逐物品结构化 receipt 和 SQLite outbox，旧总量差只作为历史问题保留。
 
-- [ ] 选择 PalDefender 扩展或 Native grant adapter，返回绑定 `deliveryId` 和 `idempotencyKey` 的逐物品结构化 receipt。
-- [ ] receipt 必须包含目标 PlayerUID、请求数量、实际 Granted 数量、命令版本和稳定结果 ID。
-- [ ] 重放相同 delivery key 返回同一 receipt，同键不同请求拒绝。
-- [ ] 部分成功进入人工对账，不能按“明确失败”自动全额退款。
-- [ ] 发货回读超时从命令完成/ACK 时开始计算，不从基线采集时开始。
-- [ ] 给发货队列增加容量、每玩家串行、dead-letter、最老任务年龄和熔断指标。
+- [x] 选择 PalDefender 逐物品 grant adapter，返回绑定 `deliveryId` 和 `idempotencyKey` 的不可变结构化 receipt。
+- [x] receipt 包含目标 PlayerUID、请求数量、实际 Granted 数量、命令版本、逐行 `CompletedAt` 和稳定结果 ID。
+- [x] 重放相同 delivery key 返回同一持久化 receipt，同键不同请求拒绝，跨服务重启保持一致。
+- [x] 部分成功进入人工对账，不能按“明确失败”自动全额退款。
+- [x] 发货 ACK 时间从持久化命令的 `CompletedAt` 计算，不从基线采集时开始。
+- [x] 给发货队列增加容量、每玩家串行、dead-letter、最老任务年龄和熔断指标。
 
 验收标准：
 
@@ -167,11 +168,11 @@ removed -> credited -> settled
 
 ### P0-07 管理认证、RBAC 与真实审计身份 `[SECURITY][BE][WEB]`
 
-- [ ] 为全部管理 API、PalDefender 写接口、调账、对账和换档操作增加 ASP.NET Core Authentication/Authorization。
-- [ ] 至少定义 `Viewer`、`Operator`、`EconomyAdmin`、`SeasonAdmin`、`Owner`。
-- [ ] 玩家门户 Cookie 与管理身份完全隔离，玩家会话不能访问任何管理路由。
-- [ ] 移除 `local-console` 等硬编码 actor，记录真实 subject、角色、来源 IP、reason、request hash、before/after、版本和结果。
-- [ ] 钱包正向调账、人工确认入账、开放新赛季等高风险操作使用 MFA、再次确认或双人审批。
+- [x] 为全部管理 API、PalDefender 写接口、调账、对账和换档操作增加 ASP.NET Core Authentication/Authorization。
+- [x] 至少定义 `Viewer`、`Operator`、`EconomyAdmin`、`SeasonAdmin`、`Owner`。
+- [x] 玩家门户 Cookie 与管理身份完全隔离，玩家会话不能访问任何管理路由。
+- [x] 移除 `local-console` 等硬编码 actor，记录真实 subject、角色、来源 IP、reason、request hash、before/after、版本和结果。
+- [x] 钱包正向调账、人工确认入账、开放新赛季等高风险操作使用 MFA、再次确认或双人审批。
 
 验收标准：
 
@@ -181,13 +182,15 @@ removed -> credited -> settled
 
 ### P0-08 统一 Economy Safety Gate 与生产 fail-closed 配置 `[BE][OPS]`
 
+统一门禁现已覆盖 SQLite 回滚写探针与磁盘阈值、活动赛季/物理 world、完整玩家绑定、PalDefender token capability 与版本、Native 生产能力、受限 RCON 验证码/开发能力、维护和有界队列；合同测试与 HTTP smoke 验证了结构性启动拒绝、稳定 blocker、写前拒绝、独立熔断热恢复、排空和状态持久化。正式服新手奖励已改为冻结版本、显式领取和同事务双钱包入账。
+
 - [x] 玩法代码默认关闭，生产配置样例显式关闭且初始商域币/战备券为 0。
-- [ ] 将正式服新手奖励实现为版本化、可审计活动；当前 `legacy-v1` 的 1000/300 只保留给开发配置兼容。
-- [ ] 新订单扣款前验证数据库可写、世界 ID、赛季、角色绑定、游戏/PalDefender/Native 版本与能力、维护状态和队列容量。
-- [ ] 同一个门禁也约束后台发货 worker，避免版本漂移后“先扣款再失败”。
-- [ ] 购买与资源兑换提供独立熔断开关，不需要重启服务。
-- [ ] 密钥、监听、Cookie、安全目录和 ACL 等结构性安全错误使用 `ValidateOnStart` 并使启动失败；只对已启用的 RCON/Native adapter 做条件校验。
-- [ ] 世界、版本、能力、磁盘余量和运行时依赖漂移不杀死只读服务，而是关闭对应经济写闸门并暴露明确原因；当前已完成维护期已有账户只读和经济存储 readiness 分离，其他逐功能门禁待补。
+- [x] 将正式服新手奖励实现为按周世界冻结、版本化、可审计且显式领取的活动；双钱包/账本/领取记录同事务提交，当前 `legacy-v1` 的 1000/300 只保留给开发配置兼容。
+- [x] 新订单扣款前验证数据库可写、世界 ID、赛季、角色绑定、游戏/PalDefender/Native 版本与能力、维护状态和队列容量。
+- [x] 同一个门禁也约束后台发货 worker，避免版本漂移后“先扣款再失败”。
+- [x] 购买与资源兑换提供独立熔断开关，不需要重启服务。
+- [x] 密钥、监听、Cookie、安全目录和 ACL 等结构性安全错误使用 `ValidateOnStart` 并使启动失败；只对已启用的 RCON/Native adapter 做条件校验。
+- [x] 世界、版本、能力、磁盘余量和运行时依赖漂移不杀死只读服务，而是关闭对应经济写闸门并暴露明确原因；维护期已有账户只读、经济存储 readiness 分离和购买/资源兑换逐功能门禁均已接入。
 - [x] 修复初始货币配置变更导致旧幂等键 hash 冲突：冻结 `legacy-v1` 额度，非 legacy 策略禁止隐式发币，历史冲突只告警且要求显式 adjustment/migration。
 
 验收标准：
@@ -198,12 +201,17 @@ removed -> credited -> settled
 
 ### P0-09 统一经济持久化、备份与恢复 `[BE][OPS]`
 
-- [ ] 单机阶段可继续使用 SQLite，但账户、钱包、订单、run、delivery evidence、outbox、审计和调度必须进入有版本迁移的统一事务存储。
-- [ ] 停止整文件重写 run/evidence JSON 和无限增长、无保留策略的 JSONL 作为长期权威状态。
-- [ ] 玩家登录与会话撤销写审计；P0 可在重启后强制全部玩家重新登录。若未来持久化会话，只保存 token hash，不保存原始凭据。
-- [ ] 提供一致性经济快照，覆盖 SQLite/WAL、命令状态、run、delivery、闸门和调度状态。
-- [ ] 提供恢复到 staging、hash 校验、worldId/账本/未决交易复核后再切换的工具。
-- [ ] 恢复后经济默认关闭，直到全部门禁重新通过。
+- [x] 单机阶段使用同一个 `extraction-commerce.db` 承载账户、钱包、订单、run、delivery evidence/receipt、PalDefender 发货 outbox、管理审计和赛季/换档调度，并为各组件登记版本化 migration。购买事务与 PalDefender command 接收仍是同库的两个事务，由持久 delivery/receipt 和确定性 key 恢复衔接，不能宣称跨步骤原子提交。
+- [x] 经济 run/evidence 已停止整文件 JSON 权威写入；PalDefender 发货命令已从 JSONL/内存权威迁移为 SQLite 命令投影和不可变事件。旧 JSONL 只在一次性事务导入时读取，成功后改名保留；冲突、篡改或导入失败会使启动失败。
+- [ ] 公告、游戏内通知和 save 等非经济命令审计仍使用追加式 JSONL；为其制定保留/归档策略，或在需要统一查询与多实例 worker 前迁移到相应持久存储。
+- [x] 玩家登录与会话撤销写审计；P0 可在重启后强制全部玩家重新登录。若未来持久化会话，只保存 token hash，不保存原始凭据。
+- [x] 提供一致性经济快照，覆盖 SQLite/WAL、命令状态、run、delivery、闸门和调度状态。
+- [x] 提供恢复到 staging、hash 校验、worldId/账本/未决交易复核后再切换的工具。
+- [x] 恢复后经济默认关闭，直到全部门禁重新通过。
+
+自动化证据：身份安全契约覆盖 token hash、进程重启失效、登录/撤销脱敏审计；delivery receipt/outbox harness 覆盖 100 路并发、容量、server+key 冲突、租约崩溃恢复、`dispatched` 不重发、死信、不可变事件、终态不可逆、JSONL 幂等迁移和迁移失败无部分写入；continuity harness 覆盖 SQLite 在线备份、命令与 side-state 一致性、manifest/hash/worldId/账本/未决状态复核、staging 恢复及恢复后双熔断和维护闸门默认关闭，并覆盖损坏、N-1 manifest/schema 兼容和多个故障注入点。
+
+仍未完成：世界备份与经济备份的真实独立恢复演练、从已发布 N-1 包执行迁移失败后的真实回退，以及 staging 人工复核后的生产切换尚未验收。因此下列验收标准仍按整体未完成处理。
 
 验收标准：
 
@@ -213,11 +221,15 @@ removed -> credited -> settled
 
 ### P0-10 持久化周换档状态机并完成真实演练 `[BE][OPS]`
 
-- [ ] 将 `preflight -> drain -> game backup -> economy backup -> stop -> new world -> probe -> commit -> reopen` 持久化。
-- [ ] 每一步使用确定性 step key，重启后可以继续，不能跳步或重复发放。
-- [ ] 战备券过期写入唯一 ledger；提供版本化、幂等的赛季结算 job 框架，若当前内容版本配置了周奖励，则每项奖励最多执行一次。
-- [ ] 存在任何未终结资源兑换 settlement、未决订单、`uncertain`、过期备份或版本漂移时禁止换档。
-- [ ] 生产配置禁止自动删除旧世界；按 RPO、审计/回滚窗口、磁盘容量和恢复成本制定可配置保留期并做容量预估，固定“至少 8 周”时须另有业务 ADR。
+- [x] 将 `preflight -> drain -> game backup -> economy backup -> stop -> new world -> probe -> commit -> reopen` 持久化。
+- [x] 每一步使用确定性 step key，重启后可以继续，不能跳步或重复发放。
+- [x] 战备券过期写入唯一 ledger；提供版本化、幂等的赛季结算 job 框架，若当前内容版本配置了周奖励，则每项奖励最多执行一次。
+- [x] 存在任何未终结资源兑换 settlement、未决订单、`uncertain`、过期备份或版本漂移时禁止换档。
+- [x] 生产配置禁止自动删除旧世界；按 RPO、审计/回滚窗口、磁盘容量和恢复成本制定可配置保留期并做容量预估，固定“至少 8 周”时须另有业务 ADR。
+
+自动化证据：持久化状态机、确定性 operation/step key、SQLite 事务与 evidence envelope hash 已由 continuity harness 覆盖；每个阶段都在“证据写入后”和“步骤推进后”注入崩溃并验证回滚/重放，expiry/reward 重放、规则版本漂移、备份 RPO、未决订单/settlement/命令队列和安全门禁均由代码路径拒绝。受控 PowerShell 客户端默认 plan-only，强制 managed game backup 与 economy snapshot/verify/stage，逐阶段覆盖 action 后崩溃、服务端提交后响应丢失、同键恢复、凭据脱敏和错误阻断；脚本结构性拒绝旧世界 Archive/Delete。经济备份保留期、最少份数、容量安全系数均可配置，清理 API 只输出候选而不执行删除。
+
+仍未完成：3 次真实 Palworld 周换档演练，以及新赛季产生真实交易后“拒绝自动回滚到旧世界”的真实环境验收尚未完成；自动化和受控客户端不能替代这些外部证据。
 
 验收标准：
 
@@ -228,14 +240,15 @@ removed -> credited -> settled
 ### P0-11 自动化测试、CI、指标与发布闸门 `[QA][OPS]`
 
 - [x] 新建统一 `test` 命令和 GitHub Actions Windows workflow，运行两个前端 build、.NET Release build、玩家端单元测试、契约测试、结算 harness 和现有 smoke tests。
-- [ ] 增加价格、区域、哈希、状态机、钱包与账本守恒单元测试。
-- [ ] 增加 100 并发扣款、限购、同键/异键重放、迁移和唯一约束测试。
-- [ ] 增加登录、CSRF、IDOR、角色绑定、商城、发货、资源兑换、Native consume 与换档 contract/E2E。
-- [ ] 在每个“持久化、派发、ACK、扣物、回读、入账”边界执行故障注入。
+- [x] 增加价格、区域、哈希、状态机、钱包与账本守恒单元测试。
+- [x] 增加 100 并发扣款、限购、同键/异键重放、迁移和唯一约束测试。
+- [x] 增加登录、CSRF、IDOR、角色绑定、商城、发货、资源兑换、Native consume 与换档 contract/E2E。
+- [x] 在每个“持久化、派发、ACK、扣物、回读、入账”边界执行故障注入。
 - [x] 区分进程存活与经济存储只读 readiness；单个游戏 adapter 故障不再让可读门户返回 503，并有 Release 黑盒测试覆盖。
-- [ ] 购买/资源兑换能力通过兼容路径 `/extraction/capabilities` 与逐功能写闸门单独暴露。
-- [ ] 输出订单/资源兑换状态、延迟、最老 outbox、`uncertain` 数、账本守恒、身份冲突、版本、世界一致性与备份年龄指标。
-- [ ] 配置自动熔断和告警；日志使用 correlation ID 并脱敏 Cookie、验证码、Token、密码和玩家标识。
+- [x] 购买/资源兑换能力通过兼容路径 `/extraction/capabilities` 与逐功能写闸门单独暴露。
+- [x] 输出订单/资源兑换状态与延迟、发货/资源队列和最老 outbox、`uncertain` 数、账本守恒、身份冲突、版本、世界一致性、备份年龄及独立熔断指标；同时提供 Viewer 保护的 JSON 与 Prometheus 接口。
+- [x] 为队列饱和/停滞、`uncertain`、账本/身份不变量、版本/世界漂移、备份过期和采集失败配置稳定告警码与逐功能自动熔断；指标与本模块日志不带 Cookie、验证码、Token、密码或玩家原始标识，自动动作带 correlation ID。
+- [ ] 为全部既有后台 worker/adapter 日志统一 correlation scope 并完成全服务脱敏审计；不能用本指标模块的黑盒扫描代替旧日志逐项复核。
 
 发布验收：
 
@@ -370,14 +383,12 @@ removed -> credited -> settled
 
 ## 推荐执行顺序
 
-1. **先冻结公开经济写入**，明确当前只允许本机/可信开发环境。
-2. 按已完成的 **P0-00 / ADR-0001** 统一资源兑换术语和验收口径；方案 B 不占用当前发布资源。
-3. 在已完成的 **P0-05 lease/CAS、终态单调性和保守恢复** 基础上，继续完成跨存储 credit 事务、队列/backpressure 与服务级故障注入。
-4. 完成 **P0-02 身份绑定**，确保报价和兑换只能作用于当前周世界的本人角色。
-5. 接入 **P0-04 Native 原子扣物** 与 **P0-06 结构化发货 receipt**。
-6. 完成 **P0-07～P0-08 RBAC 与统一 Safety Gate**。
-7. 在已接入 CI 的基础上完成 **P0-09～P0-11 恢复、换档、故障注入、指标与完整周封闭测试**。
-8. 当前方案 A 的 P0 证据全部通过后，再进入 P1 内容扩充与经济平衡。
+1. **继续冻结公开经济写入**；当前只允许本机/可信开发环境，不能手工伪造 Native stable capability。
+2. 由受控玩家完成 **P0-04** 的“Native 扣物 → 保存 → 停服 → 重启 → 重登”验收，并保存脱敏证据。
+3. 分别完成世界备份与经济备份的真实恢复，再连续执行 3 次完整周换档；新赛季产生交易后验证系统拒绝自动回滚旧世界。
+4. 在正式 HTTPS 域名完成 Steam OpenID、Caddy 回调日志跳过、Cookie、代理头和重放黑盒验收；RCON `/send` 仍只在本机受限通道送达验证码。
+5. 由 5–10 名玩家运行完整 7 天，并由不同于实现者的人复核余额、重复发货、`uncertain` 对账和恢复证据。
+6. 上述 P0 外部证据通过后，再进入 P1 内容扩充、经济仿真和运营工作台。
 
 ## 全局完成定义
 
@@ -393,16 +404,16 @@ removed -> credited -> settled
 ## 关键审计证据
 
 - 当前原型定位与公开服硬门槛：`extraction-mode/README.md:41-71`
-- 单次真实购买/皮革资源兑换证据与未演练周换档：`extraction-mode/docs/05-实施阶段与验收.md:3-10`
-- 当前初始货币与唯一资源兑换点：`services/control-api/appsettings.json:69-104`
-- 5 个硬编码商品与懒触发调价：`services/control-api/Infrastructure/ExtractionModeCoordinator.cs:403-420,535-738`
-- `PlayerUID` 只临时读取、未持久绑定：`services/control-api/Infrastructure/ExtractionModeCoordinator.cs:50-90,610-645`
+- 旧版单次真实购买/RCON 皮革兑换仅作为历史开发证据，不能替代当前 Native 持久化验收：`extraction-mode/docs/05-实施阶段与验收.md`
+- 当前初始货币与唯一资源兑换点：`services/control-api/appsettings.json` 中的 `InitialMarketCoin`、`InitialSeasonVoucher` 与 `ExtractionZones`
+- 5 个硬编码商品与懒触发调价：`services/control-api/Infrastructure/ExtractionModeCoordinator.cs` 中的 `SeedProducts` 与 `EnsureDailyRotationAsync`
+- `PlayerUID` 本周绑定、历史与双向唯一约束：`services/control-api/Extraction/JsonlExtractionRepository.cs`、`services/control-api/Infrastructure/ExtractionModeCoordinator.cs`
 - 当前 `run` 的报价/扣物/结算状态、revision、lease 与 CAS：`services/control-api/Infrastructure/ExtractionRunStore.cs`
-- 兼容技术状态到玩家资源兑换状态的映射：`services/control-api/Infrastructure/ExtractionModeEndpoints.cs:742-769`
-- RCON 扣物、内部关键区超时、REST 差值回读与保守恢复：`services/control-api/Infrastructure/ExtractionSettlementService.cs`
+- 技术状态到玩家资源兑换文案的映射：`apps/player-web/src/runState.ts` 中的 `resourceExchangeStateLabel`
+- Native 完整快照扣物、持久化回执、内部关键区超时、唯一 credit 与保守恢复：`services/control-api/Infrastructure/ExtractionSettlementService.cs`、`services/control-api/Infrastructure/ExtractionNativeInventoryAdapter.cs`
 - Native consume 当前仍为 experimental：`packages/contracts/bridge/inventory.consume.md`
-- 商城发货按背包总量增量归因：`services/control-api/Infrastructure/ExtractionDeliveryWorker.cs:288-427`
-- 玩家门户会话和限流为进程内字典：`services/control-api/Infrastructure/PlayerPortalAuthenticationService.cs:21-39`
-- Control API 目前有管理 API 回环地址防御，但仍没有管理员认证/RBAC：`services/control-api/Program.cs`
-- 玩家端状态与刷新逻辑：`apps/player-web/src/Portal.tsx:79-127,171-203,429-445`
+- 商城发货逐物品结构化 receipt、跨重启幂等与 partial/uncertain 对账：`services/control-api/Infrastructure/ExtractionDeliveryWorker.cs`、`services/control-api/Infrastructure/ExtractionDeliveryReceipts.cs`
+- 玩家门户会话只保存进程内 token hash，重启全部失效；封禁与异常登录审计持久化：`services/control-api/Infrastructure/PlayerPortalSessionRegistry.cs`、`services/control-api/Infrastructure/PlayerIdentitySecurity.cs`
+- Control API 管理 API 的 API Key/RBAC/TOTP 与持久审计：`services/control-api/Infrastructure/AdminSecurity.cs`、`services/control-api/Infrastructure/AdminAudit.cs`
+- 玩家端状态与刷新逻辑：`apps/player-web/src/Portal.tsx`、`apps/player-web/src/runState.ts` 与 `apps/player-web/src/api.ts`
 - 当前自动测试与 Windows GitHub Actions：`.github/workflows/ci.yml`、`tests/run-tests.ps1`、`tests/settlement-saga/`、`tests/contract/`、`tests/integration/`

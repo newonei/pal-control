@@ -1,5 +1,13 @@
-import { FormEvent, useMemo, useState } from "react";
-import { CodeChallenge, PlayerSession, requestCode, verifyCode } from "./api";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  CodeChallenge,
+  getAuthenticationMode,
+  PlayerAuthenticationMode,
+  PlayerSession,
+  requestCode,
+  steamLoginStartUrl,
+  verifyCode
+} from "./api";
 
 type Props = { onAuthenticated: (session: PlayerSession) => void };
 
@@ -9,6 +17,17 @@ export function Login({ onAuthenticated }: Props) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [authentication, setAuthentication] = useState<PlayerAuthenticationMode | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getAuthenticationMode()
+      .then((mode) => { if (active) setAuthentication(mode); })
+      .catch((error) => {
+        if (active) setMessage(error instanceof Error ? error.message : "无法读取登录模式");
+      });
+    return () => { active = false; };
+  }, []);
 
   const rawIdentifier = userId.trim().toLowerCase();
   const normalizedUserId = /^\d{17}$/.test(rawIdentifier)
@@ -21,11 +40,15 @@ export function Login({ onAuthenticated }: Props) {
 
   async function begin(event: FormEvent) {
     event.preventDefault();
-    if (!validUserId) return setMessage("请输入完整的平台 UserId，Steam 玩家也可以直接填写 17 位 SteamID64。");
+    const openIdPending = authentication?.steamOpenIdRequired === true &&
+      authentication.pendingPlatformIdentity;
+    if (!openIdPending && !validUserId) {
+      return setMessage("请输入完整的平台 UserId，Steam 玩家也可以直接填写 17 位 SteamID64。");
+    }
     setBusy(true);
     setMessage(null);
     try {
-      const next = await requestCode(normalizedUserId);
+      const next = await requestCode(openIdPending ? null : normalizedUserId);
       setChallenge(next);
       setCode("");
       setMessage("验证码已发送到游戏内，请保持角色在线并查看通知。");
@@ -34,6 +57,10 @@ export function Login({ onAuthenticated }: Props) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function beginSteamLogin() {
+    window.location.assign(steamLoginStartUrl());
   }
 
   async function verify(event: FormEvent) {
@@ -67,31 +94,54 @@ export function Login({ onAuthenticated }: Props) {
         <div className="mark" aria-hidden="true">幻</div>
         <span className="eyebrow">PLAYER ACCESS</span>
         <h2 id="login-title">玩家身份验证</h2>
-        <p className="muted">网页不会要求游戏密码。验证码只会发送给当前在线角色。</p>
+        <p className="muted">网页不会接收 Steam 或游戏密码。公网服先在 Steam 官方页面验证，再用游戏内验证码绑定本周角色。</p>
 
         {!challenge ? (
-          <form onSubmit={begin}>
-            <label htmlFor="platform-user-id">平台 UserId / SteamID64</label>
-            <input
-              id="platform-user-id"
-              value={userId}
-              onChange={(event) => setUserId(event.target.value)}
-              placeholder="steam_7656119… 或 17 位 SteamID64"
-              autoComplete="username"
-              spellCheck={false}
-              maxLength={69}
-              required
-              aria-describedby="user-id-help"
-            />
-            <small id="user-id-help">Steam 玩家可填写 steam_ 加 SteamID64，或直接粘贴 17 位 SteamID64；不是角色昵称。</small>
-            <button className="primary full" disabled={busy || !validUserId} type="submit">
-              {busy ? "正在发送…" : "获取游戏内验证码"}
-            </button>
-          </form>
+          authentication?.steamOpenIdRequired && !authentication.pendingPlatformIdentity ? (
+            <div className="login-step">
+              <p>先跳转到 <strong>steamcommunity.com</strong> 验证 Steam 身份；返回后还要输入发送到当前在线角色的验证码。</p>
+              <button className="primary full" type="button" onClick={beginSteamLogin}>
+                使用 Steam 安全登录
+              </button>
+              <small>只会跳转到 Steam 官方 OpenID 页面，本网站不会看到或保存你的 Steam 密码。</small>
+            </div>
+          ) : (
+            <form onSubmit={begin}>
+              {authentication?.steamOpenIdRequired ? (
+                <div className="challenge-user">
+                  <span>平台身份</span><strong>Steam 已验证，等待绑定本周角色</strong>
+                </div>
+              ) : (
+                <>
+                  <label htmlFor="platform-user-id">平台 UserId / SteamID64</label>
+                  <input
+                    id="platform-user-id"
+                    value={userId}
+                    onChange={(event) => setUserId(event.target.value)}
+                    placeholder="steam_7656119… 或 17 位 SteamID64"
+                    autoComplete="username"
+                    spellCheck={false}
+                    maxLength={69}
+                    required
+                    aria-describedby="user-id-help"
+                  />
+                  <small id="user-id-help">可信好友服 fallback：验证码证明你控制当前在线角色，但不等同于 Steam 网站身份验证。</small>
+                </>
+              )}
+              <button
+                className="primary full"
+                disabled={busy || (!authentication?.steamOpenIdRequired && !validUserId)}
+                type="submit"
+              >
+                {busy ? "正在发送…" : "获取游戏内验证码"}
+              </button>
+            </form>
+          )
         ) : (
           <form onSubmit={verify}>
             <div className="challenge-user">
-              <span>正在验证</span><strong>{normalizedUserId}</strong>
+              <span>正在验证</span>
+              <strong>{authentication?.steamOpenIdRequired ? "Steam 身份 + 当前周角色" : normalizedUserId}</strong>
               <button type="button" className="text-button" onClick={() => setChallenge(null)}>更换账号</button>
             </div>
             <label htmlFor="verify-code">8 位游戏内验证码</label>

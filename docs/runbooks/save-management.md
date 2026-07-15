@@ -41,10 +41,13 @@ v1 明确不提供恢复、删除、上传、在线覆盖或原始 `.sav` 字段
 ## 常用检查
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:5180/api/v1/servers/local/saves/status
-Invoke-RestMethod 'http://127.0.0.1:5180/api/v1/servers/local/backups?kind=managed'
-Invoke-RestMethod 'http://127.0.0.1:5180/api/v1/audit/save-commands?limit=100'
+$headers = @{ "X-Pal-Admin-Key" = $env:PAL_CONTROL_VIEWER_KEY }
+Invoke-RestMethod http://127.0.0.1:5180/api/v1/servers/local/saves/status -Headers $headers
+Invoke-RestMethod 'http://127.0.0.1:5180/api/v1/servers/local/backups?kind=managed' -Headers $headers
+Invoke-RestMethod 'http://127.0.0.1:5180/api/v1/audit/save-commands?limit=100' -Headers $headers
 ```
+
+`PAL_CONTROL_VIEWER_KEY` 只应从密码管理器注入当前受控进程；不要写入仓库、脚本、命令历史或截图。
 
 写请求必须携带 8–128 字符的 `Idempotency-Key` 和至少 3 字符的操作原因。相同键与相同请求体返回原命令；相同键配不同请求体返回 `409 IDEMPOTENCY_KEY_REUSED`。
 
