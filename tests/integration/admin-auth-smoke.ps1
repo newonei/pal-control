@@ -51,6 +51,19 @@ function Get-Totp {
 function Wait-ForEndpoint([string] $uri, [Diagnostics.Process] $process) {
     for ($attempt = 0; $attempt -lt 100; $attempt += 1) {
         if ($process.HasExited) {
+            $process.WaitForExit()
+            $process.Refresh()
+            foreach ($log in @(
+                    @{ Label = "Control API stdout"; Path = $script:apiStdout },
+                    @{ Label = "Control API stderr"; Path = $script:apiStderr })) {
+                if (Test-Path -LiteralPath $log.Path) {
+                    $content = Get-Content -LiteralPath $log.Path -Raw
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        Write-Host "--- $($log.Label) ---"
+                        Write-Host $content
+                    }
+                }
+            }
             throw "Control API exited before it became ready (exit $($process.ExitCode))."
         }
         try {
@@ -137,6 +150,13 @@ $buildRoot = Join-Path $testRoot "build"
 $dataRoot = Join-Path $testRoot "data"
 $stdout = Join-Path $testRoot "api.out.log"
 $stderr = Join-Path $testRoot "api.err.log"
+$script:apiStdout = $stdout
+$script:apiStderr = $stderr
+$palworldRoot = Join-Path $testRoot "PalServer"
+$saveBackupRoot = Join-Path $testRoot "save-backups"
+$economyBackupRoot = Join-Path $testRoot "economy-backups"
+$economyStagingRoot = Join-Path $testRoot "economy-staging"
+$logRoot = Join-Path $testRoot "logs"
 $port = Get-FreeTcpPort
 $baseUri = "http://127.0.0.1:$port"
 $viewerKey = "viewer-test-key-000000000000"
@@ -159,8 +179,11 @@ try {
     $apiDll = Join-Path $buildRoot "PalControl.ControlApi.dll"
     $arguments = @(
         $apiDll,
+        "--contentRoot=$buildRoot",
         "--urls=$baseUri",
         "--Security:DevelopmentMode=false",
+        "--Security:StartupValidation:Strict=true",
+        "--Security:StartupValidation:LogDirectory=$logRoot",
         "--Security:AdminAuthentication:Enabled=true",
         "--Security:AdminAuthentication:EnableLoopbackDevelopmentPrincipal=false",
         "--Security:AdminAuthentication:Principals:0:Subject=viewer-a",
@@ -183,11 +206,15 @@ try {
         "--ExtractionMode:InitialSeasonVoucher=0",
         "--ExtractionMode:Rcon:Enabled=false",
         "--ExtractionMode:Persistence:DataDirectory=$dataRoot",
+        "--ExtractionMode:Continuity:BackupRoot=$economyBackupRoot",
+        "--ExtractionMode:Continuity:StagingRoot=$economyStagingRoot",
         "--PlayerPortal:Enabled=false",
+        "--Palworld:InstallRoot=$palworldRoot",
+        "--SaveManagement:BackupRoot=$saveBackupRoot",
         "--CommandPersistence:DataDirectory=$(Join-Path $testRoot 'commands')"
     )
     $api = Start-Process -FilePath "dotnet" -ArgumentList $arguments `
-        -WorkingDirectory $serviceRoot -PassThru -WindowStyle Hidden `
+        -WorkingDirectory $buildRoot -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     Wait-ForEndpoint "$baseUri/health/live" $api
 
