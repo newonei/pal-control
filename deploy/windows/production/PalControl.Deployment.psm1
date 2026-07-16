@@ -6,6 +6,27 @@ function Resolve-FullPath {
     [System.IO.Path]::GetFullPath($Path)
 }
 
+function Get-PalControlFileSha256 {
+    param([Parameter(Mandatory)] [string]$Path)
+    $full = Resolve-FullPath $Path
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        throw "Cannot hash a missing file: $full"
+    }
+    $stream = [IO.File]::Open(
+        $full,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-RelativePathPortable {
     param(
         [Parameter(Mandatory)] [string]$BasePath,
@@ -117,11 +138,11 @@ function Get-FileInventory {
             ForEach-Object {
                 $relative = (Get-RelativePathPortable -BasePath $rootFull -Path $_.FullName).Replace('\', '/')
                 if (-not $excluded.ContainsKey($relative.ToLowerInvariant())) {
-                    $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+                    $hash = Get-PalControlFileSha256 -Path $_.FullName
                     [pscustomobject]@{
                         path = $relative
                         bytes = [long]$_.Length
-                        sha256 = $hash.Hash.ToLowerInvariant()
+                        sha256 = $hash
                     }
                 }
             }
@@ -207,7 +228,7 @@ function Read-ReleaseManifest {
         Root = $root
         Path = $manifestPath
         Manifest = $manifest
-        ManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        ManifestSha256 = Get-PalControlFileSha256 -Path $manifestPath
     }
 }
 
@@ -282,7 +303,7 @@ function Expand-VerifiedReleaseArchive {
     if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
         throw "ExpectedSha256 must contain exactly 64 hexadecimal characters."
     }
-    $actualArchiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualArchiveHash = Get-PalControlFileSha256 -Path $archive
     if ($actualArchiveHash -ne $ExpectedSha256.ToLowerInvariant()) {
         throw "Release archive SHA-256 does not match the approved value."
     }
@@ -499,6 +520,7 @@ function Restore-ColdStateSnapshot {
 
 Export-ModuleMember -Function @(
     "Resolve-FullPath",
+    "Get-PalControlFileSha256",
     "Get-RelativePathPortable",
     "Assert-SafeDeploymentRoot",
     "Assert-PathWithinRoot",

@@ -513,7 +513,7 @@ function Test-CaddyConfiguration {
         throw "Caddy executable, Caddyfile and environment file are required."
     }
     if ([string]::IsNullOrWhiteSpace($CaddyExpectedSha256) -or
-        (Get-FileHash -LiteralPath $caddy -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        (Get-PalControlFileSha256 -Path $caddy) -ne
             $CaddyExpectedSha256.ToLowerInvariant()) {
         throw "Caddy executable SHA-256 does not match the approved pinned binary."
     }

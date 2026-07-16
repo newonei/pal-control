@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $deploymentScript = Join-Path $repositoryRoot `
@@ -7,6 +8,14 @@ $deploymentScript = Join-Path $repositoryRoot `
 $deploymentModule = Join-Path $repositoryRoot `
     "deploy\windows\production\PalControl.Deployment.psm1"
 Import-Module $deploymentModule -Force
+
+# GitHub-hosted Windows images do not guarantee that Get-FileHash is
+# discoverable in the child Windows PowerShell used by npm test. Keep the
+# production verifier self-contained and make any regression deterministic on
+# developer machines where that cmdlet happens to be available.
+function Get-FileHash {
+    throw "Production deployment verification must use the self-contained SHA-256 helper."
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     "pal-control-production-deployment-" + [Guid]::NewGuid().ToString("N"))
@@ -89,7 +98,7 @@ function New-TestRelease {
         Container = $container
         Payload = $payload
         Archive = $archive
-        Sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        Sha256 = Get-PalControlFileSha256 -Path $archive
     }
 }
 
@@ -151,6 +160,7 @@ function Start-ExternalConfigApiOnce {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
     }
     $process = $null
+    $client = $null
     try {
         $env:PAL_CONTROL_CONFIG_PATH = $ExternalConfig
         $env:DOTNET_ENVIRONMENT = "Development"
@@ -162,25 +172,43 @@ function Start-ExternalConfigApiOnce {
             -WorkingDirectory (Split-Path -Parent $ApiAssembly) `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
             -WindowStyle Hidden -PassThru
+        $handler = [Net.Http.HttpClientHandler]::new()
+        $handler.UseProxy = $false
+        $client = [Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds(5)
         $deadline = (Get-Date).AddSeconds(40)
         $ready = $false
         while ((Get-Date) -lt $deadline) {
             if ($process.HasExited) { break }
             try {
-                $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health/ready" -TimeoutSec 2
-                if ($response.readReady -eq $true) { $ready = $true; break }
+                $httpResponse = $client.GetAsync(
+                    "http://127.0.0.1:$Port/health/ready").GetAwaiter().GetResult()
+                try {
+                    if ($httpResponse.IsSuccessStatusCode) {
+                        $body = $httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() |
+                            ConvertFrom-Json
+                        if ($body.readReady -eq $true) { $ready = $true; break }
+                    }
+                }
+                finally { $httpResponse.Dispose() }
             }
             catch { }
             Start-Sleep -Milliseconds 250
         }
         if (-not $ready) {
-            $tail = if (Test-Path -LiteralPath $stderr) {
+            $stdoutTail = if (Test-Path -LiteralPath $stdout) {
+                (Get-Content -LiteralPath $stdout -Tail 30 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
+            } else { "" }
+            $stderrTail = if (Test-Path -LiteralPath $stderr) {
                 (Get-Content -LiteralPath $stderr -Tail 30 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
             } else { "" }
-            throw "External production configuration did not become ready. $tail"
+            throw (
+                "External production configuration did not become ready." +
+                " stdout: $stdoutTail stderr: $stderrTail")
         }
     }
     finally {
+        if ($null -ne $client) { $client.Dispose() }
         foreach ($entry in $savedEnvironment.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
         }
@@ -209,7 +237,7 @@ try {
         $federationRemoteNodeKey,
         ("r" * 48),
         (New-Object Text.UTF8Encoding($false)))
-    $script:caddySha256 = (Get-FileHash -LiteralPath $caddyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $script:caddySha256 = Get-PalControlFileSha256 -Path $caddyPath
     [IO.File]::WriteAllText(
         $caddyConfig,
         "{`n admin 127.0.0.1:2019`n}`n{`$PLAYER_PORTAL_DOMAIN} { root * {`$PLAYER_PORTAL_ROOT} }`n",
@@ -330,7 +358,7 @@ try {
         -DestinationPath $undeclaredArchive -CompressionLevel Optimal
     $undeclaredRelease = [pscustomobject]@{
         Archive = $undeclaredArchive
-        Sha256 = (Get-FileHash -LiteralPath $undeclaredArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        Sha256 = Get-PalControlFileSha256 -Path $undeclaredArchive
     }
     Assert-Throws -Action {
         Invoke-TestDeployment -Action Stage -Release $undeclaredRelease
@@ -474,18 +502,35 @@ try {
     $runtimeRoot = Join-Path $testRoot "runtime"
     $runtimeData = Join-Path $runtimeRoot "data"
     $runtimeConfig = Join-Path $runtimeRoot "appsettings.external.json"
-    New-Item -ItemType Directory -Path $runtimeRoot, $runtimeData -Force | Out-Null
+    $runtimeInstall = Join-Path $runtimeRoot "PalServer"
+    $runtimeWorldId = "ABCDEF0123456789ABCDEF0123456789"
+    $runtimeSettingsRoot = Join-Path $runtimeInstall "Pal\Saved\Config\WindowsServer"
+    $runtimeWorldRoot = Join-Path $runtimeInstall "Pal\Saved\SaveGames\0\$runtimeWorldId"
+    New-Item -ItemType Directory -Path $runtimeRoot, $runtimeData, `
+        $runtimeSettingsRoot, $runtimeWorldRoot -Force | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $runtimeInstall "PalServer.exe"), [byte[]]@(0))
+    [IO.File]::WriteAllText(
+        (Join-Path $runtimeSettingsRoot "GameUserSettings.ini"),
+        "[/Script/Pal.PalGameLocalSettings]`r`nDedicatedServerName=$runtimeWorldId`r`n",
+        (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllBytes((Join-Path $runtimeWorldRoot "Level.sav"), [byte[]](1..32))
     $runtimeSettings = Get-Content -LiteralPath (
         Join-Path $repositoryRoot "services\control-api\appsettings.json") `
         -Raw -Encoding UTF8 | ConvertFrom-Json
     $runtimePort = Get-FreeTcpPort
+    $unavailableRestPort = Get-FreeTcpPort
     $runtimeSettings.Urls = "http://127.0.0.1:$runtimePort"
+    $runtimeSettings.Palworld.InstallRoot = $runtimeInstall
+    $runtimeSettings.Palworld.OfficialRestApi.BaseUrl =
+        "http://127.0.0.1:$unavailableRestPort/v1/api/"
+    $runtimeSettings.Palworld.OfficialRestApi.TimeoutSeconds = 1
     $runtimeSettings.CommandPersistence.DataDirectory = $runtimeData
     $runtimeSettings.ExtractionMode.Enabled = $false
     $runtimeSettings.ExtractionMode.Persistence.DataDirectory = Join-Path $runtimeData "extraction"
     $runtimeSettings.ExtractionMode.Continuity.BackupRoot = Join-Path $runtimeRoot "backups\economy"
     $runtimeSettings.ExtractionMode.Continuity.StagingRoot = Join-Path $runtimeRoot "staging\economy"
     $runtimeSettings.SaveManagement.BackupRoot = Join-Path $runtimeRoot "backups\savegames"
+    $runtimeSettings.SaveManagement.RequireRunningProcess = $false
     $runtimeSettings.Security.StartupValidation.LogDirectory = Join-Path $runtimeRoot "logs"
     $runtimeSettings.Security.AdminAuthentication.Enabled = $true
     $runtimeSettings.Security.AdminAuthentication.EnableLoopbackDevelopmentPrincipal = $true
