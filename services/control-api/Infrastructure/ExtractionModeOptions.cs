@@ -162,10 +162,7 @@ public sealed class ExtractionZoneOptions
         RouteHint.Length <= 512 &&
         !string.IsNullOrWhiteSpace(RiskHint) &&
         RiskHint.Length <= 512 &&
-        double.IsFinite(MapX) &&
-        double.IsFinite(MapY) &&
-        double.IsFinite(Radius) &&
-        Radius is > 0 and <= 10_000;
+        ZoneGeometryLimits.IsValid(MapX, MapY, Radius);
 }
 
 public sealed class PalDefenderShopDeliveryDispatcher : IShopDeliveryCommandDispatcher

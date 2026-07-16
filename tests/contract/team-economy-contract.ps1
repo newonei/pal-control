@@ -43,8 +43,13 @@ $store = Read-RepositoryFile `
     "services\control-api\Infrastructure\TeamEconomyStore.cs"
 $projection = Read-RepositoryFile `
     "services\control-api\Infrastructure\TeamEconomyProjection.cs"
+$projectionWorker = Read-RepositoryFile `
+    "services\control-api\Infrastructure\TeamEconomyProjectionWorker.cs"
 $models = Read-RepositoryFile `
     "services\control-api\Infrastructure\TeamEconomyModels.cs"
+$capacityHarness = Read-RepositoryFile `
+    "tests\team-economy-capacity\Program.cs"
+$testRunner = Read-RepositoryFile "tests\run-tests.ps1"
 $portal = Read-RepositoryFile "apps\player-web\src\TeamEconomyPanel.tsx"
 $openApi = Read-RepositoryFile "packages\contracts\openapi\control-api.yaml"
 
@@ -121,6 +126,37 @@ Assert-Contract (-not [regex]::IsMatch(
         $projection,
         '(?i)(client|browser|frontend)[-_ ]?(harvest|kill|death|pvp|event|fact)[-_ ]?(payload|upload|report)')) `
     "projection appears to accept a client-reported gameplay fact."
+
+foreach ($activeOnlyFragment in @(
+        '_commerce.ListSeasonsAsync',
+        'SelectActiveScope(',
+        'ProjectActiveSeasonAsync(',
+        'TEAM_ACTIVE_SEASON_AMBIGUOUS',
+        'TEAM_ACTIVE_SEASON_INVALID')) {
+    Require-Ordinal $projectionWorker $activeOnlyFragment `
+        "active-only worker omits '$activeOnlyFragment'."
+}
+Assert-Contract ($projectionWorker.IndexOf(
+        'ListScopesAsync(',
+        [StringComparison]::Ordinal) -lt 0) `
+    "the background worker still enumerates every historical team scope."
+foreach ($snapshotFence in @(
+        'requireActiveSeason: true',
+        'TEAM_ACTIVE_SEASON_CHANGED')) {
+    Require-Ordinal $projection $snapshotFence `
+        "projection snapshot omits active-season fence '$snapshotFence'."
+}
+foreach ($capacityEvidence in @(
+        'const int HistoricalWeekCount = 52;',
+        'const int AccountCount = 10_000;',
+        'ConcurrentSqliteWriters',
+        'ConcurrentTeamWriters',
+        'InsertHistoricalIntegritySentinels')) {
+    Require-Ordinal $capacityHarness $capacityEvidence `
+        "capacity harness omits '$capacityEvidence'."
+}
+Require-Ordinal $testRunner 'tests\integration\team-economy-capacity-smoke.ps1' `
+    "the unified test runner does not execute the team capacity harness."
 
 foreach ($goal in @(
         'ResourceItemsGoal',

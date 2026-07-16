@@ -155,10 +155,26 @@ function Get-ConfiguredServiceSecretPaths {
     }
 
     if ((Get-OptionalPropertyValue $Settings @("Federation", "Enabled")) -eq $true) {
-        foreach ($path in @(
-            [string](Get-OptionalPropertyValue $Settings @("Federation", "IdentityHmacKeyFile")),
-            [string](Get-OptionalPropertyValue $Settings @("Federation", "InboundNodeKeyFile")))) {
-            if (-not [string]::IsNullOrWhiteSpace($path)) { $paths.Add($path) }
+        $identityKeys = Get-OptionalPropertyValue $Settings @("Federation", "IdentityKeys")
+        if ($null -ne $identityKeys) {
+            foreach ($key in @($identityKeys)) {
+                if ($null -eq $key) { continue }
+                $path = [string](Get-OptionalPropertyValue $key @("KeyFile"))
+                if (-not [string]::IsNullOrWhiteSpace($path)) { $paths.Add($path) }
+            }
+        }
+
+        $inboundPeers = Get-OptionalPropertyValue $Settings @("Federation", "InboundPeers")
+        if ($null -ne $inboundPeers) {
+            foreach ($peer in @($inboundPeers)) {
+                if ($null -eq $peer) { continue }
+                $signingKeys = Get-OptionalPropertyValue $peer @("SigningKeys")
+                foreach ($key in @($signingKeys)) {
+                    if ($null -eq $key) { continue }
+                    $path = [string](Get-OptionalPropertyValue $key @("KeyFile"))
+                    if (-not [string]::IsNullOrWhiteSpace($path)) { $paths.Add($path) }
+                }
+            }
         }
 
         $nodes = Get-OptionalPropertyValue $Settings @("Federation", "Nodes")

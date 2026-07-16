@@ -6,7 +6,11 @@ namespace PalControl.ControlApi.Infrastructure;
 
 public sealed record FederationOptions
 {
+    public const int CurrentProtocolVersion = 2;
+
     public bool Enabled { get; init; }
+
+    public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
 
     public string LocalServerId { get; init; } = "local";
 
@@ -17,13 +21,9 @@ public sealed record FederationOptions
 
     public bool AllowExperimentalInDevelopment { get; init; }
 
-    public string IdentityHmacKey { get; init; } = string.Empty;
+    public FederationIdentityKeyOptions[] IdentityKeys { get; init; } = [];
 
-    public string IdentityHmacKeyFile { get; init; } = string.Empty;
-
-    public string InboundNodeKey { get; init; } = string.Empty;
-
-    public string InboundNodeKeyFile { get; init; } = string.Empty;
+    public FederationInboundPeerOptions[] InboundPeers { get; init; } = [];
 
     public int RequestTimeoutMilliseconds { get; init; } = 2_000;
 
@@ -34,6 +34,8 @@ public sealed record FederationOptions
     public int MaximumConcurrentRequests { get; init; } = 8;
 
     public int InternalRequestsPerMinute { get; init; } = 600;
+
+    public int MaximumClockSkewSeconds { get; init; } = 120;
 
     public FederationNodeOptions[] Nodes { get; init; } = [];
 }
@@ -52,9 +54,44 @@ public sealed record FederationNodeOptions
 
     public string ExpectedCombinationId { get; init; } = string.Empty;
 
+    public string SigningKeyId { get; init; } = string.Empty;
+
+    public string IdentityKeyId { get; init; } = string.Empty;
+
     public string NodeKey { get; init; } = string.Empty;
 
     public string NodeKeyFile { get; init; } = string.Empty;
+}
+
+public sealed record FederationIdentityKeyOptions
+{
+    public string KeyId { get; init; } = string.Empty;
+
+    public string Key { get; init; } = string.Empty;
+
+    public string KeyFile { get; init; } = string.Empty;
+
+    public bool Revoked { get; init; }
+}
+
+public sealed record FederationPeerSigningKeyOptions
+{
+    public string KeyId { get; init; } = string.Empty;
+
+    public string Key { get; init; } = string.Empty;
+
+    public string KeyFile { get; init; } = string.Empty;
+
+    public bool Revoked { get; init; }
+}
+
+public sealed record FederationInboundPeerOptions
+{
+    public string ServerId { get; init; } = string.Empty;
+
+    public bool Revoked { get; init; }
+
+    public FederationPeerSigningKeyOptions[] SigningKeys { get; init; } = [];
 }
 
 public sealed partial class FederationOptionsValidator : IValidateOptions<FederationOptions>
@@ -105,14 +142,20 @@ public sealed partial class FederationOptionsValidator : IValidateOptions<Federa
             throw new ArgumentException(
                 "Federation LocalServerId must be a lowercase safe server identifier.");
         }
+        if (options.ProtocolVersion != FederationOptions.CurrentProtocolVersion)
+        {
+            throw new ArgumentException(
+                $"Federation ProtocolVersion must be {FederationOptions.CurrentProtocolVersion}.");
+        }
         if (options.RequestTimeoutMilliseconds is < 100 or > 10_000 ||
             options.MaximumResponseBytes is < 1_024 or > 256 * 1_024 ||
             options.MaximumRequestBodyBytes is < 256 or > 16 * 1_024 ||
             options.MaximumConcurrentRequests is < 1 or > 64 ||
-            options.InternalRequestsPerMinute is < 10 or > 10_000)
+            options.InternalRequestsPerMinute is < 10 or > 10_000 ||
+            options.MaximumClockSkewSeconds is < 30 or > 300)
         {
             throw new ArgumentException(
-                "Federation timeout, body, response, concurrency, or rate limits are outside safe bounds.");
+                "Federation timeout, body, response, concurrency, rate, or clock-skew limits are outside safe bounds.");
         }
         if (options.Nodes is null || options.Nodes.Length is < 1 or > 16)
         {
@@ -124,24 +167,42 @@ public sealed partial class FederationOptionsValidator : IValidateOptions<Federa
                 "Production federation must pin ExpectedMatrixSha256.");
         }
 
-        var identityKey = FederationSecretResolver.ResolveRequired(
-            options.IdentityHmacKey,
-            options.IdentityHmacKeyFile,
-            contentRootPath,
-            "Federation identity HMAC key");
-        var inboundKey = FederationSecretResolver.ResolveRequired(
-            options.InboundNodeKey,
-            options.InboundNodeKeyFile,
-            contentRootPath,
-            "Federation inbound node key");
-        if (FederationSecretResolver.FixedTimeEquals(identityKey, inboundKey))
+        if (options.IdentityKeys is null || options.IdentityKeys.Length is < 1 or > 8)
         {
             throw new ArgumentException(
-                "Federation identity HMAC and node authentication keys must be different.");
+                "Federation requires 1 to 8 versioned identity keys.");
+        }
+        var identityKeyIds = new HashSet<string>(StringComparer.Ordinal);
+        var identityKeys = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var key in options.IdentityKeys)
+        {
+            if (!IsSafeKeyId(key.KeyId) || !identityKeyIds.Add(key.KeyId))
+            {
+                throw new ArgumentException(
+                    "Every federation identity key must have a unique safe KeyId.");
+            }
+            if (key.Revoked)
+            {
+                ValidateRevokedSecretShape(
+                    key.Key,
+                    key.KeyFile,
+                    $"Federation identity key '{key.KeyId}'");
+                continue;
+            }
+            identityKeys[key.KeyId] = FederationSecretResolver.ResolveRequired(
+                key.Key,
+                key.KeyFile,
+                contentRootPath,
+                $"Federation identity key '{key.KeyId}'");
+        }
+        if (identityKeys.Count == 0)
+        {
+            throw new ArgumentException("Federation requires at least one non-revoked identity key.");
         }
 
         var serverIds = new HashSet<string>(StringComparer.Ordinal);
         var baseUris = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var outboundSecrets = new List<byte[]>();
         var localCount = 0;
         foreach (var node in options.Nodes)
         {
@@ -187,30 +248,138 @@ public sealed partial class FederationOptionsValidator : IValidateOptions<Federa
                         "The local federation node ServerId must equal LocalServerId.");
                 }
                 if (!string.IsNullOrWhiteSpace(node.NodeKey) ||
-                    !string.IsNullOrWhiteSpace(node.NodeKeyFile))
+                    !string.IsNullOrWhiteSpace(node.NodeKeyFile) ||
+                    !string.IsNullOrWhiteSpace(node.SigningKeyId) ||
+                    !string.IsNullOrWhiteSpace(node.IdentityKeyId))
                 {
                     throw new ArgumentException(
-                        "The in-process local federation node must not configure an outbound node key.");
+                        "The in-process local federation node must not configure outbound signing or identity keys.");
                 }
             }
             else
             {
+                if (!IsSafeKeyId(node.SigningKeyId) || !IsSafeKeyId(node.IdentityKeyId))
+                {
+                    throw new ArgumentException(
+                        $"Federation node '{node.ServerId}' requires safe SigningKeyId and IdentityKeyId values.");
+                }
+                if (!identityKeys.ContainsKey(node.IdentityKeyId))
+                {
+                    throw new ArgumentException(
+                        $"Federation node '{node.ServerId}' references a missing or revoked identity key.");
+                }
                 var nodeKey = FederationSecretResolver.ResolveRequired(
                     node.NodeKey,
                     node.NodeKeyFile,
                     contentRootPath,
                     $"Federation node key for '{node.ServerId}'");
-                if (FederationSecretResolver.FixedTimeEquals(identityKey, nodeKey))
+                if (identityKeys.Values.Any(identityKey =>
+                        FederationSecretResolver.FixedTimeEquals(identityKey, nodeKey)))
                 {
                     throw new ArgumentException(
-                        $"Federation node '{node.ServerId}' must not reuse the identity HMAC key.");
+                        $"Federation node '{node.ServerId}' must not reuse an identity HMAC key for request signing.");
                 }
+                outboundSecrets.Add(nodeKey);
             }
         }
         if (localCount != 1)
         {
             throw new ArgumentException(
                 "Federation must configure exactly one in-process local node.");
+        }
+
+        var remoteIds = options.Nodes
+            .Where(node => !node.Local)
+            .Select(node => node.ServerId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (options.InboundPeers is null || options.InboundPeers.Length != remoteIds.Count)
+        {
+            throw new ArgumentException(
+                "Federation must configure exactly one inbound peer policy for every remote node.");
+        }
+        var peerIds = new HashSet<string>(StringComparer.Ordinal);
+        var inboundSecrets = new List<byte[]>();
+        foreach (var peer in options.InboundPeers)
+        {
+            if (!ServerIdPattern().IsMatch(peer.ServerId) ||
+                !remoteIds.Contains(peer.ServerId) ||
+                !peerIds.Add(peer.ServerId))
+            {
+                throw new ArgumentException(
+                    "Every inbound federation peer must map uniquely to one configured remote node.");
+            }
+            if (peer.SigningKeys is null || peer.SigningKeys.Length > 8 ||
+                !peer.Revoked && peer.SigningKeys.Length < 1)
+            {
+                throw new ArgumentException(
+                    $"Federation peer '{peer.ServerId}' requires 1 to 8 signing keys unless the whole peer is revoked.");
+            }
+            var signingKeyIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var key in peer.SigningKeys)
+            {
+                if (!IsSafeKeyId(key.KeyId) || !signingKeyIds.Add(key.KeyId))
+                {
+                    throw new ArgumentException(
+                        $"Federation peer '{peer.ServerId}' has a duplicate or unsafe signing KeyId.");
+                }
+                if (peer.Revoked || key.Revoked)
+                {
+                    ValidateRevokedSecretShape(
+                        key.Key,
+                        key.KeyFile,
+                        $"Federation inbound peer '{peer.ServerId}' signing key '{key.KeyId}'");
+                    continue;
+                }
+                var secret = FederationSecretResolver.ResolveRequired(
+                    key.Key,
+                    key.KeyFile,
+                    contentRootPath,
+                    $"Federation inbound peer '{peer.ServerId}' signing key '{key.KeyId}'");
+                if (identityKeys.Values.Any(identityKey =>
+                        FederationSecretResolver.FixedTimeEquals(identityKey, secret)))
+                {
+                    throw new ArgumentException(
+                        $"Federation peer '{peer.ServerId}' must not reuse an identity key for request signing.");
+                }
+                inboundSecrets.Add(secret);
+            }
+            if (!peer.Revoked && peer.SigningKeys.All(key => key.Revoked))
+            {
+                throw new ArgumentException(
+                    $"Non-revoked federation peer '{peer.ServerId}' requires a non-revoked signing key.");
+            }
+        }
+
+        for (var first = 0; first < inboundSecrets.Count; first++)
+        {
+            for (var second = first + 1; second < inboundSecrets.Count; second++)
+            {
+                if (FederationSecretResolver.FixedTimeEquals(
+                        inboundSecrets[first], inboundSecrets[second]))
+                {
+                    throw new ArgumentException(
+                        "Federation inbound peers must not share signing secrets.");
+                }
+            }
+        }
+        for (var first = 0; first < outboundSecrets.Count; first++)
+        {
+            for (var second = first + 1; second < outboundSecrets.Count; second++)
+            {
+                if (FederationSecretResolver.FixedTimeEquals(
+                        outboundSecrets[first], outboundSecrets[second]))
+                {
+                    throw new ArgumentException(
+                        "Federation outbound peers must not share signing secrets.");
+                }
+            }
+            if (inboundSecrets.Any(inboundSecret =>
+                    FederationSecretResolver.FixedTimeEquals(
+                        outboundSecrets[first], inboundSecret)))
+            {
+                throw new ArgumentException(
+                    "Federation inbound and outbound trust directions must use different signing secrets.");
+            }
         }
 
         return matrix;
@@ -248,8 +417,27 @@ public sealed partial class FederationOptionsValidator : IValidateOptions<Federa
     [GeneratedRegex("^[a-z][a-z0-9-]{1,31}$")]
     private static partial Regex ServerIdPattern();
 
+    [GeneratedRegex("^[a-z][a-z0-9-]{2,47}$")]
+    private static partial Regex KeyIdPattern();
+
     [GeneratedRegex("^[a-f0-9]{64}$")]
     private static partial Regex Sha256Pattern();
+
+    public static bool IsSafeKeyId(string? value) =>
+        value is not null && KeyIdPattern().IsMatch(value);
+
+    private static void ValidateRevokedSecretShape(
+        string inlineValue,
+        string filePath,
+        string description)
+    {
+        if (!string.IsNullOrWhiteSpace(inlineValue) &&
+            !string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException(
+                $"{description} cannot configure both inline and file secrets after revocation.");
+        }
+    }
 }
 
 public static class FederationSecretResolver

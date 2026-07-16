@@ -148,7 +148,7 @@ public sealed class ExtractionRunStore : IDisposable
     public const int MaximumSelectionLines = 64;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private Dictionary<Guid, ExtractionSettlementRun> _runs = [];
+    private readonly Dictionary<Guid, ExtractionSettlementRun> _runs = [];
     private readonly IExtractionSettlementPersistence _persistence;
     private readonly string _legacyPath;
     private bool _disposed;
@@ -198,15 +198,16 @@ public sealed class ExtractionRunStore : IDisposable
         try
         {
             EnsureReady();
-            var snapshot = CloneSnapshot();
-            var changedRunIds = new HashSet<Guid>();
+            var accountRuns = _runs.Values
+                .Where(run => run.AccountId == accountId)
+                .ToArray();
+            var changedRuns = new List<ExtractionSettlementRun>();
             var now = DateTimeOffset.UtcNow;
-            foreach (var expired in snapshot.Values.Where(run =>
-                         run.AccountId == accountId &&
+            foreach (var expired in accountRuns.Where(run =>
                          run.State == ExtractionSettlementState.Quoted &&
                          run.ExpiresAt <= now).ToArray())
             {
-                snapshot[expired.RunId] = expired with
+                changedRuns.Add(expired with
                 {
                     State = ExtractionSettlementState.Expired,
                     Revision = checked(expired.Revision + 1),
@@ -214,11 +215,9 @@ public sealed class ExtractionRunStore : IDisposable
                     UpdatedAt = now,
                     ErrorCode = "QUOTE_EXPIRED",
                     ErrorMessage = "资源兑换报价已过期。"
-                };
-                changedRunIds.Add(expired.RunId);
+                });
             }
-            var blocking = snapshot.Values.FirstOrDefault(run =>
-                run.AccountId == accountId &&
+            var blocking = accountRuns.FirstOrDefault(run =>
                 run.State is ExtractionSettlementState.Consuming or
                     ExtractionSettlementState.Removed or
                     ExtractionSettlementState.Credited or
@@ -230,11 +229,11 @@ public sealed class ExtractionRunStore : IDisposable
                     $"已有资源兑换记录 {blocking.RunId:N} 等待结算或人工对账。",
                     StatusCodes.Status409Conflict);
             }
-            foreach (var previous in snapshot.Values.Where(run =>
-                         run.AccountId == accountId &&
-                         run.State == ExtractionSettlementState.Quoted).ToArray())
+            foreach (var previous in accountRuns.Where(run =>
+                         run.State == ExtractionSettlementState.Quoted &&
+                         run.ExpiresAt > now).ToArray())
             {
-                snapshot[previous.RunId] = previous with
+                changedRuns.Add(previous with
                 {
                     State = ExtractionSettlementState.Cancelled,
                     Revision = checked(previous.Revision + 1),
@@ -242,8 +241,7 @@ public sealed class ExtractionRunStore : IDisposable
                     UpdatedAt = now,
                     ErrorCode = "QUOTE_REPLACED",
                     ErrorMessage = "已生成新的资源兑换报价。"
-                };
-                changedRunIds.Add(previous.RunId);
+                });
             }
             var totalValue = checked(items.Sum(item => item.TotalValue));
             var itemCount = checked(items.Sum(item => item.Quantity));
@@ -280,9 +278,8 @@ public sealed class ExtractionRunStore : IDisposable
                 Hotspot = hotspot,
                 DynamicEconomyEvidence = CloneDynamicEconomyEvidence(dynamicEconomyEvidence)
             };
-            snapshot[run.RunId] = run;
-            changedRunIds.Add(run.RunId);
-            await PersistAndSwapSnapshotAsync(snapshot, changedRunIds, cancellationToken);
+            changedRuns.Add(run);
+            await PersistAndApplyWritesAsync(changedRuns, cancellationToken);
             return Clone(run);
         }
         finally
@@ -570,12 +567,8 @@ public sealed class ExtractionRunStore : IDisposable
                 ErrorMessage = $"已派生选择性报价 {child.RunId:N}。",
                 SelectedChildRunId = child.RunId
             };
-            var snapshot = CloneSnapshot();
-            snapshot[source.RunId] = cancelledSource;
-            snapshot[child.RunId] = child;
-            await PersistAndSwapSnapshotAsync(
-                snapshot,
-                [source.RunId, child.RunId],
+            await PersistAndApplyWritesAsync(
+                [cancelledSource, child],
                 cancellationToken);
             return new ExtractionQuoteSelectionResult(
                 Clone(child),
@@ -765,8 +758,7 @@ public sealed class ExtractionRunStore : IDisposable
             {
                 if (run.State == ExtractionSettlementState.Quoted)
                 {
-                    var snapshot = CloneSnapshot();
-                    var expired = snapshot[runId] with
+                    var expired = run with
                     {
                         State = ExtractionSettlementState.Expired,
                         Revision = checked(run.Revision + 1),
@@ -775,17 +767,15 @@ public sealed class ExtractionRunStore : IDisposable
                         ErrorCode = "QUOTE_EXPIRED",
                         ErrorMessage = "资源兑换报价已过期。"
                     };
-                    snapshot[runId] = expired;
-                    await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+                    await PersistAndApplyWritesAsync([expired], cancellationToken);
                 }
                 throw new ExtractionModeException(
                     "EXTRACTION_QUOTE_NOT_SETTLEABLE",
                     "资源兑换报价已过期或不处于可结算状态。",
                     StatusCodes.Status409Conflict);
             }
-            var updatedSnapshot = CloneSnapshot();
             var leaseId = Guid.NewGuid();
-            var updated = updatedSnapshot[runId] with
+            var updated = run with
             {
                 State = ExtractionSettlementState.Consuming,
                 PreDeleteTotals = new Dictionary<string, long>(
@@ -802,8 +792,7 @@ public sealed class ExtractionRunStore : IDisposable
                 AttemptCount = checked(run.AttemptCount + 1),
                 LastHeartbeatAt = now
             };
-            updatedSnapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(updatedSnapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionConsumptionStart(Clone(updated), true, false);
         }
         finally
@@ -856,14 +845,12 @@ public sealed class ExtractionRunStore : IDisposable
                 return new ExtractionRunMutation(Clone(run), false);
             }
 
-            var snapshot = CloneSnapshot();
-            var updated = snapshot[runId] with
+            var updated = run with
             {
                 NativeConsumeReceipt = CloneNativeReceipt(receipt),
                 UpdatedAt = DateTimeOffset.UtcNow
             };
-            snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -1037,9 +1024,11 @@ public sealed class ExtractionRunStore : IDisposable
             }
 
             var commit = await _persistence.CreditRemovedRunAsync(run, cancellationToken);
-            var snapshot = CloneSnapshot();
-            snapshot[runId] = Clone(commit.Run);
-            _runs = snapshot;
+            // CreditRemovedRunAsync returns only after the SQLite transaction has
+            // committed. The returned run is already a detached persistence value;
+            // update the existing cache slot immediately, without an allocation or
+            // any other fallible work between the commit and cache synchronization.
+            _runs[runId] = commit.Run;
             return new ExtractionRunMutation(Clone(commit.Run), true);
         }
         finally
@@ -1076,15 +1065,13 @@ public sealed class ExtractionRunStore : IDisposable
             }
 
             var now = DateTimeOffset.UtcNow;
-            var snapshot = CloneSnapshot();
-            var updated = snapshot[runId] with
+            var updated = run with
             {
                 UpdatedAt = now,
                 LastHeartbeatAt = now,
                 LeaseExpiresAt = now.Add(SettlementLeaseDuration)
             };
-            snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -1118,8 +1105,7 @@ public sealed class ExtractionRunStore : IDisposable
             }
 
             var now = DateTimeOffset.UtcNow;
-            var snapshot = CloneSnapshot();
-            var updated = snapshot[runId] with
+            var updated = run with
             {
                 Revision = checked(run.Revision + 1),
                 UpdatedAt = now,
@@ -1127,8 +1113,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LeaseOwner = null,
                 LeaseExpiresAt = null
             };
-            snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -1173,8 +1158,7 @@ public sealed class ExtractionRunStore : IDisposable
                 return new ExtractionRunMutation(Clone(run), false);
             }
 
-            var snapshot = CloneSnapshot();
-            var updated = snapshot[runId] with
+            var updated = run with
             {
                 Revision = checked(run.Revision + 1),
                 StateChangedAt = run.StateChangedAt ?? run.UpdatedAt,
@@ -1185,8 +1169,7 @@ public sealed class ExtractionRunStore : IDisposable
                 AttemptCount = checked(run.AttemptCount + 1),
                 LastHeartbeatAt = now
             };
-            snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -1260,8 +1243,7 @@ public sealed class ExtractionRunStore : IDisposable
             DateTimeOffset? newLeaseExpiry = newLeaseId is null
                 ? null
                 : now.Add(SettlementLeaseDuration);
-            var snapshot = CloneSnapshot();
-            var updated = snapshot[runId] with
+            var updated = run with
             {
                 State = state,
                 Revision = checked(run.Revision + 1),
@@ -1279,8 +1261,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LastHeartbeatAt = newLeaseId is null ? run.LastHeartbeatAt : now,
                 ReconciliationActor = reconciliationActor ?? run.ReconciliationActor
             };
-            snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
+            await PersistAndApplyWritesAsync([updated], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -1320,48 +1301,68 @@ public sealed class ExtractionRunStore : IDisposable
         }
     }
 
-    private async Task PersistAndSwapSnapshotAsync(
-        Dictionary<Guid, ExtractionSettlementRun> snapshot,
-        IReadOnlyCollection<Guid> changedRunIds,
+    private async Task PersistAndApplyWritesAsync(
+        IReadOnlyCollection<ExtractionSettlementRun> changedRuns,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(changedRunIds);
-        if (changedRunIds.Count == 0)
+        ArgumentNullException.ThrowIfNull(changedRuns);
+        if (changedRuns.Count == 0)
         {
             throw new ArgumentException(
                 "At least one extraction settlement run must be written.",
-                nameof(changedRunIds));
+                nameof(changedRuns));
         }
 
         var seen = new HashSet<Guid>();
-        var writes = new List<ExtractionSettlementRunWrite>(changedRunIds.Count);
-        foreach (var runId in changedRunIds)
+        var writes = new List<ExtractionSettlementRunWrite>(changedRuns.Count);
+        var cacheUpdates = new List<KeyValuePair<Guid, ExtractionSettlementRun>>(
+            changedRuns.Count);
+        var insertCount = 0;
+        foreach (var changedRun in changedRuns)
         {
-            if (!seen.Add(runId))
+            if (changedRun.RunId == Guid.Empty)
             {
                 throw new InvalidOperationException(
-                    $"Extraction run '{runId}' was included more than once in one persistence batch.");
+                    "An extraction settlement persistence batch contains an empty run id.");
             }
-            if (!snapshot.TryGetValue(runId, out var updated))
+            if (!seen.Add(changedRun.RunId))
             {
                 throw new InvalidOperationException(
-                    $"Extraction run '{runId}' is missing from the replacement snapshot.");
+                    $"Extraction run '{changedRun.RunId}' was included more than once in one persistence batch.");
             }
-            writes.Add(_runs.TryGetValue(runId, out var expected)
-                ? ExtractionSettlementRunWrite.Update(expected, updated)
-                : ExtractionSettlementRunWrite.Insert(updated));
+
+            // Clone only the values in this write batch. The detached value is
+            // prepared before SQLite commits and becomes the cache-owned value
+            // after the commit, so historical runs are never copied on a write.
+            var detachedRun = Clone(changedRun);
+            if (_runs.TryGetValue(changedRun.RunId, out var expected))
+            {
+                writes.Add(ExtractionSettlementRunWrite.Update(expected, detachedRun));
+            }
+            else
+            {
+                writes.Add(ExtractionSettlementRunWrite.Insert(detachedRun));
+                insertCount = checked(insertCount + 1);
+            }
+            cacheUpdates.Add(new KeyValuePair<Guid, ExtractionSettlementRun>(
+                changedRun.RunId,
+                detachedRun));
         }
 
-        // The SQLite commit is the persistence point. No cancellable or fallible
-        // work may be introduced between it and the in-memory reference swap.
-        await _persistence.PersistSettlementRunWritesAsync(writes, cancellationToken);
-        _runs = snapshot;
-    }
+        // Reserve every new dictionary slot before the durable commit. Once
+        // persistence returns, the loop below performs only allocation-free
+        // replacements/additions while the store gate remains held.
+        _runs.EnsureCapacity(checked(_runs.Count + insertCount));
 
-    private Dictionary<Guid, ExtractionSettlementRun> CloneSnapshot() =>
-        _runs.ToDictionary(
-            pair => pair.Key,
-            pair => Clone(pair.Value));
+        // The SQLite commit is the persistence point. No cancellable or fallible
+        // work may be introduced between it and the in-memory cache update.
+        await _persistence.PersistSettlementRunWritesAsync(writes, cancellationToken);
+        for (var index = 0; index < cacheUpdates.Count; index++)
+        {
+            var update = cacheUpdates[index];
+            _runs[update.Key] = update.Value;
+        }
+    }
 
     private void EnsureReady()
     {

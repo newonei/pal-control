@@ -23,7 +23,8 @@ $contractTests = @(
     "tests\contract\economy-analytics-contract.ps1",
     "tests\contract\federation-contract.ps1",
     "tests\contract\team-economy-contract.ps1",
-    "tests\contract\windows-configure-preservation-contract.ps1"
+    "tests\contract\windows-configure-preservation-contract.ps1",
+    "tests\contract\soak-observability-contract.ps1"
 )
 $integrationTests = @(
     "tests\integration\settlement-saga-smoke.ps1",
@@ -39,6 +40,7 @@ $integrationTests = @(
     "tests\integration\season-leaderboard-smoke.ps1",
     "tests\integration\player-notifications-smoke.ps1",
     "tests\integration\team-economy-smoke.ps1",
+    "tests\integration\team-economy-capacity-smoke.ps1",
     "tests\integration\identity-binding-smoke.ps1",
     "tests\integration\admin-auth-smoke.ps1",
     "tests\integration\admin-operation-keys-smoke.ps1",
@@ -54,7 +56,13 @@ $integrationTests = @(
     "tests\integration\logging-correlation-smoke.ps1",
     "tests\integration\economy-reconciliation-smoke.ps1",
     "tests\integration\economy-analytics-smoke.ps1",
+    "tests\integration\weekly-economy-report-smoke.ps1",
     "tests\integration\federation-smoke.ps1",
+    "tests\integration\run-store-capacity-smoke.ps1",
+    "tests\integration\soak-runner-smoke.ps1",
+    "tests\integration\acceptance-evidence-smoke.ps1",
+    "tests\integration\zone-calibration-smoke.ps1",
+    "tests\integration\world-restore-smoke.ps1",
     "tests\integration\windows-production-deployment-smoke.ps1"
 )
 $selectedTests = switch ($Suite) {

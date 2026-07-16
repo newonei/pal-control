@@ -448,8 +448,7 @@ public sealed class EconomyContentDefinitionValidator
                 Error(errors, "INVALID_ZONE_RISK_HINT", path + "/riskHint",
                     "Zone risk guidance cannot exceed 512 characters.");
             }
-            if (!double.IsFinite(zone.MapX) || !double.IsFinite(zone.MapY) ||
-                !double.IsFinite(zone.Radius) || zone.Radius is <= 0 or > 10_000)
+            if (!ZoneGeometryLimits.IsValid(zone.MapX, zone.MapY, zone.Radius))
             {
                 Error(errors, "INVALID_ZONE_GEOMETRY", path,
                     "Zone coordinates must be finite and radius must be between 0 and 10000.");

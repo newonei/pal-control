@@ -104,7 +104,7 @@
 - **版本化内容管理**：在维护模式下从已发布版本创建草稿，保存完整 JSON、查看语义 diff、执行严格校验，并以不可变版本和 content hash 发布或回滚；高风险切换要求 TOTP、审计原因、确认短语、幂等键和结算排空。
 - **经济平衡工具**：发布前校验显式 attested 的运营经济影子 DAG，穷尽礼包拆分、至少一层转换、双币回收与费用路径，并用逐 ItemID 参考成本、类别折价目标和风险缓冲阻断发布；动态内容按“最低折扣买入 → 最高事件/限时热点倍率卖出”的跨日极值组合分析。可靠任务还必须提供 cadence/实例受限的永久商域币来源，以及至少两个正价、有限个人限购的长期消费 SKU。旧内容无 policy 时仅兼容检查并明确告警。另提供固定种子 100 玩家 × 7 业务日极值压力仿真和目标区间报告。
 - **运营分析面板**：按服务器、日期口径、赛季和内容版本，从 SQLite 权威事实重算玩法入口、商城与资源兑换两条路径、商品购买率、区域热度、双币产销/余额分位数和 `uncertain`；目录分母由服务端唯一事实记录，少于 5 个账户的非零群组隐藏，页面不接收客户端埋点或返回玩家标识。详见 [指标口径与运行手册](docs/runbooks/economy-analytics.md)。
-- **多服注册与兼容矩阵**：玩家“我的服务器”页面只读展示各节点账户、周档、双币与兼容状态；每个 Palworld 服务器仍由本地 Control API/SQLite 独占写面。聚合器只用共享 HMAC subject 读取摘要，节点失败或版本漂移会显式显示 unavailable/incompatible，不会冒充 0 余额；切服只打开配置 allowlist 中的门户 URL，不附加身份或 session，也不支持跨服转币、库存或交易。版本化矩阵用 canonical SHA-256、精确 game/Steam build/PalDefender/UE4SS/Native 组合和证据 fail-closed；当前旧目标仅为 experimental，实服新版本仍为 quarantined。详见 [多服务器与兼容矩阵手册](docs/runbooks/server-federation-and-compatibility.md)。
+- **多服注册与兼容矩阵**：玩家“我的服务器”页面只读展示各节点账户、周档、双币与兼容状态；每个 Palworld 服务器仍由本地 Control API/SQLite 独占写面。聚合请求使用 `fed2_` caller/target/key 绑定 subject、逐 peer HMAC 请求签名、正文哈希、时间窗和 nonce 防重放；身份与签名 key 均可按版本轮换，单 key 或整 peer 可独立吊销。节点失败或版本漂移会显式显示 unavailable/incompatible，不会冒充 0 余额；切服只打开配置 allowlist 中的门户 URL，不附加身份或 session，也不支持跨服转币、库存或交易。版本化矩阵用 canonical SHA-256、精确 game/Steam build/PalDefender/UE4SS/Native 组合和证据 fail-closed；当前旧目标仅为 experimental，实服新版本仍为 quarantined。详见 [多服务器与兼容矩阵手册](docs/runbooks/server-federation-and-compatibility.md)。
 - **接口与审计**：展示 PalDefender 白名单能力、运维命令和追加式审计记录；需要异步游戏副作用的命令使用持久化队列与最终回执。
 
 ### 玩家门户
@@ -151,7 +151,7 @@
 | 资源兑换 | Player Portal、PalDefender 在线角色定位、精确版本 Native MOD、稳定 `inventory.consume` 持久化能力与周世界门禁 |
 | 团队目标与排行榜 | 已启用的 Player Portal/ExtractionMode、已绑定周世界、SQLite 权威经济事实，以及外部注入的独立 `TeamEconomy__InvitePepper` |
 | 玩家消息游戏内投递 | 先以默认 `PlayerNotifications:GameDeliveryEnabled=false` 完成站内 feed 回填；确认定向 `players + player-message` Native 能力与审计后再显式启用 |
-| 多服务器只读注册 | `Federation.Enabled=true`、同一运营方信任域、全节点一致身份 key/矩阵、逐节点 TLS 与文件型节点密钥，以及每个节点已审核的 `stable` 组合；当前无 stable 组合，生产保持关闭 |
+| 多服务器只读注册 | `Federation.Enabled=true`、全节点一致且版本化的 `IdentityKeys`/矩阵、逐 peer 可吊销签名密钥、caller/target/subject v2 绑定、逐节点 TLS，以及每个节点已审核的 `stable` 组合；当前无 stable 组合，生产保持关闭 |
 
 默认配置中 **PalDefender、RCON、玩家门户、TeamEconomy、Federation 和玩家消息游戏内投递全部关闭**；Windows 安装器与生产样例还会把 `ExtractionMode` 关闭、初始双币设为 0。此时没有本地资源目录也能启动基础 Web/API。启用 `ExtractionMode` 后，Control API 会在接受 HTTP 流量前校验目录并原子初始化首个内容版本；目录缺失或非法会让启动失败，不会伪装成“已启用但没有内容”。TeamEconomy 还要求通过环境变量或受保护外部配置提供独立的 32–512 字符 `TeamEconomy__InvitePepper`，不要把真实值提交到仓库。完整运营能力仍需要按本文配置外部服务，界面会依据服务端 capabilities 禁用未满足条件的写操作。
 
@@ -426,11 +426,11 @@ dotnet publish .\services\control-api\PalControl.ControlApi.csproj `
 
 当前生产入口只支持 Windows x64 单机：Control API 与进程内 workers 使用一个最小权限 Windows Service，Caddy 使用另一个服务，SQLite 和 Caddy TLS 数据全部放在版本目录之外。发布物包含 commit、dirty 状态、数据契约和逐文件 SHA-256；安装/升级要求显式批准 ZIP hash，升级失败会在公网边界关闭期间恢复停服冷快照、旧程序和旧静态根。同一数据契约的主动回滚保留当前账本；跨契约降级会被拒绝。只读迁移审计器可在停写副本上逐账户重算余额并严格比较 ledger、订单、run、delivery、幂等证据和全部 SQLite 应用表逐行 canonical hash。
 
-完整的目录准备、首次安装、升级前排空、可重复升级、回滚、密钥轮换和故障处置见 [单实例生产部署、升级与恢复手册](docs/runbooks/production-deployment-and-recovery.md)，数据核对命令见 [SQLite 经济迁移前后核对手册](docs/runbooks/economy-migration-reconciliation.md)。仓库尚未宣称 Docker、PostgreSQL、多实例/HA、真实空白机验收或 24 小时 soak 已完成。
+完整的目录准备、首次安装、升级前排空、可重复升级、回滚、密钥轮换和故障处置见 [单实例生产部署、升级与恢复手册](docs/runbooks/production-deployment-and-recovery.md)，数据核对命令见 [SQLite 经济迁移前后核对手册](docs/runbooks/economy-migration-reconciliation.md)。当前方案 A 的单服 5–10 人目标按 [ADR-0003](docs/architecture/decisions/0003-sqlite-capacity-and-postgresql-triggers.md) 继续使用单实例 SQLite；容量、24 小时 soak、真实写锁/积压、RPO/RTO 或 HA 要求越线时必须重新立项。仓库尚未宣称 Docker、PostgreSQL、多实例/HA、真实空白机验收或 24 小时 soak 已完成。
 
 ## 测试
 
-统一测试入口当前运行 14 个 contract 与 30 个 integration 脚本，并包含管理台 21 项、玩家端 32 项单元测试和 15 个 Playwright 玩家门户 E2E。默认与 CI 使用 Playwright Chromium；设置 `PLAYWRIGHT_USE_SYSTEM_CHROME=1` 可额外复核系统 Chrome，本发布候选也已完成 system Chrome 15/15。测试覆盖方案 A 契约、Steam OpenID、玩家经济安全、选择性资源出售、物品展示/地图图层、团队经济、多服只读聚合、Windows 配置保留、管理员操作幂等键、结算状态机、SQLite outbox、连续性、版本化内容、内容投影原子性、可靠任务、通知重放/崩溃恢复、永久币来源/消费上限、120 账户权威运营分析、生产部署/恢复、SQLite 迁移一致性核对、日志关联/脱敏审计和经济不变量 harness。浏览器用例覆盖 375×812 手机布局、纯键盘与弹窗焦点、六个地图图层、关闭区/位置轮询失败时撤销出售资格、展示 fallback、选择性出售响应丢失、团队目标/邀请/榜单、三节点故障隔离、周档结算、本人消息中心、显式浏览器通知授权、错误播报语义，以及相关页面的 Axe WCAG A/AA 严重和致命规则。它们使用本地 fake、合成资源目录与临时目录，不会连接真实 Palworld 服务端，也不依赖本机被忽略的授权目录：
+统一测试入口当前运行 15 个 contract 与 37 个 integration 脚本（共 52 个），并包含管理台 21 项、玩家端 32 项单元测试和 15 个 Playwright 玩家门户 E2E。默认与 CI 使用 Playwright Chromium；设置 `PLAYWRIGHT_USE_SYSTEM_CHROME=1` 可额外复核系统 Chrome，本发布候选也已完成 system Chrome 15/15。测试覆盖方案 A 契约、Steam OpenID、玩家经济安全、选择性资源出售、物品展示/地图图层、团队经济、多服只读聚合、Windows 配置保留、管理员操作幂等键、结算状态机、SQLite outbox、连续性、版本化内容、内容投影原子性、可靠任务、通知重放/崩溃恢复、永久币来源/消费上限、120 账户权威运营分析、周报归档、受控恢复、区域校准、验收证据、短时非验收 soak、生产部署/恢复、SQLite 迁移一致性核对、日志关联/脱敏审计和经济不变量 harness。浏览器用例覆盖 375×812 手机布局、纯键盘与弹窗焦点、六个地图图层、关闭区/位置轮询失败时撤销出售资格、展示 fallback、选择性出售响应丢失、团队目标/邀请/榜单、三节点故障隔离、周档结算、本人消息中心、显式浏览器通知授权、错误播报语义，以及相关页面的 Axe WCAG A/AA 严重和致命规则。它们使用本地 fake、合成资源目录与临时目录，不会连接真实 Palworld 服务端，也不依赖本机被忽略的授权目录；短时 CI soak 也不能替代正式 24 小时运行：
 
 ```powershell
 npx playwright install chromium # 首次运行或浏览器缓存缺失时
@@ -456,6 +456,7 @@ Windows GitHub Actions 会执行 Gitleaks、`npm ci`、两个前端构建、Cont
 - [总体架构](docs/architecture/overview.md)
 - [ADR-0001：采用周世界资源经济服](docs/architecture/decisions/0001-weekly-world-resource-economy.md)
 - [ADR-0002：Steam OpenID 与当前周角色绑定](docs/architecture/decisions/0002-steam-openid-and-world-binding.md)
+- [ADR-0003：SQLite 容量结论与 PostgreSQL 重新立项条件](docs/architecture/decisions/0003-sqlite-capacity-and-postgresql-triggers.md)
 - [MOD 能力与接口维护手册](docs/MOD能力与接口维护手册.md)
 - [玩家门户部署与安全资料](docs/player-portal/README.md)
 - [玩家使用教程](docs/player-portal/05-玩家使用教程.md)
@@ -464,6 +465,9 @@ Windows GitHub Actions 会执行 Gitleaks、`npm ci`、两个前端构建、Cont
 - [经济运营工作台与响应丢失恢复](docs/runbooks/economy-operations-workbench.md)
 - [运营分析面板与指标口径](docs/runbooks/economy-analytics.md)
 - [多服务器只读聚合与兼容矩阵](docs/runbooks/server-federation-and-compatibility.md)
+- [兑换区实服校准与证据验证](docs/runbooks/zone-calibration.md)
+- [不可变周档经济报告](docs/runbooks/weekly-economy-report.md)
+- [验收证据归档与离线验证](docs/runbooks/acceptance-evidence.md)
 - [周榜冻结、奖励结算与人工补发](docs/runbooks/season-leaderboard-settlement.md)
 - [单实例生产部署、升级与恢复手册](docs/runbooks/production-deployment-and-recovery.md)
 - [SQLite 经济迁移前后核对手册](docs/runbooks/economy-migration-reconciliation.md)

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -9,6 +10,7 @@ using System.Net;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
 using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Domain;
 using PalControl.ControlApi.Extraction;
@@ -433,6 +435,29 @@ app.MapGet("/health/live", () => Results.Ok(new
     service = "pal-control-api",
     time = DateTimeOffset.UtcNow
 }));
+
+app.MapGet("/health/instance", (
+    IOptions<ExtractionPersistenceOptions> persistence,
+    IOptions<StartupSecurityValidationOptions> startupSecurity,
+    IWebHostEnvironment environment) =>
+{
+    using var process = Process.GetCurrentProcess();
+    var dataDirectory = EconomyOperationsEndpoints.ResolveRuntimePath(
+        persistence.Value.DataDirectory,
+        environment.ContentRootPath);
+    var logDirectory = EconomyOperationsEndpoints.ResolveRuntimePath(
+        startupSecurity.Value.LogDirectory,
+        environment.ContentRootPath);
+    return Results.Ok(new
+    {
+        schemaVersion = 1,
+        service = "pal-control-api",
+        processId = Environment.ProcessId,
+        processStartedAtUtc = process.StartTime.ToUniversalTime(),
+        dataDirectoryFingerprint = EconomyOperationsEndpoints.RuntimePathFingerprint(dataDirectory),
+        logDirectoryFingerprint = EconomyOperationsEndpoints.RuntimePathFingerprint(logDirectory)
+    });
+});
 
 app.MapGet("/health/ready", async (
     BridgeState bridge,

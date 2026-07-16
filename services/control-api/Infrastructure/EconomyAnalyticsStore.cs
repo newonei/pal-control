@@ -25,6 +25,7 @@ public sealed class EconomyAnalyticsStore
     private readonly string _connectionString;
     private readonly TimeProvider _timeProvider;
     private readonly TimeZoneInfo _businessTimeZone;
+    private readonly bool _readOnly;
 
     public EconomyAnalyticsStore(
         IOptions<ExtractionPersistenceOptions> persistence,
@@ -42,20 +43,52 @@ public sealed class EconomyAnalyticsStore
         string dataDirectory,
         TimeZoneInfo? businessTimeZone = null,
         TimeProvider? timeProvider = null)
+        : this(dataDirectory, businessTimeZone, timeProvider, readOnly: false)
+    {
+    }
+
+    internal static EconomyAnalyticsStore OpenReadOnly(
+        string dataDirectory,
+        TimeZoneInfo? businessTimeZone = null,
+        TimeProvider? timeProvider = null) =>
+        new(dataDirectory, businessTimeZone, timeProvider, readOnly: true);
+
+    private EconomyAnalyticsStore(
+        string dataDirectory,
+        TimeZoneInfo? businessTimeZone,
+        TimeProvider? timeProvider,
+        bool readOnly)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         var directory = Path.GetFullPath(dataDirectory);
-        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "extraction-commerce.db");
+        if (readOnly)
+        {
+            if (!Directory.Exists(directory) || !File.Exists(databasePath))
+            {
+                throw new FileNotFoundException(
+                    "The authoritative analytics SQLite database is missing.",
+                    databasePath);
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(directory);
+        }
         _connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = Path.Combine(directory, "extraction-commerce.db"),
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            DataSource = databasePath,
+            Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
+            Cache = readOnly ? SqliteCacheMode.Private : SqliteCacheMode.Shared,
             Pooling = false
         }.ToString();
         _businessTimeZone = businessTimeZone ?? TimeZoneInfo.Utc;
         _timeProvider = timeProvider ?? TimeProvider.System;
-        Initialize();
+        _readOnly = readOnly;
+        if (!readOnly)
+        {
+            Initialize();
+        }
     }
 
     public Task RecordPortalSessionAsync(
@@ -121,6 +154,11 @@ public sealed class EconomyAnalyticsStore
         DateOnly businessDate,
         CancellationToken cancellationToken)
     {
+        if (_readOnly)
+        {
+            throw new InvalidOperationException(
+                "A read-only analytics store cannot record facts.");
+        }
         if (accountId == Guid.Empty || seasonId == Guid.Empty ||
             string.IsNullOrWhiteSpace(serverId) || serverId.Trim().Length > 64 ||
             contentVersionId == Guid.Empty)
@@ -1037,10 +1075,16 @@ public sealed class EconomyAnalyticsStore
 
     private SqliteConnection Open(bool readOnly)
     {
+        if (_readOnly && !readOnly)
+        {
+            throw new InvalidOperationException(
+                "A read-only analytics store cannot open a write connection.");
+        }
+        var effectiveReadOnly = _readOnly || readOnly;
         var builder = new SqliteConnectionStringBuilder(_connectionString)
         {
-            Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
-            Cache = readOnly ? SqliteCacheMode.Private : SqliteCacheMode.Shared,
+            Mode = effectiveReadOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
+            Cache = effectiveReadOnly ? SqliteCacheMode.Private : SqliteCacheMode.Shared,
             Pooling = false
         };
         var connection = new SqliteConnection(builder.ToString());

@@ -3516,7 +3516,9 @@ paths:
       description: >-
         Returns authoritative aggregate and account-scoped operational state without
         enumerating player routes. Account identity is exposed only as platformSubjectHash;
-        raw platformSubject and PlayerUID values are never part of this contract.
+        raw platformSubject and PlayerUID values are never part of this contract. Runtime
+        observability contains only an active-session count and aggregate GC counters; it
+        never returns a session identifier, cookie, CSRF value, token or process command line.
       operationId: getEconomyOperationsOverview
       parameters:
         - name: limit
@@ -4578,13 +4580,25 @@ paths:
       tags: [Federation]
       summary: Resolve one irreversible federation subject on the local node
       description: >-
-        Server-to-server read only. The request contains an HMAC-derived subject,
-        never a SteamID, PlayerUID, accountId, cookie, or user-selected URL. The
+        Server-to-server read only. Protocol v2 binds a pair-specific HMAC subject
+        to the authenticated caller, this exact target node, a versioned identity
+        key, the request body hash, timestamp, and one-time nonce. The request never
+        contains a SteamID, PlayerUID, accountId, cookie, or user-selected URL. The
         response reads the local authoritative account, active week, and wallet
         without creating an account, seeding currency, or mutating an index.
       operationId: getInternalFederationProfile
       security:
-        - federationNodeKey: []
+        - federationRequestSignature: []
+      parameters:
+        - $ref: "#/components/parameters/FederationProtocolVersion"
+        - $ref: "#/components/parameters/FederationCaller"
+        - $ref: "#/components/parameters/FederationTarget"
+        - $ref: "#/components/parameters/FederationSigningKeyId"
+        - $ref: "#/components/parameters/FederationIdentityKeyId"
+        - $ref: "#/components/parameters/FederationExpectedCombination"
+        - $ref: "#/components/parameters/FederationTimestamp"
+        - $ref: "#/components/parameters/FederationNonce"
+        - $ref: "#/components/parameters/FederationContentSha256"
       requestBody:
         required: true
         content:
@@ -4614,7 +4628,17 @@ paths:
       summary: Read this node's registered compatibility identity
       operationId: getInternalFederationHealth
       security:
-        - federationNodeKey: []
+        - federationRequestSignature: []
+      parameters:
+        - $ref: "#/components/parameters/FederationProtocolVersion"
+        - $ref: "#/components/parameters/FederationCaller"
+        - $ref: "#/components/parameters/FederationTarget"
+        - $ref: "#/components/parameters/FederationSigningKeyId"
+        - $ref: "#/components/parameters/FederationIdentityKeyId"
+        - $ref: "#/components/parameters/FederationExpectedCombination"
+        - $ref: "#/components/parameters/FederationTimestamp"
+        - $ref: "#/components/parameters/FederationNonce"
+        - $ref: "#/components/parameters/FederationContentSha256"
       responses:
         "200":
           description: Node health and compatibility evidence pointer
@@ -4705,14 +4729,82 @@ components:
         /api/v1/player and enables Secure behind HTTPS. Authenticated player
         identity is derived exclusively from this cookie, never from a userId
         query parameter or business request body.
-    federationNodeKey:
+    federationRequestSignature:
       type: apiKey
       in: header
-      name: X-Pal-Control-Node-Key
+      name: X-Pal-Control-Signature
       description: >-
-        Server-to-server key loaded from environment or a protected file. It is
-        compared in constant time and is never returned in responses or audit data.
+        HMAC-SHA-256 signature made with the selected non-revoked per-peer signing
+        key. Its canonical input includes protocol, HTTP method/path, caller, target,
+        signing/identity key ids, expected compatibility combination, timestamp,
+        nonce, and the exact request-body SHA-256. Companion X-Pal-Control-* headers
+        below are mandatory. Secrets and signatures are never returned or audited.
   parameters:
+    FederationProtocolVersion:
+      name: X-Pal-Control-Federation-Version
+      in: header
+      required: true
+      schema:
+        type: integer
+        enum: [2]
+    FederationCaller:
+      name: X-Pal-Control-Caller
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{1,31}$"
+    FederationTarget:
+      name: X-Pal-Control-Target
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{1,31}$"
+    FederationSigningKeyId:
+      name: X-Pal-Control-Signing-Key-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{2,47}$"
+    FederationIdentityKeyId:
+      name: X-Pal-Control-Identity-Key-Id
+      in: header
+      required: true
+      description: Versioned identity key id for profile requests; '-' for health.
+      schema:
+        type: string
+        pattern: "^(-|[a-z][a-z0-9-]{2,47})$"
+    FederationExpectedCombination:
+      name: X-Pal-Control-Expected-Combination
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    FederationTimestamp:
+      name: X-Pal-Control-Timestamp
+      in: header
+      required: true
+      schema:
+        type: integer
+        format: int64
+    FederationNonce:
+      name: X-Pal-Control-Nonce
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{22}$"
+    FederationContentSha256:
+      name: X-Pal-Control-Content-SHA256
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-f0-9]{64}$"
     AdminTotp:
       name: X-Pal-Admin-Totp
       in: header
@@ -8801,6 +8893,7 @@ components:
         - schemaVersion
         - generatedAt
         - gameplayMode
+        - runtime
         - world
         - content
         - gate
@@ -8816,6 +8909,48 @@ components:
         schemaVersion: { type: integer, const: 1 }
         generatedAt: { type: string, format: date-time }
         gameplayMode: { type: string, const: weekly-resource-economy }
+        runtime:
+          type: object
+          additionalProperties: false
+          required: [instance, sessions, gc]
+          properties:
+            instance:
+              type: object
+              additionalProperties: false
+              required:
+                - processId
+                - processStartedAtUtc
+                - dataDirectoryFingerprint
+                - logDirectoryFingerprint
+              properties:
+                processId: { type: integer, minimum: 1 }
+                processStartedAtUtc: { type: string, format: date-time }
+                dataDirectoryFingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+                logDirectoryFingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+            sessions:
+              type: object
+              additionalProperties: false
+              required: [active]
+              properties:
+                active:
+                  type: integer
+                  minimum: 0
+                  description: Aggregate count after expired process sessions are removed; no session identifier is exposed.
+            gc:
+              type: object
+              additionalProperties: false
+              required:
+                - heapSizeBytes
+                - totalAllocatedBytes
+                - gen0Collections
+                - gen1Collections
+                - gen2Collections
+              properties:
+                heapSizeBytes: { type: integer, format: int64, minimum: 0 }
+                totalAllocatedBytes: { type: integer, format: int64, minimum: 0 }
+                gen0Collections: { type: integer, minimum: 0 }
+                gen1Collections: { type: integer, minimum: 0 }
+                gen2Collections: { type: integer, minimum: 0 }
         world:
           type: object
           additionalProperties: false
@@ -12167,12 +12302,24 @@ components:
     FederationProfileRequest:
       type: object
       additionalProperties: false
-      required: [subjectToken]
+      required: [protocolVersion, callerServerId, targetServerId, identityKeyId, subjectToken]
       properties:
+        protocolVersion:
+          type: integer
+          enum: [2]
+        callerServerId:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{1,31}$"
+        targetServerId:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{1,31}$"
+        identityKeyId:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{2,47}$"
         subjectToken:
           type: string
-          pattern: "^fed1_[A-Za-z0-9_-]{43}$"
-          description: Irreversible shared-HMAC subject; never a raw platform identifier.
+          pattern: "^fed2_[A-Za-z0-9_-]{43}$"
+          description: Irreversible caller/target/key-bound HMAC subject; never a raw platform identifier.
     FederationSeasonProfile:
       type: object
       additionalProperties: false

@@ -219,3 +219,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 - 在真实域名完成 Caddy TLS/Steam/防火墙外部黑盒；
 - 24 小时 soak 证明内存、句柄、日志、SQLite WAL、队列和会话没有持续增长；
 - 若未来启用多实例，完成 PostgreSQL 数据核对、transactional outbox、lease 接管和节点断连并发测试。
+
+仓库已提供 [`tools/soak`](../../tools/soak/README.md) 采样和 fail-closed
+分析器，用于生成 canonical JSON 与 SHA-256 证据。短时 CI 只证明工具自身；本项仍须
+在真实生产候选环境按该手册连续运行 24 小时并独立审阅报告后才能勾选。

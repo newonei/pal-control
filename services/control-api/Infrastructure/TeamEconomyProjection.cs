@@ -7,10 +7,35 @@ namespace PalControl.ControlApi.Infrastructure;
 
 public sealed partial class TeamEconomyStore
 {
-    public async Task<TeamEconomyProjectionResult> ProjectSeasonAsync(
+    public Task<TeamEconomyProjectionResult> ProjectSeasonAsync(
         string serverId,
         Guid seasonId,
         DateTimeOffset cutoffAt,
+        CancellationToken cancellationToken) =>
+        ProjectSeasonCoreAsync(
+            serverId,
+            seasonId,
+            cutoffAt,
+            requireActiveSeason: false,
+            cancellationToken);
+
+    internal Task<TeamEconomyProjectionResult> ProjectActiveSeasonAsync(
+        string serverId,
+        Guid seasonId,
+        DateTimeOffset cutoffAt,
+        CancellationToken cancellationToken) =>
+        ProjectSeasonCoreAsync(
+            serverId,
+            seasonId,
+            cutoffAt,
+            requireActiveSeason: true,
+            cancellationToken);
+
+    private async Task<TeamEconomyProjectionResult> ProjectSeasonCoreAsync(
+        string serverId,
+        Guid seasonId,
+        DateTimeOffset cutoffAt,
+        bool requireActiveSeason,
         CancellationToken cancellationToken)
     {
         EnsureEnabled();
@@ -34,6 +59,7 @@ public sealed partial class TeamEconomyStore
                 var sources = await LoadAuthoritativeSourcesAsync(
                     read, (SqliteTransaction)transaction, server, seasonId, cutoffAt,
                     memberships.Select(member => member.AccountId).ToHashSet(),
+                    requireActiveSeason,
                     cancellationToken);
                 input = new ProjectionInput(teams, memberships, sources.Events, sources.ExcludedAccounts, sources.SourceFacts);
                 await transaction.CommitAsync(cancellationToken);
@@ -623,6 +649,7 @@ public sealed partial class TeamEconomyStore
         Guid seasonId,
         DateTimeOffset cutoffAt,
         IReadOnlySet<Guid> membershipAccounts,
+        bool requireActiveSeason,
         CancellationToken cancellationToken)
     {
         foreach (var table in new[]
@@ -710,9 +737,36 @@ public sealed partial class TeamEconomyStore
             }
         }
         if (!seasons.TryGetValue(seasonId, out var requestedSeason) ||
+            string.IsNullOrWhiteSpace(requestedSeason.ServerId) ||
             !string.Equals(requestedSeason.ServerId.Trim(), serverId, StringComparison.OrdinalIgnoreCase))
         {
             throw InvalidStore("TEAM_SOURCE_SEASON_MISMATCH", "The authoritative weekly-world/server mapping is unavailable or inconsistent.");
+        }
+        if (requireActiveSeason)
+        {
+            var activeSeasons = seasons.Values
+                .Where(season =>
+                    season.State == ExtractionSeasonState.Active &&
+                    !string.IsNullOrWhiteSpace(season.ServerId) &&
+                    string.Equals(
+                        season.ServerId.Trim(),
+                        serverId,
+                        StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (activeSeasons.Length != 1 ||
+                activeSeasons[0].SeasonId != seasonId ||
+                requestedSeason.State != ExtractionSeasonState.Active ||
+                string.IsNullOrWhiteSpace(requestedSeason.WorldId) ||
+                requestedSeason.StartsAt == default ||
+                requestedSeason.EndsAt <= requestedSeason.StartsAt ||
+                cutoffAt < requestedSeason.StartsAt ||
+                cutoffAt >= requestedSeason.EndsAt)
+            {
+                throw new TeamEconomyException(
+                    "TEAM_ACTIVE_SEASON_CHANGED",
+                    "The selected weekly world is no longer the unique bound active season in the authoritative projection snapshot.",
+                    StatusCodes.Status503ServiceUnavailable);
+            }
         }
         foreach (var order in orders.Values.Select(value => value.Value)
                      .Where(order => order.SeasonId == seasonId &&

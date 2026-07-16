@@ -19,6 +19,15 @@ function Assert-Contains(
     }
 }
 
+function Assert-NotContains(
+    [string]$content,
+    [string]$fragment,
+    [string]$message) {
+    if ($content.IndexOf($fragment, [StringComparison]::Ordinal) -ge 0) {
+        throw $message
+    }
+}
+
 $program = Read-RepositoryFile "services/control-api/Program.cs"
 $profiles = Read-RepositoryFile `
     "services/control-api/Infrastructure/FederationProfiles.cs"
@@ -42,18 +51,42 @@ Assert-Contains $program '!path.StartsWithSegments("/api/v1/internal/federation"
     "The purpose-built server-to-server route is still trapped behind the loopback operator boundary."
 Assert-Contains $profiles 'HMACSHA256.HashData' `
     "Federation identities are not derived with HMAC-SHA-256."
+Assert-Contains $profiles 'pal-control-federation-subject-v2' `
+    "Federation subjects are not bound to the v2 caller/target/key context."
+Assert-Contains $profiles 'pal-control-federation-request-v2' `
+    "Federation requests do not use a versioned canonical signature."
+Assert-Contains $profiles '_seenNonces.TryAdd' `
+    "Federation signed-request nonce replay protection is missing."
+Assert-Contains $profiles 'request.CallerServerId' `
+    "Federation profile resolution does not bind the authenticated caller."
+Assert-Contains $profiles 'request.TargetServerId' `
+    "Federation profile resolution does not bind the local target node."
 Assert-Contains $profiles 'ListAccountsAsync' `
     "Remote subject resolution does not use the local authoritative account repository."
 Assert-Contains $client 'MaximumResponseBytes' `
     "Federation response bodies are not bounded."
 Assert-Contains $client 'FEDERATION_REDIRECT_REJECTED' `
     "Federation redirect rejection is missing."
+Assert-Contains $client 'FederationProtocol.Sign' `
+    "Federation outbound calls are not signed over their full request context."
+Assert-Contains $client 'FEDERATION_OUTBOUND_BINDING_INVALID' `
+    "Federation transport does not fail closed on caller/target/key binding drift."
 Assert-Contains $endpoints 'RejectIdentityOverrides' `
     "Player federation does not reject identity overrides."
 Assert-Contains $options 'Production federation must pin ExpectedMatrixSha256' `
     "Production matrix pinning is not enforced."
 Assert-Contains $options 'RequireProductionStable' `
     "Production federation can admit non-stable combinations."
+Assert-Contains $options 'FederationInboundPeerOptions[] InboundPeers' `
+    "Federation has no per-peer inbound trust policy."
+Assert-Contains $options 'peer.Revoked' `
+    "Federation peers cannot be revoked independently."
+Assert-Contains $options 'Federation inbound peers must not share signing secrets' `
+    "Federation peer signing-secret isolation is not validated."
+Assert-NotContains $options 'InboundNodeKey' `
+    "Legacy single inbound node authentication remains configurable."
+Assert-NotContains $options 'IdentityHmacKey {' `
+    "Legacy unversioned identity HMAC configuration remains enabled."
 
 Assert-Contains $matrix '"gameVersion": "v1.0.0.100427"' `
     "The experimental Native target is missing from the matrix."
@@ -78,9 +111,17 @@ foreach ($path in @(
     "/admin/federation/compatibility-matrix:")) {
     Assert-Contains $openApi $path "OpenAPI is missing federation path $path"
 }
-Assert-Contains $openApi 'federationNodeKey:' `
-    "OpenAPI is missing the server-to-server key scheme."
-Assert-Contains $openApi 'pattern: "^fed1_[A-Za-z0-9_-]{43}$"' `
+Assert-Contains $openApi 'federationRequestSignature:' `
+    "OpenAPI is missing the server-to-server signature scheme."
+Assert-Contains $openApi 'name: X-Pal-Control-Signature' `
+    "OpenAPI does not expose the request-signature header."
+Assert-Contains $openApi 'name: X-Pal-Control-Caller' `
+    "OpenAPI does not expose the authenticated caller binding."
+Assert-Contains $openApi 'name: X-Pal-Control-Target' `
+    "OpenAPI does not expose the target-node binding."
+Assert-Contains $openApi 'name: X-Pal-Control-Identity-Key-Id' `
+    "OpenAPI does not expose the versioned identity key handshake."
+Assert-Contains $openApi 'pattern: "^fed2_[A-Za-z0-9_-]{43}$"' `
     "OpenAPI does not constrain the irreversible federation token."
 
 foreach ($match in [regex]::Matches(
@@ -92,5 +133,5 @@ foreach ($match in [regex]::Matches(
 }
 
 Write-Host (
-    "PASS: federation source, compatibility observations, fail-closed transport, " +
-    "identity boundary, and OpenAPI contract are present.")
+    "PASS: federation v2 caller/target/subject signatures, per-peer revocation, key rotation, " +
+    "compatibility, fail-closed transport, identity boundary, and OpenAPI contract are present.")

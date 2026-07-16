@@ -31,7 +31,9 @@ try
     await VerifyFederationAsync(root, matrixPath);
     await VerifyTransportGuardsAsync(root, matrixPath);
     Console.WriteLine(
-        "PASS: canonical compatibility matrix fail-closed validation, 3-node/100-account SQLite federation, HMAC subject isolation, node-key auth, 20x replay, restart, partial failure, mismatch, timeout, redirect, oversize, SSRF and concurrency bounds.");
+        "PASS: canonical matrix validation, 3-node/100-account SQLite federation, pair-bound HMAC subjects, " +
+        "peer-scoped v2 signatures, caller/target/body binding, nonce replay rejection, signing/identity rotation, " +
+        "per-peer revocation, restart, partial failure, mismatch, timeout, redirect, oversize, SSRF and concurrency bounds.");
 }
 finally
 {
@@ -198,6 +200,42 @@ static async Task VerifyFederationAsync(string root, string matrixPath)
                 matrix);
         }
 
+        var alphaToBetaToken = protector.Protect(
+            "identity-v1", "alpha", "beta", "steam", UserId(42));
+        var boundProfileRequest = new FederationProfileRequest(
+            FederationOptions.CurrentProtocolVersion,
+            "alpha",
+            "beta",
+            "identity-v1",
+            alphaToBetaToken);
+        var directlyBound = await profiles["beta"].GetAsync(
+            boundProfileRequest,
+            "alpha",
+            CancellationToken.None);
+        Assert(directlyBound.AccountExists &&
+               directlyBound.AccountDisplayName!.Contains("player-042", StringComparison.Ordinal),
+            "A correctly caller/target/key/subject-bound profile request did not resolve locally.");
+        await ExpectFederationFailureAsync(
+            () => profiles["beta"].GetAsync(
+                boundProfileRequest with { CallerServerId = "gamma" },
+                "alpha",
+                CancellationToken.None),
+            "FEDERATION_REQUEST_BINDING_INVALID");
+        await ExpectFederationFailureAsync(
+            () => profiles["beta"].GetAsync(
+                boundProfileRequest with { TargetServerId = "gamma" },
+                "alpha",
+                CancellationToken.None),
+            "FEDERATION_REQUEST_BINDING_INVALID");
+        var crossTargetToken = protector.Protect(
+            "identity-v1", "alpha", "gamma", "steam", UserId(42));
+        var crossTargetResult = await profiles["beta"].GetAsync(
+            boundProfileRequest with { SubjectToken = crossTargetToken },
+            "alpha",
+            CancellationToken.None);
+        Assert(!crossTargetResult.AccountExists && !crossTargetResult.BalancesAvailable,
+            "A subject derived for another target node crossed the local account boundary.");
+
         var transport = new InProcessFederationTransport(profiles);
         var aggregate = CreateAggregation(
             aggregateOptions,
@@ -338,7 +376,14 @@ static async Task VerifyTransportGuardsAsync(string root, string matrixPath)
     var identityKey = "transport-identity-" + new string('h', 48);
     var options = CreateAggregateOptions(matrixPath, nodeKey) with
     {
-        IdentityHmacKey = identityKey,
+        IdentityKeys =
+        [
+            new FederationIdentityKeyOptions
+            {
+                KeyId = "identity-v1",
+                Key = identityKey
+            }
+        ],
         RequestTimeoutMilliseconds = 100,
         MaximumResponseBytes = 1_024,
         MaximumConcurrentRequests = 3,
@@ -349,20 +394,219 @@ static async Task VerifyTransportGuardsAsync(string root, string matrixPath)
     var protector = new FederationIdentityProtector(
         Options.Create(options),
         environment);
-    var token = protector.Protect("steam", UserId(1));
-    Assert(token.StartsWith("fed1_", StringComparison.Ordinal) && token.Length == 48,
+    var token = protector.Protect(
+        "identity-v1", "alpha", "beta", "steam", UserId(1));
+    Assert(token.StartsWith("fed2_", StringComparison.Ordinal) && token.Length == 48,
         "Federation subject token format drifted.");
-    Assert(token != protector.Protect("steam", UserId(2)),
+    Assert(token != protector.Protect(
+            "identity-v1", "alpha", "beta", "steam", UserId(2)),
         "Different identities produced the same federation subject token.");
 
+    var inboundToken = protector.Protect(
+        "identity-v1", "beta", "alpha", "steam", UserId(1));
+    var inboundProfile = new FederationProfileRequest(
+        FederationOptions.CurrentProtocolVersion,
+        "beta",
+        "alpha",
+        "identity-v1",
+        inboundToken);
+    var inboundBody = JsonSerializer.SerializeToUtf8Bytes(
+        inboundProfile,
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    var inboundSecret = Encoding.UTF8.GetBytes(
+        options.InboundPeers.Single(peer => peer.ServerId == "beta")
+            .SigningKeys.Single(key => key.KeyId == "beta-to-alpha-v1").Key);
     var authenticator = new FederationInternalAuthenticator(
         Options.Create(options),
+        environment,
+        TimeProvider.System);
+    var signedContext = SignedInboundContext(
+        options,
+        "beta",
+        "beta-to-alpha-v1",
+        inboundSecret,
+        "identity-v1",
+        inboundBody);
+    Assert(authenticator.Authenticate(
+            signedContext.Request,
+            inboundBody,
+            out var authenticatedPeer) &&
+           authenticatedPeer?.CallerServerId == "beta" &&
+           authenticatedPeer.TargetServerId == "alpha" &&
+           authenticatedPeer.IdentityKeyId == "identity-v1",
+        "A correctly signed peer/caller/target/identity/subject request was rejected.");
+    Assert(!authenticator.Authenticate(
+            signedContext.Request,
+            inboundBody,
+            out _),
+        "A replayed federation nonce was accepted.");
+
+    var wrongSignature = SignedInboundContext(
+        options,
+        "beta",
+        "beta-to-alpha-v1",
+        inboundSecret,
+        "identity-v1",
+        inboundBody);
+    wrongSignature.Request.Headers[FederationProtocol.SignatureHeader] =
+        new string('x', 43);
+    Assert(!authenticator.Authenticate(
+            wrongSignature.Request,
+            inboundBody,
+            out _),
+        "A wrong peer signature authenticated.");
+
+    var tamperedSubject = SignedInboundContext(
+        options,
+        "beta",
+        "beta-to-alpha-v1",
+        inboundSecret,
+        "identity-v1",
+        inboundBody);
+    var tamperedBody = inboundBody.ToArray();
+    tamperedBody[^2] ^= 1;
+    Assert(!authenticator.Authenticate(
+            tamperedSubject.Request,
+            tamperedBody,
+            out _),
+        "A signed request whose subject body was changed authenticated.");
+
+    var wrongTarget = SignedInboundContext(
+        options,
+        "beta",
+        "beta-to-alpha-v1",
+        inboundSecret,
+        "identity-v1",
+        inboundBody,
+        targetServerId: "gamma");
+    Assert(!authenticator.Authenticate(
+            wrongTarget.Request,
+            inboundBody,
+            out _),
+        "A request signed for another target node authenticated.");
+
+    var rotationSecret = Encoding.UTF8.GetBytes(
+        "inbound-beta-rotated-" + new string('r', 48));
+    var rotationOptions = options with
+    {
+        IdentityKeys =
+        [
+            .. options.IdentityKeys,
+            new FederationIdentityKeyOptions
+            {
+                KeyId = "identity-v2",
+                Key = "transport-identity-v2-" + new string('j', 48)
+            }
+        ],
+        InboundPeers = options.InboundPeers.Select(peer =>
+            peer.ServerId == "beta"
+                ? peer with
+                {
+                    SigningKeys =
+                    [
+                        peer.SigningKeys[0] with { Revoked = true },
+                        new FederationPeerSigningKeyOptions
+                        {
+                            KeyId = "beta-to-alpha-v2",
+                            Key = Encoding.UTF8.GetString(rotationSecret)
+                        }
+                    ]
+                }
+                : peer).ToArray()
+    };
+    _ = FederationOptionsValidator.ValidateCore(
+        rotationOptions,
+        root,
+        isDevelopment: true);
+    var rotationAuthenticator = new FederationInternalAuthenticator(
+        Options.Create(rotationOptions),
+        environment,
+        TimeProvider.System);
+    var rotationProtector = new FederationIdentityProtector(
+        Options.Create(rotationOptions),
         environment);
-    var request = new DefaultHttpContext().Request;
-    request.Headers[FederationInternalAuthenticator.NodeKeyHeader] = "wrong-" + new string('x', 40);
-    Assert(!authenticator.Authenticate(request), "Wrong node key authenticated.");
-    request.Headers[FederationInternalAuthenticator.NodeKeyHeader] = options.InboundNodeKey;
-    Assert(authenticator.Authenticate(request), "Correct node key was rejected.");
+    var rotatedBody = JsonSerializer.SerializeToUtf8Bytes(
+        new FederationProfileRequest(
+            FederationOptions.CurrentProtocolVersion,
+            "beta",
+            "alpha",
+            "identity-v2",
+            rotationProtector.Protect(
+                "identity-v2", "beta", "alpha", "steam", UserId(1))),
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    var rotated = SignedInboundContext(
+        rotationOptions,
+        "beta",
+        "beta-to-alpha-v2",
+        rotationSecret,
+        "identity-v2",
+        rotatedBody);
+    Assert(rotationAuthenticator.Authenticate(
+            rotated.Request,
+            rotatedBody,
+            out var rotatedPeer) &&
+           rotatedPeer?.SigningKeyId == "beta-to-alpha-v2" &&
+           rotatedPeer.IdentityKeyId == "identity-v2",
+        "The staged signing/identity key rotation handshake was rejected.");
+    var retiredIdentityOptions = rotationOptions with
+    {
+        IdentityKeys = rotationOptions.IdentityKeys.Select(key =>
+            key.KeyId == "identity-v1"
+                ? key with { Key = string.Empty, KeyFile = string.Empty, Revoked = true }
+                : key).ToArray(),
+        Nodes = rotationOptions.Nodes.Select(node =>
+            node.Local ? node : node with { IdentityKeyId = "identity-v2" }).ToArray()
+    };
+    _ = FederationOptionsValidator.ValidateCore(
+        retiredIdentityOptions,
+        root,
+        isDevelopment: true);
+    var retiredIdentityProtector = new FederationIdentityProtector(
+        Options.Create(retiredIdentityOptions),
+        environment);
+    ExpectFederationFailure(
+        () => retiredIdentityProtector.Protect(
+            "identity-v1", "beta", "alpha", "steam", UserId(1)),
+        "FEDERATION_IDENTITY_KEY_UNAVAILABLE");
+    var revokedOldKey = SignedInboundContext(
+        rotationOptions,
+        "beta",
+        "beta-to-alpha-v1",
+        inboundSecret,
+        "identity-v1",
+        inboundBody);
+    Assert(!rotationAuthenticator.Authenticate(
+            revokedOldKey.Request,
+            inboundBody,
+            out _),
+        "A separately revoked peer signing key remained usable.");
+    var revokedPeerOptions = rotationOptions with
+    {
+        InboundPeers = rotationOptions.InboundPeers.Select(peer =>
+            peer.ServerId == "beta"
+                ? peer with { Revoked = true, SigningKeys = [] }
+                : peer).ToArray()
+    };
+    _ = FederationOptionsValidator.ValidateCore(
+        revokedPeerOptions,
+        root,
+        isDevelopment: true);
+    var revokedPeerAuthenticator = new FederationInternalAuthenticator(
+        Options.Create(revokedPeerOptions),
+        environment,
+        TimeProvider.System);
+    var revokedPeerRequest = SignedInboundContext(
+        revokedPeerOptions,
+        "beta",
+        "beta-to-alpha-v2",
+        rotationSecret,
+        "identity-v2",
+        rotatedBody);
+    Assert(!revokedPeerAuthenticator.Authenticate(
+            revokedPeerRequest.Request,
+            rotatedBody,
+            out _),
+        "A revoked federation peer remained usable.");
 
     var overrideContext = new DefaultHttpContext();
     overrideContext.Request.QueryString = new QueryString("?userId=steam_forged");
@@ -387,6 +631,45 @@ static async Task VerifyTransportGuardsAsync(string root, string matrixPath)
     Assert(!requestGuard.TryAcquire("127.0.0.1", out _, out var retryAfter) &&
            retryAfter > 0,
         "Internal read endpoint rate limit did not fail closed.");
+
+    var safeOptions = CreateAggregateOptions(matrixPath, nodeKey);
+    ExpectOptionsFailure(safeOptions with
+    {
+        InboundPeers = [safeOptions.InboundPeers[0]]
+    }, root, isDevelopment: true);
+    ExpectOptionsFailure(safeOptions with
+    {
+        InboundPeers =
+        [
+            safeOptions.InboundPeers[0],
+            safeOptions.InboundPeers[1] with
+            {
+                SigningKeys =
+                [
+                    safeOptions.InboundPeers[1].SigningKeys[0] with
+                    {
+                        Key = safeOptions.InboundPeers[0].SigningKeys[0].Key
+                    }
+                ]
+            }
+        ]
+    }, root, isDevelopment: true);
+    ExpectOptionsFailure(safeOptions with
+    {
+        Nodes =
+        [
+            safeOptions.Nodes[0],
+            safeOptions.Nodes[1],
+            safeOptions.Nodes[2] with { NodeKey = safeOptions.Nodes[1].NodeKey }
+        ]
+    }, root, isDevelopment: true);
+    ExpectOptionsFailure(safeOptions with
+    {
+        IdentityKeys =
+        [
+            safeOptions.IdentityKeys[0] with { Revoked = true }
+        ]
+    }, root, isDevelopment: true);
 
     ExpectOptionsFailure(CreateAggregateOptions(matrixPath, nodeKey) with
     {
@@ -454,8 +737,13 @@ static async Task VerifyTransportGuardsAsync(string root, string matrixPath)
                    requestMessage.RequestUri.AbsolutePath == "/api/v1/internal/federation/profile",
                 "Transport accepted a request-controlled destination.");
             Assert(requestMessage.Headers.GetValues(
-                    FederationInternalAuthenticator.NodeKeyHeader).Single() == nodeKey,
-                "Transport omitted or altered the node key.");
+                    FederationProtocol.CallerHeader).Single() == "alpha" &&
+                   requestMessage.Headers.GetValues(
+                    FederationProtocol.TargetHeader).Single() == "beta" &&
+                   requestMessage.Headers.GetValues(
+                    FederationProtocol.SigningKeyIdHeader).Single() == "alpha-to-beta-v1" &&
+                   requestMessage.Headers.Contains(FederationProtocol.SignatureHeader),
+                "Transport omitted or altered the peer-scoped request signature headers.");
             await Task.Delay(20, cancellationToken);
             return JsonResponse(profile);
         }
@@ -466,7 +754,10 @@ static async Task VerifyTransportGuardsAsync(string root, string matrixPath)
     });
     var client = CreateNodeClient(options, environment, concurrencyHandler);
     await Task.WhenAll(Enumerable.Range(0, 20).Select(_ =>
-        client.GetProfileAsync(options.Nodes[1], token, CancellationToken.None)));
+        client.GetProfileAsync(
+            options.Nodes[1],
+            ProfileRequest(options, options.Nodes[1], token),
+            CancellationToken.None)));
     Assert(peak <= options.MaximumConcurrentRequests,
         "Federation outbound concurrency exceeded its configured bound.");
 }
@@ -477,8 +768,41 @@ static FederationOptions CreateAggregateOptions(string matrixPath, string nodeKe
     LocalServerId = "alpha",
     MatrixPath = matrixPath,
     AllowExperimentalInDevelopment = true,
-    IdentityHmacKey = "identity-config-" + new string('i', 48),
-    InboundNodeKey = "inbound-config-" + new string('a', 48),
+    IdentityKeys =
+    [
+        new FederationIdentityKeyOptions
+        {
+            KeyId = "identity-v1",
+            Key = "identity-config-" + new string('i', 48)
+        }
+    ],
+    InboundPeers =
+    [
+        new FederationInboundPeerOptions
+        {
+            ServerId = "beta",
+            SigningKeys =
+            [
+                new FederationPeerSigningKeyOptions
+                {
+                    KeyId = "beta-to-alpha-v1",
+                    Key = "inbound-beta-" + new string('a', 48)
+                }
+            ]
+        },
+        new FederationInboundPeerOptions
+        {
+            ServerId = "gamma",
+            SigningKeys =
+            [
+                new FederationPeerSigningKeyOptions
+                {
+                    KeyId = "gamma-to-alpha-v1",
+                    Key = "inbound-gamma-" + new string('g', 48)
+                }
+            ]
+        }
+    ],
     RequestTimeoutMilliseconds = 500,
     MaximumResponseBytes = 32 * 1024,
     MaximumRequestBodyBytes = 2 * 1024,
@@ -502,6 +826,8 @@ static FederationOptions CreateAggregateOptions(string matrixPath, string nodeKe
             BaseUri = "http://127.0.0.1:6202/",
             PortalUrl = "http://127.0.0.1:7202/player/",
             ExpectedCombinationId = "pal-1.0.0.100427-native-dev36",
+            SigningKeyId = "alpha-to-beta-v1",
+            IdentityKeyId = "identity-v1",
             NodeKey = nodeKey
         },
         new FederationNodeOptions
@@ -511,10 +837,66 @@ static FederationOptions CreateAggregateOptions(string matrixPath, string nodeKe
             BaseUri = "http://127.0.0.1:6203/",
             PortalUrl = "http://127.0.0.1:7203/player/",
             ExpectedCombinationId = "pal-1.0.0.100427-native-dev36",
-            NodeKey = nodeKey
+            SigningKeyId = "alpha-to-gamma-v1",
+            IdentityKeyId = "identity-v1",
+            NodeKey = "gamma-" + nodeKey
         }
     ]
 };
+
+static FederationProfileRequest ProfileRequest(
+    FederationOptions options,
+    FederationNodeOptions node,
+    string subjectToken) => new(
+        FederationOptions.CurrentProtocolVersion,
+        options.LocalServerId,
+        node.ServerId,
+        node.IdentityKeyId,
+        subjectToken);
+
+static DefaultHttpContext SignedInboundContext(
+    FederationOptions options,
+    string callerServerId,
+    string signingKeyId,
+    byte[] signingSecret,
+    string identityKeyId,
+    byte[] body,
+    string? nonce = null,
+    string? targetServerId = null)
+{
+    var context = new DefaultHttpContext();
+    context.Request.Method = HttpMethods.Post;
+    context.Request.Path = "/api/v1/internal/federation/profile";
+    var target = targetServerId ?? options.LocalServerId;
+    var combination = options.Nodes.Single(node => node.Local).ExpectedCombinationId;
+    var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var requestNonce = nonce ?? FederationProtocol.NewNonce();
+    var contentHash = FederationProtocol.ContentSha256(body);
+    var signature = FederationProtocol.Sign(
+        signingSecret,
+        context.Request.Method,
+        context.Request.Path.Value!,
+        callerServerId,
+        target,
+        signingKeyId,
+        identityKeyId,
+        combination,
+        timestamp,
+        requestNonce,
+        contentHash);
+    context.Request.Headers[FederationProtocol.ProtocolHeader] =
+        FederationOptions.CurrentProtocolVersion.ToString();
+    context.Request.Headers[FederationProtocol.CallerHeader] = callerServerId;
+    context.Request.Headers[FederationProtocol.TargetHeader] = target;
+    context.Request.Headers[FederationProtocol.SigningKeyIdHeader] = signingKeyId;
+    context.Request.Headers[FederationProtocol.IdentityKeyIdHeader] = identityKeyId;
+    context.Request.Headers[FederationProtocol.ExpectedCombinationHeader] = combination;
+    context.Request.Headers[FederationProtocol.TimestampHeader] = timestamp.ToString();
+    context.Request.Headers[FederationProtocol.NonceHeader] = requestNonce;
+    context.Request.Headers[FederationProtocol.ContentSha256Header] = contentHash;
+    context.Request.Headers[FederationProtocol.SignatureHeader] = signature;
+    return context;
+}
 
 static FederationOptions CreateLocalOptions(
     string serverId,
@@ -525,8 +907,14 @@ static FederationOptions CreateLocalOptions(
     LocalServerId = serverId,
     MatrixPath = matrixPath,
     AllowExperimentalInDevelopment = true,
-    IdentityHmacKey = "identity-config-" + new string('i', 48),
-    InboundNodeKey = nodeKey,
+    IdentityKeys =
+    [
+        new FederationIdentityKeyOptions
+        {
+            KeyId = "identity-v1",
+            Key = "identity-config-" + new string('i', 48)
+        }
+    ],
     Nodes =
     [
         new FederationNodeOptions
@@ -543,15 +931,21 @@ static FederationOptions CreateLocalOptions(
 
 static FederationIdentityProtector CreateProtector(byte[] key)
 {
-    var root = Path.GetTempPath();
     var options = new FederationOptions
     {
         Enabled = true,
-        IdentityHmacKey = Encoding.UTF8.GetString(key)
+        IdentityKeys =
+        [
+            new FederationIdentityKeyOptions
+            {
+                KeyId = "identity-v1",
+                Key = Encoding.UTF8.GetString(key)
+            }
+        ]
     };
     return new FederationIdentityProtector(
         Options.Create(options),
-        new TestEnvironment(root));
+        new TestEnvironment(Path.GetTempPath()));
 }
 
 static FederationLocalProfileService CreateLocalProfile(
@@ -587,7 +981,8 @@ static FederationNodeClient CreateNodeClient(
             Timeout = Timeout.InfiniteTimeSpan
         }),
         Options.Create(options),
-        environment);
+        environment,
+        TimeProvider.System);
 
 static async Task ExpectTransportFailureAsync(
     FederationOptions options,
@@ -600,7 +995,9 @@ static async Task ExpectTransportFailureAsync(
     try
     {
         _ = await client.GetProfileAsync(
-            options.Nodes[1], token, CancellationToken.None);
+            options.Nodes[1],
+            ProfileRequest(options, options.Nodes[1], token),
+            CancellationToken.None);
         throw new InvalidOperationException($"Expected transport failure {code}.");
     }
     catch (FederationException exception)
@@ -704,6 +1101,22 @@ static void ExpectFederationFailure(Action action, string expectedCode)
     }
 }
 
+static async Task ExpectFederationFailureAsync(
+    Func<Task> action,
+    string expectedCode)
+{
+    try
+    {
+        await action();
+        throw new InvalidOperationException($"Expected federation failure {expectedCode}.");
+    }
+    catch (FederationException exception)
+    {
+        Assert(exception.Code == expectedCode,
+            $"Expected federation error {expectedCode}, received {exception.Code}.");
+    }
+}
+
 static void ExpectOptionsFailure(
     FederationOptions options,
     string contentRoot,
@@ -776,7 +1189,7 @@ sealed class InProcessFederationTransport(
 
     public async Task<FederationLocalProfile> GetProfileAsync(
         FederationNodeOptions node,
-        string subjectToken,
+        FederationProfileRequest request,
         CancellationToken cancellationToken)
     {
         if (_failures.TryGetValue(node.ServerId, out var failure))
@@ -787,7 +1200,8 @@ sealed class InProcessFederationTransport(
                 StatusCodes.Status503ServiceUnavailable);
         }
         var profile = await profiles[node.ServerId].GetAsync(
-            subjectToken,
+            request,
+            request.CallerServerId,
             cancellationToken);
         if (_nullCompatibilities.ContainsKey(node.ServerId))
         {

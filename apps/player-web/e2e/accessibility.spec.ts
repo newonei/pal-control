@@ -358,7 +358,7 @@ test("read-only federation panel isolates node failures and never forwards ident
   expect(new URL((await switchLink.getAttribute("href"))!).search).toBe("");
 
   const markup = await panel.evaluate(element => element.outerHTML);
-  expect(markup).not.toMatch(/subjectToken|nodeKey|accountId|playerUid|steamId|userId|fed1_/i);
+  expect(markup).not.toMatch(/subjectToken|signingKey|identityKey|signature|accountId|playerUid|steamId|userId|fed2_/i);
   await expectNoSeriousAxeViolations(page, "federation server registry");
   await panel.screenshot({ path: testInfo.outputPath("server-federation.png") });
 });

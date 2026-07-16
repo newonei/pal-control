@@ -99,7 +99,9 @@ test("federation read is session-derived, bodyless and uses the fixed self endpo
     for (const forbidden of [
       "X-Account-Id",
       "X-Federation-Subject",
-      "X-Pal-Control-Node-Key",
+      "X-Pal-Control-Caller",
+      "X-Pal-Control-Signature",
+      "X-Pal-Control-Identity-Key-Id",
       "X-Player-UserId",
       "X-Steam-Id"
     ]) {
@@ -140,7 +142,7 @@ test("server switching returns only the exact allowlisted portal URL", () => {
   assert.equal(federationPortalHref(remote), remote.portalUrl);
   assert.equal(federationPortalHref({
     ...remote,
-    portalUrl: "https://delta.example.test/player/?subject=fed1_secret"
+    portalUrl: "https://delta.example.test/player/?subject=fed2_secret"
   }), null);
   assert.equal(federationPortalHref({
     ...remote,

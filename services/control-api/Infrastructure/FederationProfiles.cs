@@ -1,12 +1,18 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using PalControl.ControlApi.Extraction;
 
 namespace PalControl.ControlApi.Infrastructure;
 
-public sealed record FederationProfileRequest(string SubjectToken);
+public sealed record FederationProfileRequest(
+    int ProtocolVersion,
+    string CallerServerId,
+    string TargetServerId,
+    string IdentityKeyId,
+    string SubjectToken);
 
 public sealed record FederationSeasonProfile(
     string Code,
@@ -77,41 +83,70 @@ public sealed record FederationNodeHealth(
 
 public sealed partial class FederationIdentityProtector
 {
-    private const string Prefix = "fed1_";
-    private readonly byte[] _key;
+    private const string Prefix = "fed2_";
+    private readonly Dictionary<string, byte[]> _keys;
 
     public FederationIdentityProtector(
         IOptions<FederationOptions> options,
         IHostEnvironment environment)
     {
         var value = options.Value;
-        _key = value.Enabled
-            ? FederationSecretResolver.ResolveRequired(
-                value.IdentityHmacKey,
-                value.IdentityHmacKeyFile,
-                environment.ContentRootPath,
-                "Federation identity HMAC key")
-            : RandomNumberGenerator.GetBytes(32);
+        _keys = value.Enabled
+            ? value.IdentityKeys
+                .Where(key => !key.Revoked)
+                .ToDictionary(
+                    key => key.KeyId,
+                    key => FederationSecretResolver.ResolveRequired(
+                        key.Key,
+                        key.KeyFile,
+                        environment.ContentRootPath,
+                        $"Federation identity key '{key.KeyId}'"),
+                    StringComparer.Ordinal)
+            : new Dictionary<string, byte[]>(StringComparer.Ordinal)
+            {
+                ["disabled-key"] = RandomNumberGenerator.GetBytes(32)
+            };
     }
 
-    internal FederationIdentityProtector(byte[] key)
+    internal FederationIdentityProtector(
+        string keyId,
+        byte[] key)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyId);
         ArgumentNullException.ThrowIfNull(key);
-        if (key.Length < 32)
+        if (!FederationOptionsValidator.IsSafeKeyId(keyId) || key.Length < 32)
         {
-            throw new ArgumentException("Federation identity key is too short.", nameof(key));
+            throw new ArgumentException("Federation identity key id or value is invalid.", nameof(key));
         }
-        _key = key.ToArray();
+        _keys = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            [keyId] = key.ToArray()
+        };
     }
 
-    public string Protect(string identityProvider, string externalUserId)
+    public string Protect(
+        string identityKeyId,
+        string callerServerId,
+        string targetServerId,
+        string identityProvider,
+        string externalUserId)
     {
+        if (!_keys.TryGetValue(identityKeyId, out var key))
+        {
+            throw new FederationException(
+                "FEDERATION_IDENTITY_KEY_UNAVAILABLE",
+                "The requested federation identity key is unavailable or revoked.",
+                StatusCodes.Status503ServiceUnavailable);
+        }
+        var caller = NormalizeServerId(callerServerId, "caller server");
+        var target = NormalizeServerId(targetServerId, "target server");
         var provider = NormalizeIdentityPart(identityProvider, 32, "identity provider")
             .ToLowerInvariant();
         var subject = NormalizeIdentityPart(externalUserId, 160, "external user id")
             .ToLowerInvariant();
-        var input = Encoding.UTF8.GetBytes($"{provider}\n{subject}");
-        var digest = HMACSHA256.HashData(_key, input);
+        var input = Encoding.UTF8.GetBytes(
+            $"pal-control-federation-subject-v2\n{identityKeyId}\n{caller}\n{target}\n{provider}\n{subject}");
+        var digest = HMACSHA256.HashData(key, input);
         return Prefix + Convert.ToBase64String(digest)
             .TrimEnd('=')
             .Replace('+', '-')
@@ -146,7 +181,20 @@ public sealed partial class FederationIdentityProtector
         return normalized;
     }
 
-    [GeneratedRegex("^fed1_[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant)]
+    private static string NormalizeServerId(string value, string description)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        var normalized = value.Trim().ToLowerInvariant();
+        if (normalized.Length > 32 ||
+            !normalized.All(character =>
+                char.IsAsciiLetterOrDigit(character) || character == '-'))
+        {
+            throw new ArgumentException($"Federation {description} is invalid.");
+        }
+        return normalized;
+    }
+
+    [GeneratedRegex("^fed2_[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant)]
     private static partial Regex SubjectTokenPattern();
 }
 
@@ -193,7 +241,8 @@ public sealed class FederationLocalProfileService
     }
 
     public async Task<FederationLocalProfile> GetAsync(
-        string subjectToken,
+        FederationProfileRequest request,
+        string authenticatedCallerServerId,
         CancellationToken cancellationToken)
     {
         if (!_options.Enabled)
@@ -203,25 +252,35 @@ public sealed class FederationLocalProfileService
                 "Federation is disabled on this node.",
                 StatusCodes.Status404NotFound);
         }
-        if (!_identity.IsValidToken(subjectToken))
+        if (request.ProtocolVersion != FederationOptions.CurrentProtocolVersion ||
+            !string.Equals(
+                request.CallerServerId,
+                authenticatedCallerServerId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                request.TargetServerId,
+                _options.LocalServerId,
+                StringComparison.Ordinal) ||
+            !FederationOptionsValidator.IsSafeKeyId(request.IdentityKeyId) ||
+            !_identity.IsValidToken(request.SubjectToken))
         {
             throw new FederationException(
-                "FEDERATION_SUBJECT_INVALID",
-                "Federation subject token is invalid.",
+                "FEDERATION_REQUEST_BINDING_INVALID",
+                "Federation caller, target, identity key, or subject binding is invalid.",
                 StatusCodes.Status400BadRequest);
         }
 
-        var localNode = _options.Nodes.Single(node => node.Local);
-        var combination = _matrix.RequireCombination(localNode.ExpectedCombinationId);
-        var compatibility = ProjectCompatibility(_matrix, combination);
         var accounts = await _commerce.ListAccountsAsync(cancellationToken);
         ExtractionAccount? matched = null;
         foreach (var account in accounts)
         {
             var candidate = _identity.Protect(
+                request.IdentityKeyId,
+                request.CallerServerId,
+                request.TargetServerId,
                 account.IdentityProvider,
                 account.ExternalUserId);
-            if (_identity.FixedTimeTokenEquals(subjectToken, candidate))
+            if (_identity.FixedTimeTokenEquals(request.SubjectToken, candidate))
             {
                 if (matched is not null)
                 {
@@ -233,6 +292,36 @@ public sealed class FederationLocalProfileService
                 matched = account;
             }
         }
+
+        return await ProjectAsync(matched, cancellationToken);
+    }
+
+    public async Task<FederationLocalProfile> GetLocalAsync(
+        string identityProvider,
+        string externalUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.Enabled)
+        {
+            throw new FederationException(
+                "FEDERATION_DISABLED",
+                "Federation is disabled on this node.",
+                StatusCodes.Status404NotFound);
+        }
+        var matched = await _commerce.FindPlayerAsync(
+            identityProvider,
+            externalUserId,
+            cancellationToken);
+        return await ProjectAsync(matched, cancellationToken);
+    }
+
+    private async Task<FederationLocalProfile> ProjectAsync(
+        ExtractionAccount? matched,
+        CancellationToken cancellationToken)
+    {
+        var localNode = _options.Nodes.Single(node => node.Local);
+        var combination = _matrix.RequireCombination(localNode.ExpectedCombinationId);
+        var compatibility = ProjectCompatibility(_matrix, combination);
 
         var season = await _commerce.GetActiveSeasonAsync(
             _options.LocalServerId,
@@ -340,45 +429,285 @@ public sealed class FederationException : Exception
     public int StatusCode { get; }
 }
 
-public sealed class FederationInternalAuthenticator
+public sealed record FederationAuthenticatedPeer(
+    string CallerServerId,
+    string TargetServerId,
+    string SigningKeyId,
+    string IdentityKeyId);
+
+public static class FederationProtocol
 {
-    public const string NodeKeyHeader = "X-Pal-Control-Node-Key";
-    private readonly byte[] _expectedKey;
-    private readonly bool _enabled;
+    public const string ProtocolHeader = "X-Pal-Control-Federation-Version";
+    public const string CallerHeader = "X-Pal-Control-Caller";
+    public const string TargetHeader = "X-Pal-Control-Target";
+    public const string SigningKeyIdHeader = "X-Pal-Control-Signing-Key-Id";
+    public const string IdentityKeyIdHeader = "X-Pal-Control-Identity-Key-Id";
+    public const string TimestampHeader = "X-Pal-Control-Timestamp";
+    public const string NonceHeader = "X-Pal-Control-Nonce";
+    public const string ContentSha256Header = "X-Pal-Control-Content-SHA256";
+    public const string SignatureHeader = "X-Pal-Control-Signature";
+    public const string ExpectedCombinationHeader =
+        "X-Pal-Control-Expected-Combination";
+    public const string NoIdentityKey = "-";
 
-    public FederationInternalAuthenticator(
-        IOptions<FederationOptions> options,
-        IHostEnvironment environment)
+    public static string ContentSha256(ReadOnlySpan<byte> content) =>
+        Convert.ToHexStringLower(SHA256.HashData(content));
+
+    public static string Sign(
+        ReadOnlySpan<byte> key,
+        string method,
+        string path,
+        string callerServerId,
+        string targetServerId,
+        string signingKeyId,
+        string identityKeyId,
+        string expectedCombinationId,
+        long timestamp,
+        string nonce,
+        string contentSha256)
     {
-        var value = options.Value;
-        _enabled = value.Enabled;
-        _expectedKey = value.Enabled
-            ? FederationSecretResolver.ResolveRequired(
-                value.InboundNodeKey,
-                value.InboundNodeKeyFile,
-                environment.ContentRootPath,
-                "Federation inbound node key")
-            : RandomNumberGenerator.GetBytes(32);
+        var canonical = string.Join('\n',
+            "pal-control-federation-request-v2",
+            method.ToUpperInvariant(),
+            path,
+            callerServerId,
+            targetServerId,
+            signingKeyId,
+            identityKeyId,
+            expectedCombinationId,
+            timestamp.ToString(CultureInfo.InvariantCulture),
+            nonce,
+            contentSha256);
+        return Base64Url(HMACSHA256.HashData(
+            key,
+            Encoding.UTF8.GetBytes(canonical)));
     }
 
-    internal FederationInternalAuthenticator(byte[] expectedKey, bool enabled = true)
-    {
-        _expectedKey = expectedKey.ToArray();
-        _enabled = enabled;
-    }
+    public static string NewNonce() => Base64Url(RandomNumberGenerator.GetBytes(16));
 
-    public bool Authenticate(HttpRequest request)
+    public static bool FixedTimeSignatureEquals(string supplied, string expected)
     {
-        if (!_enabled ||
-            !request.Headers.TryGetValue(NodeKeyHeader, out var values) ||
-            values.Count != 1 || values[0] is not { Length: >= 32 and <= 512 } supplied ||
-            supplied.Any(char.IsControl))
+        if (!IsSignature(supplied) || !IsSignature(expected))
         {
             return false;
         }
-        var actual = Encoding.UTF8.GetBytes(supplied);
-        return FederationSecretResolver.FixedTimeEquals(actual, _expectedKey);
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(supplied),
+            Encoding.ASCII.GetBytes(expected));
     }
+
+    public static bool IsNonce(string? value) =>
+        value is not null && value.Length == 22 &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
+
+    public static bool IsContentSha256(string? value) =>
+        value is not null && value.Length == 64 &&
+        value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsSignature(string? value) =>
+        value is not null && value.Length == 43 &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
+
+    private static string Base64Url(ReadOnlySpan<byte> value) =>
+        Convert.ToBase64String(value)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+}
+
+public sealed class FederationInternalAuthenticator
+{
+    private const int MaximumRememberedNonces = 100_000;
+    private readonly bool _enabled;
+    private readonly string _localServerId;
+    private readonly string _expectedCombinationId;
+    private readonly int _maximumClockSkewSeconds;
+    private readonly TimeProvider _timeProvider;
+    private readonly Dictionary<string, InboundPeer> _peers;
+    private readonly HashSet<string> _identityKeyIds;
+    private readonly object _nonceSync = new();
+    private readonly Dictionary<string, DateTimeOffset> _seenNonces = new(StringComparer.Ordinal);
+
+    public FederationInternalAuthenticator(
+        IOptions<FederationOptions> options,
+        IHostEnvironment environment,
+        TimeProvider timeProvider)
+        : this(options.Value, environment.ContentRootPath, timeProvider)
+    {
+    }
+
+    internal FederationInternalAuthenticator(
+        FederationOptions options,
+        string contentRootPath,
+        TimeProvider? timeProvider = null)
+    {
+        _enabled = options.Enabled;
+        _localServerId = options.LocalServerId;
+        _maximumClockSkewSeconds = options.MaximumClockSkewSeconds;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _expectedCombinationId = options.Enabled
+            ? options.Nodes.Single(node => node.Local).ExpectedCombinationId
+            : string.Empty;
+        _identityKeyIds = options.IdentityKeys
+            .Where(key => !key.Revoked)
+            .Select(key => key.KeyId)
+            .ToHashSet(StringComparer.Ordinal);
+        _peers = options.Enabled
+            ? options.InboundPeers.ToDictionary(
+                peer => peer.ServerId,
+                peer => new InboundPeer(
+                    peer.Revoked,
+                    peer.SigningKeys
+                        .Where(key => !peer.Revoked && !key.Revoked)
+                        .ToDictionary(
+                        key => key.KeyId,
+                        key => new InboundSigningKey(
+                            FederationSecretResolver.ResolveRequired(
+                                key.Key,
+                                key.KeyFile,
+                                contentRootPath,
+                                $"Federation inbound peer '{peer.ServerId}' signing key '{key.KeyId}'")),
+                        StringComparer.Ordinal)),
+                StringComparer.Ordinal)
+            : new Dictionary<string, InboundPeer>(StringComparer.Ordinal);
+    }
+
+    public bool Authenticate(
+        HttpRequest request,
+        ReadOnlySpan<byte> body,
+        out FederationAuthenticatedPeer? authenticatedPeer)
+    {
+        authenticatedPeer = null;
+        if (!_enabled || request.QueryString.HasValue ||
+            !TrySingleHeader(request, FederationProtocol.ProtocolHeader, out var protocol) ||
+            protocol != FederationOptions.CurrentProtocolVersion.ToString(CultureInfo.InvariantCulture) ||
+            !TrySingleHeader(request, FederationProtocol.CallerHeader, out var caller) ||
+            !TrySingleHeader(request, FederationProtocol.TargetHeader, out var target) ||
+            !TrySingleHeader(request, FederationProtocol.SigningKeyIdHeader, out var signingKeyId) ||
+            !TrySingleHeader(request, FederationProtocol.IdentityKeyIdHeader, out var identityKeyId) ||
+            !TrySingleHeader(request, FederationProtocol.ExpectedCombinationHeader, out var expectedCombination) ||
+            !TrySingleHeader(request, FederationProtocol.TimestampHeader, out var timestampText) ||
+            !TrySingleHeader(request, FederationProtocol.NonceHeader, out var nonce) ||
+            !TrySingleHeader(request, FederationProtocol.ContentSha256Header, out var suppliedContentHash) ||
+            !TrySingleHeader(request, FederationProtocol.SignatureHeader, out var suppliedSignature) ||
+            !string.Equals(target, _localServerId, StringComparison.Ordinal) ||
+            !string.Equals(expectedCombination, _expectedCombinationId, StringComparison.Ordinal) ||
+            !FederationOptionsValidator.IsSafeKeyId(signingKeyId) ||
+            !long.TryParse(timestampText, NumberStyles.None, CultureInfo.InvariantCulture, out var timestamp) ||
+            !FederationProtocol.IsNonce(nonce) ||
+            !FederationProtocol.IsContentSha256(suppliedContentHash) ||
+            !_peers.TryGetValue(caller, out var peer) || peer.Revoked ||
+            !peer.SigningKeys.TryGetValue(signingKeyId, out var signingKey))
+        {
+            return false;
+        }
+
+        var profileRequest = string.Equals(
+            request.Path.Value,
+            "/api/v1/internal/federation/profile",
+            StringComparison.Ordinal);
+        var healthRequest = string.Equals(
+            request.Path.Value,
+            "/api/v1/internal/federation/health",
+            StringComparison.Ordinal);
+        if (!profileRequest && !healthRequest ||
+            profileRequest && !_identityKeyIds.Contains(identityKeyId) ||
+            healthRequest && !string.Equals(identityKeyId, FederationProtocol.NoIdentityKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        DateTimeOffset issuedAt;
+        try
+        {
+            issuedAt = DateTimeOffset.FromUnixTimeSeconds(timestamp);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+        if (Math.Abs((now - issuedAt).TotalSeconds) > _maximumClockSkewSeconds)
+        {
+            return false;
+        }
+
+        var actualContentHash = FederationProtocol.ContentSha256(body);
+        if (!FederationSecretResolver.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(actualContentHash),
+                Encoding.ASCII.GetBytes(suppliedContentHash)))
+        {
+            return false;
+        }
+        var expectedSignature = FederationProtocol.Sign(
+            signingKey.Secret,
+            request.Method,
+            request.Path.Value!,
+            caller,
+            target,
+            signingKeyId,
+            identityKeyId,
+            expectedCombination,
+            timestamp,
+            nonce,
+            suppliedContentHash);
+        if (!FederationProtocol.FixedTimeSignatureEquals(
+                suppliedSignature,
+                expectedSignature))
+        {
+            return false;
+        }
+
+        var replayKey = $"{caller}\n{signingKeyId}\n{nonce}";
+        lock (_nonceSync)
+        {
+            var oldestAllowed = now.AddSeconds(-_maximumClockSkewSeconds);
+            if (_seenNonces.Count >= MaximumRememberedNonces)
+            {
+                foreach (var expired in _seenNonces
+                             .Where(pair => pair.Value < oldestAllowed)
+                             .Select(pair => pair.Key)
+                             .ToArray())
+                {
+                    _seenNonces.Remove(expired);
+                }
+            }
+            if (_seenNonces.Count >= MaximumRememberedNonces ||
+                !_seenNonces.TryAdd(replayKey, now))
+            {
+                return false;
+            }
+        }
+
+        authenticatedPeer = new FederationAuthenticatedPeer(
+            caller,
+            target,
+            signingKeyId,
+            identityKeyId);
+        return true;
+    }
+
+    private static bool TrySingleHeader(
+        HttpRequest request,
+        string name,
+        out string value)
+    {
+        value = string.Empty;
+        if (!request.Headers.TryGetValue(name, out var values) ||
+            values.Count != 1 || values[0] is not { Length: > 0 and <= 256 } candidate ||
+            candidate.Any(char.IsControl))
+        {
+            return false;
+        }
+        value = candidate;
+        return true;
+    }
+
+    private sealed record InboundPeer(
+        bool Revoked,
+        IReadOnlyDictionary<string, InboundSigningKey> SigningKeys);
+
+    private sealed record InboundSigningKey(byte[] Secret);
 }
 
 public sealed class FederationInternalRequestGuard

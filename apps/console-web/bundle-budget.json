@@ -1,0 +1,22 @@
+{
+  "requiredDynamicEntries": [
+    "src/features/announcements/AnnouncementBoard.tsx",
+    "src/features/configuration/ServerConfigurationPanel.tsx",
+    "src/features/content/ContentManagement.tsx",
+    "src/features/economy-analytics/EconomyAnalyticsDashboard.tsx",
+    "src/features/economy-operations/EconomyOperationsWorkbench.tsx",
+    "src/features/extraction/ExtractionCenter.tsx",
+    "src/features/map/LivePlayerMap.tsx",
+    "src/features/paldefender/PalDefenderDirectory.tsx",
+    "src/features/paldefender/PalDefenderOperations.tsx",
+    "src/features/paldefender/PalDefenderSystemPanel.tsx",
+    "src/features/players/PlayerCenter.tsx",
+    "src/features/saves/SaveManagement.tsx"
+  ],
+  "initialJavaScriptKiB": 250,
+  "maxAsyncJavaScriptKiB": 80,
+  "totalJavaScriptKiB": 600,
+  "initialCssKiB": 170,
+  "maxAsyncCssKiB": 20,
+  "totalCssKiB": 220
+}

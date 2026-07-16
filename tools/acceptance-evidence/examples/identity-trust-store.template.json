@@ -1,0 +1,31 @@
+{
+  "$schema": "https://github.com/newonei/pal-control/schemas/acceptance-identity-trust-store/v1",
+  "schemaVersion": "1.0.0",
+  "storeId": "replace-trust-store-id",
+  "keys": [
+    {
+      "keyId": "replace-executor-key",
+      "algorithm": "ecdsa-p256-sha256-p1363",
+      "publicKeySpkiBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "revoked": false,
+      "subject": {
+        "subjectId": "subj:hmac-sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "identityProvider": "replace-identity-provider",
+        "role": "replace-executor-role",
+        "implementationContributor": true
+      }
+    },
+    {
+      "keyId": "replace-reviewer-key",
+      "algorithm": "ecdsa-p256-sha256-p1363",
+      "publicKeySpkiBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "revoked": false,
+      "subject": {
+        "subjectId": "subj:hmac-sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "identityProvider": "replace-identity-provider",
+        "role": "reviewer",
+        "implementationContributor": false
+      }
+    }
+  ]
+}

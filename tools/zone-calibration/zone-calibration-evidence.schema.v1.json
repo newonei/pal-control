@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.pal-control.dev/zone-calibration-evidence.schema.v1.json",
+  "title": "Pal Control live exchange-zone calibration evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "x-pal-control-schema-version": "1.0.0",
+  "x-pal-control-review-binding": "full-artifact-records-and-signed-envelope-sha256",
+  "x-pal-control-final-snapshot-revalidation": true,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "schemaSha256",
+    "evidenceMode",
+    "calibrationId",
+    "expiresAt",
+    "server",
+    "content",
+    "zone",
+    "sampling",
+    "participants",
+    "centerMeasurement",
+    "boundaryPairs",
+    "routeChecks",
+    "accessibilityCheck",
+    "riskCheck",
+    "review",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://schemas.pal-control.dev/zone-calibration-evidence.schema.v1.json"
+    },
+    "schemaVersion": { "const": "1.0.0" },
+    "schemaSha256": { "$ref": "#/$defs/sha256" },
+    "evidenceMode": { "const": "live" },
+    "calibrationId": { "$ref": "#/$defs/identifier" },
+    "expiresAt": { "$ref": "#/$defs/utcTimestamp" },
+    "server": { "$ref": "#/$defs/serverBinding" },
+    "content": { "$ref": "#/$defs/contentBinding" },
+    "zone": { "$ref": "#/$defs/zoneAuthority" },
+    "sampling": { "$ref": "#/$defs/samplingWindow" },
+    "participants": { "$ref": "#/$defs/participantPair" },
+    "centerMeasurement": { "$ref": "#/$defs/positionMeasurement" },
+    "boundaryPairs": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 36,
+      "items": { "$ref": "#/$defs/boundaryPair" }
+    },
+    "routeChecks": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/routeCheck" }
+    },
+    "accessibilityCheck": { "$ref": "#/$defs/accessibilityCheck" },
+    "riskCheck": { "$ref": "#/$defs/riskCheck" },
+    "review": { "$ref": "#/$defs/review" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 31,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{2,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "rawContentHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "coordinate": {
+      "type": "number",
+      "minimum": -10000000,
+      "maximum": 10000000
+    },
+    "mapPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "$ref": "#/$defs/coordinate" },
+        "y": { "$ref": "#/$defs/coordinate" }
+      }
+    },
+    "serverBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serverId", "gameBuild", "steamBuild", "artifactId"],
+      "properties": {
+        "serverId": { "$ref": "#/$defs/identifier" },
+        "gameBuild": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+:-]{1,127}$"
+        },
+        "steamBuild": {
+          "type": "string",
+          "pattern": "^[0-9]{6,18}$"
+        },
+        "artifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "contentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["versionId", "versionNumber", "contentHash", "artifactId"],
+      "properties": {
+        "versionId": { "type": "string", "format": "uuid" },
+        "versionNumber": { "type": "integer", "minimum": 1 },
+        "contentHash": { "$ref": "#/$defs/rawContentHash" },
+        "artifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "zoneAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zoneId",
+        "authority",
+        "center",
+        "radius",
+        "centerTolerance",
+        "insideSafetyMargin",
+        "outsideSafetyMargin"
+      ],
+      "properties": {
+        "zoneId": { "$ref": "#/$defs/identifier" },
+        "authority": { "const": "published-content-version" },
+        "center": { "$ref": "#/$defs/mapPoint" },
+        "radius": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10000
+        },
+        "centerTolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "insideSafetyMargin": { "type": "number", "exclusiveMinimum": 0 },
+        "outsideSafetyMargin": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "samplingWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt", "coordinateSource"],
+      "properties": {
+        "startedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "endedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "coordinateSource": { "const": "palworld-authoritative-live-position" }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectId", "pseudonymDomain", "identityProvider", "role"],
+      "properties": {
+        "subjectId": {
+          "type": "string",
+          "pattern": "^subj:hmac-sha256:[a-f0-9]{64}$"
+        },
+        "pseudonymDomain": {
+          "type": "string",
+          "pattern": "^zone-calibration:[a-z0-9][a-z0-9.-]{2,127}$"
+        },
+        "identityProvider": { "$ref": "#/$defs/identifier" },
+        "role": { "enum": ["executor", "reviewer"] }
+      }
+    },
+    "participantPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executor", "reviewer"],
+      "properties": {
+        "executor": { "$ref": "#/$defs/subject" },
+        "reviewer": { "$ref": "#/$defs/subject" }
+      }
+    },
+    "positionMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capturedAt", "x", "y", "artifactId"],
+      "properties": {
+        "capturedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "x": { "$ref": "#/$defs/coordinate" },
+        "y": { "$ref": "#/$defs/coordinate" },
+        "artifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "boundaryPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directionDegrees", "inside", "outside"],
+      "properties": {
+        "directionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 360
+        },
+        "inside": { "$ref": "#/$defs/positionMeasurement" },
+        "outside": { "$ref": "#/$defs/positionMeasurement" }
+      }
+    },
+    "routeCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "routeId",
+        "kind",
+        "startedAt",
+        "endedAt",
+        "reachable",
+        "uninterrupted",
+        "artifactId",
+        "insideQuote",
+        "outsideQuote"
+      ],
+      "properties": {
+        "routeId": { "$ref": "#/$defs/identifier" },
+        "kind": { "enum": ["ingress", "egress"] },
+        "startedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "endedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "reachable": { "const": true },
+        "uninterrupted": { "const": true },
+        "artifactId": { "$ref": "#/$defs/identifier" },
+        "insideQuote": { "$ref": "#/$defs/quoteAttempt" },
+        "outsideQuote": { "$ref": "#/$defs/quoteAttempt" }
+      }
+    },
+    "quoteAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestArtifactId", "responseArtifactId"],
+      "properties": {
+        "requestArtifactId": { "$ref": "#/$defs/identifier" },
+        "responseArtifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "accessibilityCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkedAt",
+        "accessible",
+        "obstructionFree",
+        "returnPathConfirmed",
+        "artifactId"
+      ],
+      "properties": {
+        "checkedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "accessible": { "const": true },
+        "obstructionFree": { "const": true },
+        "returnPathConfirmed": { "const": true },
+        "artifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "riskCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkedAt",
+        "riskLevel",
+        "disposition",
+        "terrainHazardChecked",
+        "hostileExposureChecked",
+        "respawnRouteAvailable",
+        "artifactId"
+      ],
+      "properties": {
+        "checkedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "riskLevel": { "enum": ["low", "medium", "high"] },
+        "disposition": { "enum": ["approved", "acceptable"] },
+        "terrainHazardChecked": { "const": true },
+        "hostileExposureChecked": { "const": true },
+        "respawnRouteAvailable": { "const": true },
+        "artifactId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewedAt",
+        "result",
+        "reviewerKeyId",
+        "evidencePayloadSha256",
+        "artifactManifestSha256",
+        "signatureAlgorithm",
+        "signatureBase64"
+      ],
+      "properties": {
+        "reviewedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "result": { "const": "pass" },
+        "reviewerKeyId": { "$ref": "#/$defs/identifier" },
+        "evidencePayloadSha256": { "$ref": "#/$defs/sha256" },
+        "artifactManifestSha256": { "$ref": "#/$defs/sha256" },
+        "signatureAlgorithm": { "const": "ecdsa-p256-sha256" },
+        "signatureBase64": { "type": "string", "minLength": 84, "maxLength": 88 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "path",
+        "mediaType",
+        "producer",
+        "captureMode",
+        "capturedAt",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "role": {
+          "enum": [
+            "server-build-binding",
+            "content-zone-binding",
+            "position-capture",
+            "route-capture",
+            "quote-request-capture",
+            "quote-response-capture",
+            "accessibility-capture",
+            "risk-capture"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!.*:)(?!.*(?:^|/)(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|/|$))(?!.*[. ](?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "mediaType": { "const": "application/json" },
+        "producer": { "$ref": "#/$defs/identifier" },
+        "captureMode": { "const": "live" },
+        "capturedAt": { "$ref": "#/$defs/utcTimestamp" },
+        "sizeBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

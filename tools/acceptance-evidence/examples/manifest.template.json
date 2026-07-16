@@ -1,0 +1,172 @@
+{
+  "$schema": "https://github.com/newonei/pal-control/schemas/acceptance-evidence/v1",
+  "schemaVersion": "1.0.0",
+  "schemaSha256": "sha256:52c8034bc807e39c9cbf52420e71a62f50269d393e56c4ee0fdaeb8202bfa1e5",
+  "manifestId": "ae-template-p0-07-real-admin-rbac",
+  "gateId": "p0-07-real-admin-rbac",
+  "gateCatalogVersion": "1.0.0",
+  "gateCatalogSha256": "sha256:34fee0a70c9bb28ca11c37afc44abe3c219b7790694f289a820b9ad23205894c",
+  "evidenceMode": "template",
+  "environment": {
+    "environmentId": "replace-production-environment",
+    "kind": "production",
+    "isSynthetic": true,
+    "dataClassification": "redacted",
+    "serverIdentityHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "worldIdentityHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "versionCombination": {
+    "combinationId": "combo-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "palworldVersion": "v1.0.1.100619",
+    "steamBuild": "24181105",
+    "ue4ssVersion": "replace-with-observed-ue4ss-version",
+    "nativeBridgeVersion": "replace-with-observed-native-version",
+    "nativeCapability": "experimental",
+    "palDefenderVersion": "replace-with-observed-paldefender-version",
+    "caddyVersion": "replace-with-observed-caddy-version",
+    "controlApiCommit": "0000000000000000000000000000000000000000",
+    "deploymentPackageSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "configurationSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "runbook": {
+    "id": "replace-runbook-id",
+    "version": "replace-with-runbook-version",
+    "commit": "0000000000000000000000000000000000000000"
+  },
+  "execution": {
+    "executor": {
+      "subjectId": "subj:hmac-sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "identityProvider": "replace-identity-provider",
+      "role": "security-operator",
+      "implementationContributor": true
+    },
+    "startedAt": "1970-01-01T00:00:00+00:00",
+    "endedAt": "1970-01-01T00:00:01+00:00"
+  },
+  "participants": [
+    {
+      "subjectId": "subj:hmac-sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "identityProvider": "replace-identity-provider",
+      "role": "administrator",
+      "implementationContributor": false
+    },
+    {
+      "subjectId": "subj:hmac-sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "identityProvider": "replace-identity-provider",
+      "role": "administrator",
+      "implementationContributor": false
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "rbac-session-trace",
+      "path": "evidence/replace-rbac-session-trace.json",
+      "role": "rbac-session-trace",
+      "mediaType": "application/json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 0,
+      "capturedAt": "1970-01-01T00:00:01+00:00",
+      "captureMode": "template",
+      "producer": "replace-with-observed-producer"
+    },
+    {
+      "id": "mfa-revocation-trace",
+      "path": "evidence/replace-mfa-revocation-trace.json",
+      "role": "mfa-revocation-trace",
+      "mediaType": "application/json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 0,
+      "capturedAt": "1970-01-01T00:00:01+00:00",
+      "captureMode": "template",
+      "producer": "replace-with-observed-producer"
+    },
+    {
+      "id": "admin-audit-export",
+      "path": "evidence/replace-admin-audit-export.ndjson",
+      "role": "admin-audit-export",
+      "mediaType": "application/x-ndjson",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 0,
+      "capturedAt": "1970-01-01T00:00:01+00:00",
+      "captureMode": "template",
+      "producer": "replace-with-observed-producer"
+    },
+    {
+      "id": "sensitive-scan-report",
+      "path": "evidence/replace-sensitive-scan-report.json",
+      "role": "sensitive-scan-report",
+      "mediaType": "application/json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 0,
+      "capturedAt": "1970-01-01T00:00:03+00:00",
+      "captureMode": "template",
+      "producer": "replace-with-scanner-and-version"
+    },
+    {
+      "id": "review-record",
+      "path": "evidence/replace-review-record.json",
+      "role": "review-record",
+      "mediaType": "application/json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 0,
+      "capturedAt": "1970-01-01T00:00:04+00:00",
+      "captureMode": "template",
+      "producer": "replace-with-review-system-and-version"
+    }
+  ],
+  "checks": [
+    { "id": "anonymous-and-player-cookie-denied", "result": "pending", "artifactIds": ["rbac-session-trace"], "summary": "Replace with the observed result and exact evidence references." },
+    { "id": "low-privilege-access-denied", "result": "pending", "artifactIds": ["rbac-session-trace"], "summary": "Replace with the observed result and exact evidence references." },
+    { "id": "two-admin-subjects-isolated", "result": "pending", "artifactIds": ["rbac-session-trace"], "summary": "Replace with the observed result and exact evidence references." },
+    { "id": "revocation-effective", "result": "pending", "artifactIds": ["mfa-revocation-trace"], "summary": "Replace with the observed result and exact evidence references." },
+    { "id": "mfa-enforced", "result": "pending", "artifactIds": ["mfa-revocation-trace"], "summary": "Replace with the observed result and exact evidence references." },
+    { "id": "actor-attribution-not-client-forgeable", "result": "pending", "artifactIds": ["admin-audit-export"], "summary": "Replace with the observed result and exact evidence references." }
+  ],
+  "metrics": [
+    { "id": "admin-subject-count", "value": 2, "unit": "count", "artifactIds": ["admin-audit-export"] }
+  ],
+  "sensitiveDataScan": {
+    "scanner": "replace-with-scanner-name",
+    "scannerVersion": "replace-with-scanner-version",
+    "command": "Replace with the exact one-line scanner command.",
+    "scope": "evidence-artifacts",
+    "startedAt": "1970-01-01T00:00:02+00:00",
+    "endedAt": "1970-01-01T00:00:03+00:00",
+    "result": "pending",
+    "findingCount": -1,
+    "reportArtifactId": "sensitive-scan-report",
+    "scannedArtifactIds": ["rbac-session-trace", "mfa-revocation-trace", "admin-audit-export"]
+  },
+  "review": {
+    "reviewer": {
+      "subjectId": "subj:hmac-sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "identityProvider": "replace-identity-provider",
+      "role": "reviewer",
+      "implementationContributor": false
+    },
+    "reviewedAt": "1970-01-01T00:00:04+00:00",
+    "decision": "pending",
+    "artifactIds": ["review-record"],
+    "summary": "Replace with the independent review decision and rationale."
+  },
+  "relatedEvidence": [],
+  "conclusion": {
+    "result": "pending",
+    "decidedAt": "1970-01-01T00:00:04+00:00",
+    "summary": "Pending live execution, sensitive-data scan and independent review."
+  },
+  "signatures": {
+    "payloadSchema": "https://github.com/newonei/pal-control/schemas/acceptance-signature-payload/v1",
+    "trustStoreSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "executor": {
+      "keyId": "replace-executor-key",
+      "algorithm": "ecdsa-p256-sha256-p1363",
+      "signatureBase64": "replace-with-executor-p256-signature"
+    },
+    "reviewer": {
+      "keyId": "replace-reviewer-key",
+      "algorithm": "ecdsa-p256-sha256-p1363",
+      "signatureBase64": "replace-with-reviewer-p256-signature"
+    }
+  }
+}

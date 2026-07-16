@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build && node scripts/check-bundle-budget.mjs",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run && node --test scripts/check-bundle-budget.node-test.mjs"
   },
   "dependencies": {
     "react": "19.2.7",

@@ -1,0 +1,821 @@
+{
+  "$schema": "https://github.com/newonei/pal-control/schemas/acceptance-gate-catalog/v1",
+  "catalogVersion": "1.0.0",
+  "manifestSchemaId": "https://github.com/newonei/pal-control/schemas/acceptance-evidence/v1",
+  "manifestSchemaSha256": "sha256:52c8034bc807e39c9cbf52420e71a62f50269d393e56c4ee0fdaeb8202bfa1e5",
+  "gates": [
+    {
+      "id": "p0-02-production-steam-openid",
+      "priority": "P0",
+      "title": "Production HTTPS Steam OpenID and reverse-proxy black-box acceptance",
+      "todoReferences": ["TODO.md:112", "P0-02 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "openid-blackbox-trace", "minimum": 1 },
+        { "role": "caddy-effective-config", "minimum": 1 },
+        { "role": "cookie-security-capture", "minimum": 1 },
+        { "role": "redacted-callback-log", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "realm-return-to-exact",
+        "forwarded-headers-correct",
+        "secure-samesite-cookie",
+        "callback-log-redacted",
+        "state-nonce-replay-rejected",
+        "cross-account-access-rejected",
+        "old-world-session-write-rejected"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-04-current-native-probe",
+      "priority": "P0",
+      "title": "Current Palworld ABI/schema adaptation and read-only Native probe",
+      "todoReferences": ["TODO.md:123", "P0-04 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["controlled-live", "production"],
+      "requiredExecutorRole": "native-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "native-readonly-probe", "minimum": 1 },
+        { "role": "compatibility-matrix", "minimum": 1 },
+        { "role": "loaded-module-inventory", "minimum": 1 },
+        { "role": "legacy-loader-quarantine", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "abi-schema-adapted",
+        "readonly-probe-passed",
+        "three-containers-observed",
+        "version-combination-fixed",
+        "legacy-dev36-loader-not-loaded"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-04-native-persistence",
+      "priority": "P0",
+      "title": "Native consume save-stop-restart-relogin persistence campaign",
+      "todoReferences": ["TODO.md:124", "P0-04 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["controlled-live", "production"],
+      "requiredExecutorRole": "native-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [
+        { "role": "controlled-player", "minimum": 1, "maximum": null, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "inventory-before", "minimum": 1 },
+        { "role": "consume-receipt", "minimum": 1 },
+        { "role": "world-save", "minimum": 1 },
+        { "role": "server-lifecycle", "minimum": 1 },
+        { "role": "inventory-after-relogin", "minimum": 1 },
+        { "role": "scenario-matrix", "minimum": 1 },
+        { "role": "ledger-reconciliation", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "empty-slot-persisted",
+        "partial-stack-persisted",
+        "multi-item-three-container-atomic",
+        "same-key-replay-idempotent",
+        "different-key-concurrency-conserved",
+        "response-loss-not-retried",
+        "disconnect-move-conflict-safe",
+        "save-stop-restart-relogin-persisted",
+        "no-partial-or-duplicate-credit"
+      ],
+      "metricConstraints": [
+        { "id": "scenario-count", "operator": "gte", "value": 100, "unit": "count" },
+        { "id": "partial-consume-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "duplicate-consume-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "unsupported-credit-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-06-paldefender-delivery-campaign",
+      "priority": "P0",
+      "title": "Fixed-version PalDefender structured delivery receipt campaign",
+      "todoReferences": ["TODO.md:169", "P0-06 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["controlled-live", "production"],
+      "requiredExecutorRole": "operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [
+        { "role": "controlled-player", "minimum": 1, "maximum": null, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "delivery-receipt-export", "minimum": 1 },
+        { "role": "fault-boundary-matrix", "minimum": 1 },
+        { "role": "delivery-duplicate-analysis", "minimum": 1 },
+        { "role": "ledger-reconciliation", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "natural-inventory-change-attribution-safe",
+        "normal-path-conserved",
+        "explicit-failure-conserved",
+        "partial-path-reconciled",
+        "response-loss-conserved",
+        "timeout-path-conserved",
+        "process-restart-conserved",
+        "every-fault-boundary-repeated"
+      ],
+      "metricConstraints": [
+        { "id": "total-delivery-count", "operator": "gte", "value": 200, "unit": "count" },
+        { "id": "timeout-run-count", "operator": "gte", "value": 20, "unit": "count" },
+        { "id": "partial-run-count", "operator": "gte", "value": 20, "unit": "count" },
+        { "id": "process-restart-run-count", "operator": "gte", "value": 20, "unit": "count" },
+        { "id": "minimum-runs-per-fault-boundary", "operator": "gte", "value": 20, "unit": "count" },
+        { "id": "duplicate-delivery-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "balance-discrepancy-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "unsupported-refund-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-07-real-admin-rbac",
+      "priority": "P0",
+      "title": "Two-subject production administrator RBAC, revocation, MFA and audit drill",
+      "todoReferences": ["TODO.md:184", "P0-07 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "security-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [
+        { "role": "administrator", "minimum": 2, "maximum": null, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "rbac-session-trace", "minimum": 1 },
+        { "role": "mfa-revocation-trace", "minimum": 1 },
+        { "role": "admin-audit-export", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "anonymous-and-player-cookie-denied",
+        "low-privilege-access-denied",
+        "two-admin-subjects-isolated",
+        "revocation-effective",
+        "mfa-enforced",
+        "actor-attribution-not-client-forgeable"
+      ],
+      "metricConstraints": [
+        { "id": "admin-subject-count", "operator": "gte", "value": 2, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-09-independent-real-restores",
+      "priority": "P0",
+      "title": "Independent real world and economy backup restore exercises",
+      "todoReferences": ["TODO.md:221", "P0-09 acceptance criteria 1-3"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "duty-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "world-restore-report", "minimum": 1 },
+        { "role": "economy-restore-report", "minimum": 1 },
+        { "role": "rpo-rto-report", "minimum": 1 },
+        { "role": "post-backup-transaction-reconciliation", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "world-restored-independently",
+        "economy-restored-independently",
+        "staging-hashes-verified",
+        "world-ledger-pending-state-reviewed",
+        "post-backup-transactions-enumerated",
+        "economy-remained-closed-after-restore"
+      ],
+      "metricConstraints": [
+        { "id": "world-restore-count", "operator": "gte", "value": 1, "unit": "count" },
+        { "id": "economy-restore-count", "operator": "gte", "value": 1, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-09-n-minus-one-migration-recovery",
+      "priority": "P0",
+      "title": "Released N-1 package migration failure, cold rollback and production switch drill",
+      "todoReferences": ["TODO.md:222", "P0-09 acceptance criteria 3"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "deployment-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "n-minus-one-package-manifest", "minimum": 1 },
+        { "role": "migration-failure-log", "minimum": 1 },
+        { "role": "cold-snapshot-rollback-report", "minimum": 1 },
+        { "role": "staging-review", "minimum": 1 },
+        { "role": "production-switch-report", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "released-n-minus-one-package-used",
+        "migration-failure-intentionally-observed",
+        "no-partial-migration-write",
+        "cold-snapshot-rollback-verified",
+        "staging-human-review-complete",
+        "production-directory-switch-complete"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-10-three-live-rollovers",
+      "priority": "P0",
+      "title": "Three consecutive live full weekly world rollover exercises",
+      "todoReferences": ["TODO.md:241", "P0-10 acceptance criteria 1-2"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "season-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "rollover-evidence-envelope", "minimum": 3 },
+        { "role": "backup-verification", "minimum": 3 },
+        { "role": "world-season-transition", "minimum": 3 },
+        { "role": "phase-fault-recovery", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "old-world-backed-up-and-verified",
+        "new-world-created",
+        "new-season-created",
+        "gate-reopened-only-after-probe",
+        "phase-fault-recovery-safe",
+        "old-world-not-deleted",
+        "expiry-and-reward-not-duplicated"
+      ],
+      "metricConstraints": [
+        { "id": "completed-rollover-count", "operator": "gte", "value": 3, "unit": "count" },
+        { "id": "unexpected-world-deletion-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "duplicate-expiry-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "duplicate-reward-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-10-post-transaction-rollback-refusal",
+      "priority": "P0",
+      "title": "Post-transaction old-world automatic rollback refusal and duty response",
+      "todoReferences": ["TODO.md:242", "P0-10 acceptance criterion 3"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "duty-operator",
+      "requireExecutorNotImplementationContributor": true,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "new-season-transaction", "minimum": 1 },
+        { "role": "rollback-refusal-trace", "minimum": 1 },
+        { "role": "duty-operator-runbook-record", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "new-season-transaction-committed",
+        "automatic-old-world-rollback-rejected",
+        "independent-duty-response-completed",
+        "no-economy-side-effect-duplicated"
+      ],
+      "metricConstraints": [
+        { "id": "new-season-transaction-count", "operator": "gte", "value": 1, "unit": "count" },
+        { "id": "automatic-old-world-rollback-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-11-seven-day-player-trial",
+      "priority": "P0",
+      "title": "Five-to-ten-player uninterrupted seven-day fixed-version live trial",
+      "todoReferences": ["TODO.md:266", "P0-11 release acceptance 1"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "trial-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 604800,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [
+        { "role": "player", "minimum": 5, "maximum": 10, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "anonymized-operations-log", "minimum": 1 },
+        { "role": "player-cohort-register", "minimum": 1 },
+        { "role": "trial-rollover-report", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "fixed-version-maintained",
+        "five-to-ten-real-players-participated",
+        "full-seven-days-completed",
+        "real-rollover-not-skipped",
+        "operations-record-anonymized"
+      ],
+      "metricConstraints": [
+        { "id": "completed-rollover-count", "operator": "gte", "value": 1, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-11-seven-day-economic-invariants",
+      "priority": "P0",
+      "title": "Seven-day balance, delivery, credit, consume and uncertain reconciliation",
+      "todoReferences": ["TODO.md:267", "P0-11 release acceptance 2"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "economy-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 604800,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "seven-day-ledger-reconciliation", "minimum": 1 },
+        { "role": "delivery-duplicate-analysis", "minimum": 1 },
+        { "role": "settlement-integrity-analysis", "minimum": 1 },
+        { "role": "uncertain-disposition-register", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "all-balances-explained",
+        "no-duplicate-delivery",
+        "no-unsupported-credit",
+        "no-partial-consume",
+        "every-uncertain-disposed"
+      ],
+      "metricConstraints": [
+        { "id": "unexplained-balance-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "duplicate-delivery-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "unsupported-credit-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "partial-consume-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "undisposed-uncertain-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-11-independent-reconciliation-restore",
+      "priority": "P0",
+      "title": "Non-implementation duty operator uncertain reconciliation and backup restore drill",
+      "todoReferences": ["TODO.md:268", "P0-11 release acceptance 3"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "duty-operator",
+      "requireExecutorNotImplementationContributor": true,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "order-uncertain-reconciliation", "minimum": 1 },
+        { "role": "settlement-uncertain-reconciliation", "minimum": 1 },
+        { "role": "world-restore-report", "minimum": 1 },
+        { "role": "economy-restore-report", "minimum": 1 },
+        { "role": "duty-operator-runbook-record", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "order-uncertain-reconciled-independently",
+        "settlement-uncertain-reconciled-independently",
+        "world-backup-restored-independently",
+        "economy-backup-restored-independently",
+        "runbook-sufficient-without-implementer"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p0-11-independent-release-review",
+      "priority": "P0",
+      "title": "Independent review of every P0 evidence bundle and release-gate conclusion",
+      "todoReferences": ["TODO.md:269", "P0-11 release acceptance 4"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "release-owner",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "p0-evidence-index", "minimum": 1 },
+        { "role": "version-combination-review", "minimum": 1 },
+        { "role": "redaction-review", "minimum": 1 },
+        { "role": "release-gate-decision", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "all-p0-manifests-bound-and-passing",
+        "version-combination-reviewed",
+        "log-redaction-reviewed",
+        "independent-release-decision-approved"
+      ],
+      "metricConstraints": [
+        { "id": "unresolved-p0-gate-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [
+        "p0-02-production-steam-openid",
+        "p0-04-current-native-probe",
+        "p0-04-native-persistence",
+        "p0-06-paldefender-delivery-campaign",
+        "p0-07-real-admin-rbac",
+        "p0-09-independent-real-restores",
+        "p0-09-n-minus-one-migration-recovery",
+        "p0-10-three-live-rollovers",
+        "p0-10-post-transaction-rollback-refusal",
+        "p0-11-seven-day-player-trial",
+        "p0-11-seven-day-economic-invariants",
+        "p0-11-independent-reconciliation-restore"
+      ],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p1-01-second-live-exchange-zone",
+      "priority": "P1",
+      "title": "Second exchange zone live coordinate, route and boundary acceptance",
+      "todoReferences": ["TODO.md:284", "P1-01 acceptance criteria 2"],
+      "allowedEnvironmentKinds": ["controlled-live", "production"],
+      "requiredExecutorRole": "content-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [
+        { "role": "controlled-player", "minimum": 1, "maximum": null, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "zone-coordinate-capture", "minimum": 1 },
+        { "role": "zone-boundary-trace", "minimum": 1 },
+        { "role": "zone-route-assessment", "minimum": 1 },
+        { "role": "zone-map-capture", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "zone-coordinate-calibrated-live",
+        "inside-boundary-allows-quote",
+        "outside-boundary-rejects-quote",
+        "route-is-reachable-and-safe",
+        "map-and-server-boundary-agree"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p1-03-live-economy-facts",
+      "priority": "P1",
+      "title": "Live recipe, split-merge and player-trade economy fact review",
+      "todoReferences": ["TODO.md:327", "P1-03 acceptance criterion 1"],
+      "allowedEnvironmentKinds": ["controlled-live", "production"],
+      "requiredExecutorRole": "economy-designer",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "live-recipe-capture", "minimum": 1 },
+        { "role": "split-merge-path-capture", "minimum": 1 },
+        { "role": "player-trade-price-observation", "minimum": 1 },
+        { "role": "model-gap-register", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "live-recipes-reviewed",
+        "split-merge-paths-reviewed",
+        "player-trade-prices-reviewed",
+        "unmodelled-conversions-recorded",
+        "arbitrage-disposition-approved"
+      ],
+      "metricConstraints": [
+        { "id": "undisposed-model-gap-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p1-03-two-season-economy-reports",
+      "priority": "P1",
+      "title": "Two consecutive live season inflation, production-sales and anomaly reports",
+      "todoReferences": ["TODO.md:328", "P1-03 acceptance criterion 2"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "economy-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1209600,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "season-economy-report", "minimum": 2 },
+        { "role": "threshold-or-adjustment-review", "minimum": 2 }
+      ],
+      "requiredChecks": [
+        "two-consecutive-seasons-covered",
+        "inflation-reported",
+        "production-and-sales-reported",
+        "popular-products-reported",
+        "anomalous-accounts-anonymized",
+        "threshold-or-approved-adjustment-recorded"
+      ],
+      "metricConstraints": [
+        { "id": "completed-season-report-count", "operator": "gte", "value": 2, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p1-07-postgresql-capacity-migration",
+      "priority": "P1",
+      "title": "Capacity-triggered PostgreSQL migration, reconciliation, outbox and lease acceptance",
+      "todoReferences": ["TODO.md:385", "P1-07 acceptance criterion 2"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "database-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "capacity-trigger-decision", "minimum": 1 },
+        { "role": "postgresql-field-type-map", "minimum": 1 },
+        { "role": "real-database-reconciliation", "minimum": 1 },
+        { "role": "transactional-outbox-proof", "minimum": 1 },
+        { "role": "lease-failover-proof", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "capacity-trigger-confirmed",
+        "target-reader-and-type-map-verified",
+        "per-account-and-table-reconciliation-passed",
+        "transactional-outbox-side-effects-unique",
+        "lease-takeover-conserved"
+      ],
+      "metricConstraints": [
+        { "id": "reconciliation-discrepancy-count", "operator": "eq", "value": 0, "unit": "count" },
+        { "id": "duplicate-side-effect-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": {
+        "requiredArtifactRoles": [
+          { "role": "capacity-slo-decision", "minimum": 1 },
+          { "role": "sqlite-scope-review", "minimum": 1 }
+        ],
+        "requiredChecks": [
+          "capacity-or-availability-target-not-triggered",
+          "single-instance-sqlite-scope-retained"
+        ]
+      }
+    },
+    {
+      "id": "p1-07-fresh-windows-vm-operations",
+      "priority": "P1",
+      "title": "Non-developer fresh Windows VM install, upgrade, rollback and restore exercises",
+      "todoReferences": ["TODO.md:388", "P1-07 acceptance criterion 1"],
+      "allowedEnvironmentKinds": ["fresh-windows-vm"],
+      "requiredExecutorRole": "non-developer-operator",
+      "requireExecutorNotImplementationContributor": true,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": null,
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "fresh-vm-install-trace", "minimum": 2 },
+        { "role": "fresh-vm-upgrade-trace", "minimum": 2 },
+        { "role": "fresh-vm-rollback-trace", "minimum": 2 },
+        { "role": "windows-scm-acl-review", "minimum": 1 },
+        { "role": "real-backup-restore-report", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "fresh-machine-precondition-verified",
+        "two-install-cycles-complete",
+        "two-upgrade-cycles-complete",
+        "two-rollback-cycles-complete",
+        "minimum-privilege-scm-acl-verified",
+        "real-backup-restored-independently",
+        "pending-transactions-preserved"
+      ],
+      "metricConstraints": [
+        { "id": "install-upgrade-rollback-cycle-count", "operator": "gte", "value": 2, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p1-07-24-hour-soak",
+      "priority": "P1",
+      "title": "Twenty-four-hour production-like resource and queue growth soak test",
+      "todoReferences": ["TODO.md:389", "P1-07 acceptance criterion 1"],
+      "allowedEnvironmentKinds": ["production", "controlled-live"],
+      "requiredExecutorRole": "sre-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 86400,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "soak-metric-series", "minimum": 1 },
+        { "role": "soak-report-hash", "minimum": 1 },
+        { "role": "resource-growth-analysis", "minimum": 1 },
+        { "role": "queue-session-growth-analysis", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "memory-no-sustained-growth",
+        "handles-no-sustained-growth",
+        "logs-within-budget",
+        "queues-no-sustained-growth",
+        "sessions-no-sustained-growth"
+      ],
+      "metricConstraints": [
+        { "id": "observation-duration-hours", "operator": "gte", "value": 24, "unit": "hours" },
+        { "id": "metric-sample-count", "operator": "gte", "value": 24, "unit": "count" },
+        { "id": "sustained-growth-finding-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p2-team-economy-live-week",
+      "priority": "P2",
+      "title": "Live multiplayer team economy week, ban, rollover, restore and operator comprehension",
+      "todoReferences": ["TODO.md:404 external acceptance note"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "team-economy-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 604800,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [
+        { "role": "player", "minimum": 2, "maximum": null, "allMustNotBeImplementationContributors": false }
+      ],
+      "requiredArtifactRoles": [
+        { "role": "team-live-week-record", "minimum": 1 },
+        { "role": "team-ban-behavior", "minimum": 1 },
+        { "role": "team-rollover-report", "minimum": 1 },
+        { "role": "team-restore-report", "minimum": 1 },
+        { "role": "operator-comprehension-record", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "multiplayer-team-week-complete",
+        "ban-projection-behavior-correct",
+        "weekly-rollover-correct",
+        "backup-restore-correct",
+        "operator-can-explain-non-reward-goals"
+      ],
+      "metricConstraints": [],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p2-analytics-live-week-sample",
+      "priority": "P2",
+      "title": "Continuous real-week operations analytics and privacy sample acceptance",
+      "todoReferences": ["TODO.md:405 external acceptance note"],
+      "allowedEnvironmentKinds": ["production"],
+      "requiredExecutorRole": "analytics-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 604800,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "live-analytics-export", "minimum": 1 },
+        { "role": "analytics-source-reconciliation", "minimum": 1 },
+        { "role": "analytics-privacy-review", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "continuous-live-week-covered",
+        "source-denominators-reconciled",
+        "failures-not-counted-as-success",
+        "small-cohorts-hidden",
+        "player-identifiers-absent"
+      ],
+      "metricConstraints": [
+        { "id": "privacy-finding-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    },
+    {
+      "id": "p2-three-node-federation",
+      "priority": "P2",
+      "title": "Three-real-node TLS, stable matrix, key rotation, outage recovery and anonymous aggregation",
+      "todoReferences": ["TODO.md:411"],
+      "allowedEnvironmentKinds": ["multi-node-production"],
+      "requiredExecutorRole": "federation-operator",
+      "requireExecutorNotImplementationContributor": false,
+      "requireIndependentReviewer": true,
+      "requireReviewerNotImplementationContributor": true,
+      "minimumDurationSeconds": 1,
+      "requiredPalworldVersion": "v1.0.1.100619",
+      "requiredSteamBuild": "24181105",
+      "requiredNativeCapability": "stable",
+      "participantConstraints": [],
+      "requiredArtifactRoles": [
+        { "role": "node-tls-capture", "minimum": 3 },
+        { "role": "stable-compatibility-matrix", "minimum": 3 },
+        { "role": "node-key-rotation-revocation", "minimum": 1 },
+        { "role": "node-outage-recovery", "minimum": 1 },
+        { "role": "anonymous-account-aggregation", "minimum": 1 }
+      ],
+      "requiredChecks": [
+        "three-real-nodes-online",
+        "tls-verified-on-every-node",
+        "stable-combination-on-every-node",
+        "signing-and-identity-key-rotation-passed",
+        "key-and-peer-revocation-passed",
+        "node-outage-recovered-without-zero-fabrication",
+        "account-aggregation-anonymous"
+      ],
+      "metricConstraints": [
+        { "id": "real-node-count", "operator": "gte", "value": 3, "unit": "count" },
+        { "id": "sensitive-identity-finding-count", "operator": "eq", "value": 0, "unit": "count" }
+      ],
+      "requiredRelatedGates": [],
+      "notApplicablePolicy": null
+    }
+  ]
+}

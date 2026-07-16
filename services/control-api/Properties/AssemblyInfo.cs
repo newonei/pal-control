@@ -8,3 +8,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("PalControl.NativeSettlementHarness")]
 [assembly: InternalsVisibleTo("PalControl.SeasonLeaderboard.Harness")]
 [assembly: InternalsVisibleTo("PalControl.PlayerNotifications.Harness")]
+[assembly: InternalsVisibleTo("PalControl.TeamEconomy.CapacityHarness")]

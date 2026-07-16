@@ -1,5 +1,6 @@
 using System.Net;
-using System.Net.Http.Json;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
@@ -9,7 +10,7 @@ public interface IFederationNodeTransport
 {
     Task<FederationLocalProfile> GetProfileAsync(
         FederationNodeOptions node,
-        string subjectToken,
+        FederationProfileRequest request,
         CancellationToken cancellationToken);
 
     Task<FederationNodeHealth> GetHealthAsync(
@@ -20,7 +21,7 @@ public interface IFederationNodeTransport
 public sealed class FederationNodeClient : IFederationNodeTransport
 {
     public const string ExpectedCombinationHeader =
-        "X-Pal-Control-Expected-Combination";
+        FederationProtocol.ExpectedCombinationHeader;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
@@ -30,24 +31,28 @@ public sealed class FederationNodeClient : IFederationNodeTransport
 
     private readonly HttpClient _httpClient;
     private readonly FederationOptions _options;
-    private readonly Dictionary<string, string> _nodeKeys;
+    private readonly Dictionary<string, OutboundSigningCredential> _nodeKeys;
     private readonly SemaphoreSlim _concurrency;
+    private readonly TimeProvider _timeProvider;
 
     public FederationNodeClient(
         IHttpClientFactory httpClientFactory,
         IOptions<FederationOptions> options,
-        IHostEnvironment environment)
+        IHostEnvironment environment,
+        TimeProvider timeProvider)
         : this(
             httpClientFactory.CreateClient("FederationNodes"),
             options.Value,
-            environment.ContentRootPath)
+            environment.ContentRootPath,
+            timeProvider)
     {
     }
 
     internal FederationNodeClient(
         HttpClient httpClient,
         FederationOptions options,
-        string contentRootPath)
+        string contentRootPath,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _options = options;
@@ -55,7 +60,8 @@ public sealed class FederationNodeClient : IFederationNodeTransport
             .Where(node => !node.Local)
             .ToDictionary(
                 node => node.ServerId,
-                node => System.Text.Encoding.UTF8.GetString(
+                node => new OutboundSigningCredential(
+                    node.SigningKeyId,
                     FederationSecretResolver.ResolveRequired(
                         node.NodeKey,
                         node.NodeKeyFile,
@@ -63,11 +69,12 @@ public sealed class FederationNodeClient : IFederationNodeTransport
                         $"Federation node key for '{node.ServerId}'")),
                 StringComparer.Ordinal);
         _concurrency = new SemaphoreSlim(options.MaximumConcurrentRequests);
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<FederationLocalProfile> GetProfileAsync(
         FederationNodeOptions node,
-        string subjectToken,
+        FederationProfileRequest profileRequest,
         CancellationToken cancellationToken)
     {
         if (node.Local)
@@ -76,22 +83,25 @@ public sealed class FederationNodeClient : IFederationNodeTransport
                 "The remote federation client cannot call the local node.",
                 nameof(node));
         }
-        var request = new HttpRequestMessage(
-            HttpMethod.Post,
-            new Uri(
-                new Uri(node.BaseUri, UriKind.Absolute),
-                "api/v1/internal/federation/profile"));
-        request.Headers.TryAddWithoutValidation(
-            FederationInternalAuthenticator.NodeKeyHeader,
-            RequireNodeKey(node.ServerId));
-        request.Headers.TryAddWithoutValidation(
-            ExpectedCombinationHeader,
-            node.ExpectedCombinationId);
-        request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue
+        if (profileRequest.ProtocolVersion != FederationOptions.CurrentProtocolVersion ||
+            !string.Equals(profileRequest.CallerServerId, _options.LocalServerId, StringComparison.Ordinal) ||
+            !string.Equals(profileRequest.TargetServerId, node.ServerId, StringComparison.Ordinal) ||
+            !string.Equals(profileRequest.IdentityKeyId, node.IdentityKeyId, StringComparison.Ordinal))
         {
-            NoStore = true
-        };
-        request.Content = JsonContent.Create(new FederationProfileRequest(subjectToken));
+            throw new FederationException(
+                "FEDERATION_OUTBOUND_BINDING_INVALID",
+                "The outbound federation profile request is not bound to the configured caller, target, and identity key.",
+                StatusCodes.Status503ServiceUnavailable);
+        }
+        var payload = JsonSerializer.SerializeToUtf8Bytes(profileRequest, JsonOptions);
+        var request = CreateSignedRequest(
+            node,
+            HttpMethod.Post,
+            "api/v1/internal/federation/profile",
+            node.IdentityKeyId,
+            payload);
+        request.Content = new ByteArrayContent(payload);
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         return await SendAsync<FederationLocalProfile>(
             request,
             node.ServerId,
@@ -108,21 +118,12 @@ public sealed class FederationNodeClient : IFederationNodeTransport
                 "The remote federation client cannot call the local node.",
                 nameof(node));
         }
-        var request = new HttpRequestMessage(
+        var request = CreateSignedRequest(
+            node,
             HttpMethod.Get,
-            new Uri(
-                new Uri(node.BaseUri, UriKind.Absolute),
-                "api/v1/internal/federation/health"));
-        request.Headers.TryAddWithoutValidation(
-            FederationInternalAuthenticator.NodeKeyHeader,
-            RequireNodeKey(node.ServerId));
-        request.Headers.TryAddWithoutValidation(
-            ExpectedCombinationHeader,
-            node.ExpectedCombinationId);
-        request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue
-        {
-            NoStore = true
-        };
+            "api/v1/internal/federation/health",
+            FederationProtocol.NoIdentityKey,
+            []);
         return await SendAsync<FederationNodeHealth>(
             request,
             node.ServerId,
@@ -272,12 +273,65 @@ public sealed class FederationNodeClient : IFederationNodeTransport
         }
     }
 
-    private string RequireNodeKey(string serverId) =>
+    private HttpRequestMessage CreateSignedRequest(
+        FederationNodeOptions node,
+        HttpMethod method,
+        string relativePath,
+        string identityKeyId,
+        ReadOnlySpan<byte> body)
+    {
+        var credential = RequireNodeKey(node.ServerId);
+        var request = new HttpRequestMessage(
+            method,
+            new Uri(new Uri(node.BaseUri, UriKind.Absolute), relativePath));
+        var path = "/" + relativePath.TrimStart('/');
+        var timestamp = _timeProvider.GetUtcNow().ToUnixTimeSeconds();
+        var nonce = FederationProtocol.NewNonce();
+        var contentHash = FederationProtocol.ContentSha256(body);
+        var signature = FederationProtocol.Sign(
+            credential.Secret,
+            method.Method,
+            path,
+            _options.LocalServerId,
+            node.ServerId,
+            credential.KeyId,
+            identityKeyId,
+            node.ExpectedCombinationId,
+            timestamp,
+            nonce,
+            contentHash);
+        AddHeader(request, FederationProtocol.ProtocolHeader,
+            FederationOptions.CurrentProtocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AddHeader(request, FederationProtocol.CallerHeader, _options.LocalServerId);
+        AddHeader(request, FederationProtocol.TargetHeader, node.ServerId);
+        AddHeader(request, FederationProtocol.SigningKeyIdHeader, credential.KeyId);
+        AddHeader(request, FederationProtocol.IdentityKeyIdHeader, identityKeyId);
+        AddHeader(request, FederationProtocol.ExpectedCombinationHeader, node.ExpectedCombinationId);
+        AddHeader(request, FederationProtocol.TimestampHeader,
+            timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AddHeader(request, FederationProtocol.NonceHeader, nonce);
+        AddHeader(request, FederationProtocol.ContentSha256Header, contentHash);
+        AddHeader(request, FederationProtocol.SignatureHeader, signature);
+        request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
+        return request;
+    }
+
+    private static void AddHeader(HttpRequestMessage request, string name, string value)
+    {
+        if (!request.Headers.TryAddWithoutValidation(name, value))
+        {
+            throw new InvalidOperationException($"Could not add required federation header '{name}'.");
+        }
+    }
+
+    private OutboundSigningCredential RequireNodeKey(string serverId) =>
         _nodeKeys.GetValueOrDefault(serverId)
         ?? throw new FederationException(
             "FEDERATION_NODE_KEY_MISSING",
             $"Federation node '{serverId}' has no outbound authentication key.",
             StatusCodes.Status503ServiceUnavailable);
+
+    private sealed record OutboundSigningCredential(string KeyId, byte[] Secret);
 
     private static FederationException Unavailable(
         string code,
@@ -342,9 +396,12 @@ public sealed class FederationAggregationService
                 "Federation is disabled.",
                 StatusCodes.Status404NotFound);
         }
-        var token = _identity.Protect(identityProvider, externalUserId);
         var tasks = _options.Nodes.Select(node =>
-            GetNodeSummaryAsync(node, token, cancellationToken));
+            GetNodeSummaryAsync(
+                node,
+                identityProvider,
+                externalUserId,
+                cancellationToken));
         var summaries = await Task.WhenAll(tasks);
         return new FederationAccountOverview(
             _options.LocalServerId,
@@ -368,16 +425,30 @@ public sealed class FederationAggregationService
 
     private async Task<FederationNodeSummary> GetNodeSummaryAsync(
         FederationNodeOptions node,
-        string subjectToken,
+        string identityProvider,
+        string externalUserId,
         CancellationToken cancellationToken)
     {
         try
         {
             var profile = node.Local
-                ? await _localProfiles.GetAsync(subjectToken, cancellationToken)
+                ? await _localProfiles.GetLocalAsync(
+                    identityProvider,
+                    externalUserId,
+                    cancellationToken)
                 : await _transport.GetProfileAsync(
                     node,
-                    subjectToken,
+                    new FederationProfileRequest(
+                        FederationOptions.CurrentProtocolVersion,
+                        _options.LocalServerId,
+                        node.ServerId,
+                        node.IdentityKeyId,
+                        _identity.Protect(
+                            node.IdentityKeyId,
+                            _options.LocalServerId,
+                            node.ServerId,
+                            identityProvider,
+                            externalUserId)),
                     cancellationToken);
             var validationError = ValidateRemoteProfile(node, profile);
             if (validationError is not null)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Options;
@@ -40,7 +41,11 @@ public static class EconomyOperationsEndpoints
         WeeklyRolloverStateStore rolloverStore,
         SaveManagementService saves,
         AdminAuditStore audit,
+        PlayerPortalSessionRegistry playerSessions,
         IOptions<ExtractionModeOptions> options,
+        IOptions<ExtractionPersistenceOptions> persistence,
+        IOptions<StartupSecurityValidationOptions> startupSecurity,
+        IWebHostEnvironment environment,
         CancellationToken cancellationToken)
     {
         var pageSize = Math.Clamp(limit ?? 100, 1, 250);
@@ -94,11 +99,42 @@ public static class EconomyOperationsEndpoints
 
         var gate = operationGate.Current;
         var metrics = await metricsTask;
+        var generatedAt = DateTimeOffset.UtcNow;
+        var gc = GC.GetGCMemoryInfo();
+        using var process = Process.GetCurrentProcess();
+        var dataDirectory = ResolveRuntimePath(
+            persistence.Value.DataDirectory,
+            environment.ContentRootPath);
+        var logDirectory = ResolveRuntimePath(
+            startupSecurity.Value.LogDirectory,
+            environment.ContentRootPath);
         return Results.Ok(new
         {
             schemaVersion = 1,
-            generatedAt = DateTimeOffset.UtcNow,
+            generatedAt,
             gameplayMode = ExtractionModeCoordinator.GameplayMode,
+            runtime = new
+            {
+                instance = new
+                {
+                    processId = Environment.ProcessId,
+                    processStartedAtUtc = process.StartTime.ToUniversalTime(),
+                    dataDirectoryFingerprint = RuntimePathFingerprint(dataDirectory),
+                    logDirectoryFingerprint = RuntimePathFingerprint(logDirectory)
+                },
+                sessions = new
+                {
+                    active = playerSessions.ActiveCount(generatedAt)
+                },
+                gc = new
+                {
+                    heapSizeBytes = gc.HeapSizeBytes,
+                    totalAllocatedBytes = GC.GetTotalAllocatedBytes(precise: false),
+                    gen0Collections = GC.CollectionCount(0),
+                    gen1Collections = GC.CollectionCount(1),
+                    gen2Collections = GC.CollectionCount(2)
+                }
+            },
             world = new
             {
                 serverId,
@@ -169,6 +205,25 @@ public static class EconomyOperationsEndpoints
             rollover = await rolloverTask,
             audit = (await auditTask).Select(AdminAuditDto).ToArray()
         });
+    }
+
+    internal static string ResolveRuntimePath(string configuredPath, string contentRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(configuredPath);
+        return Path.GetFullPath(Path.IsPathRooted(configuredPath)
+            ? configuredPath
+            : Path.Combine(contentRoot, configuredPath));
+    }
+
+    internal static string RuntimePathFingerprint(string path)
+    {
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (OperatingSystem.IsWindows())
+        {
+            normalized = normalized.ToUpperInvariant();
+        }
+        return Convert.ToHexStringLower(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"pal-control-runtime-path-v1\n{normalized}")));
     }
 
     private static async Task<IResult> GetOrderEvidenceAsync(

@@ -272,8 +272,26 @@ try {
         PlayerPortal = [ordered]@{ Enabled = $true }
         Federation = [ordered]@{
             Enabled = $true
-            IdentityHmacKeyFile = $federationIdentityKey
-            InboundNodeKeyFile = $federationInboundKey
+            IdentityKeys = @(
+                [ordered]@{
+                    KeyId = "identity-v1"
+                    KeyFile = $federationIdentityKey
+                    Revoked = $false
+                }
+            )
+            InboundPeers = @(
+                [ordered]@{
+                    ServerId = "production-02"
+                    Revoked = $false
+                    SigningKeys = @(
+                        [ordered]@{
+                            KeyId = "production-02-to-01-v1"
+                            KeyFile = $federationInboundKey
+                            Revoked = $false
+                        }
+                    )
+                }
+            )
             Nodes = @(
                 [ordered]@{
                     Local = $true
@@ -394,13 +412,13 @@ try {
     } -Pattern "service secret escapes its approved root"
 
     $settings.Federation.Nodes[1].NodeKeyFile = $federationRemoteNodeKey
-    $settings.Federation.IdentityHmacKeyFile = Join-Path $secretsRoot "missing-identity.key"
+    $settings.Federation.IdentityKeys[0].KeyFile = Join-Path $secretsRoot "missing-identity.key"
     Write-AtomicUtf8Json -Path $configPath -Value $settings
     Assert-Throws -Action {
         Invoke-TestDeployment -Action Install -Release $v1
     } -Pattern "Configured service secret is missing"
 
-    $settings.Federation.IdentityHmacKeyFile = $federationIdentityKey
+    $settings.Federation.IdentityKeys[0].KeyFile = $federationIdentityKey
     Write-AtomicUtf8Json -Path $configPath -Value $settings
 
     $replay = Invoke-TestDeployment -Action Install -Release $v1

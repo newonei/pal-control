@@ -43,48 +43,67 @@ public static class FederationEndpoints
         {
             return Error("FEDERATION_DISABLED", "Federation is disabled.", 404);
         }
-        if (!authentication.Authenticate(context.Request))
+        try
         {
-            return Error(
-                "FEDERATION_NODE_AUTH_REQUIRED",
-                "Valid node authentication is required.",
-                StatusCodes.Status401Unauthorized);
-        }
-        if (!guard.TryAcquire(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unavailable",
-                out var lease,
-                out var retryAfterSeconds))
-        {
-            context.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
-            return Error(
-                "FEDERATION_NODE_RATE_LIMITED",
-                "Federation node request limit reached.",
-                StatusCodes.Status429TooManyRequests);
-        }
-
-        using (lease)
-        {
-            try
-            {
-                var request = await ReadProfileRequestAsync(
+            var rawBody = await ReadProfileRequestBodyAsync(
+                context.Request,
+                options.Value.MaximumRequestBodyBytes,
+                cancellationToken);
+            if (!authentication.Authenticate(
                     context.Request,
-                    options.Value.MaximumRequestBodyBytes,
-                    cancellationToken);
-                return Results.Ok(await profiles.GetAsync(
-                    request.SubjectToken,
-                    cancellationToken));
-            }
-            catch (FederationException exception)
-            {
-                return Error(exception.Code, exception.Message, exception.StatusCode);
-            }
-            catch (JsonException)
+                    rawBody,
+                    out var authenticatedPeer) ||
+                authenticatedPeer is null)
             {
                 return Error(
-                    "FEDERATION_REQUEST_INVALID",
-                    "Federation profile request JSON is invalid.",
-                    StatusCodes.Status400BadRequest);
+                    "FEDERATION_NODE_AUTH_REQUIRED",
+                    "A valid, peer-scoped federation request signature is required.",
+                    StatusCodes.Status401Unauthorized);
             }
+            if (!guard.TryAcquire(
+                    $"{authenticatedPeer.CallerServerId}|" +
+                    (context.Connection.RemoteIpAddress?.ToString() ?? "unavailable"),
+                    out var lease,
+                    out var retryAfterSeconds))
+            {
+                context.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+                return Error(
+                    "FEDERATION_NODE_RATE_LIMITED",
+                    "Federation node request limit reached.",
+                    StatusCodes.Status429TooManyRequests);
+            }
+            using (lease)
+            {
+                if (context.Request.ContentType is null ||
+                    !context.Request.ContentType.StartsWith(
+                        "application/json",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Error(
+                        "FEDERATION_CONTENT_TYPE_REQUIRED",
+                        "Federation profile requests require application/json.",
+                        StatusCodes.Status415UnsupportedMediaType);
+                }
+                var profileRequest = JsonSerializer.Deserialize<FederationProfileRequest>(
+                    rawBody,
+                    RequestJsonOptions)
+                    ?? throw new JsonException("Federation profile request is empty.");
+                return Results.Ok(await profiles.GetAsync(
+                    profileRequest,
+                    authenticatedPeer.CallerServerId,
+                    cancellationToken));
+            }
+        }
+        catch (FederationException exception)
+        {
+            return Error(exception.Code, exception.Message, exception.StatusCode);
+        }
+        catch (JsonException)
+        {
+            return Error(
+                "FEDERATION_REQUEST_INVALID",
+                "Federation profile request JSON is invalid.",
+                StatusCodes.Status400BadRequest);
         }
     }
 
@@ -100,15 +119,22 @@ public static class FederationEndpoints
         {
             return Error("FEDERATION_DISABLED", "Federation is disabled.", 404);
         }
-        if (!authentication.Authenticate(context.Request))
+        if (context.Request.ContentLength is > 0 ||
+            context.Request.Headers.ContainsKey("Transfer-Encoding") ||
+            !authentication.Authenticate(
+                context.Request,
+                ReadOnlySpan<byte>.Empty,
+                out var authenticatedPeer) ||
+            authenticatedPeer is null)
         {
             return Error(
                 "FEDERATION_NODE_AUTH_REQUIRED",
-                "Valid node authentication is required.",
+                "A valid, peer-scoped federation request signature is required.",
                 StatusCodes.Status401Unauthorized);
         }
         if (!guard.TryAcquire(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unavailable",
+                $"{authenticatedPeer.CallerServerId}|" +
+                (context.Connection.RemoteIpAddress?.ToString() ?? "unavailable"),
                 out var lease,
                 out var retryAfterSeconds))
         {
@@ -228,7 +254,7 @@ public static class FederationEndpoints
         });
     }
 
-    private static async Task<FederationProfileRequest> ReadProfileRequestAsync(
+    private static async Task<byte[]> ReadProfileRequestBodyAsync(
         HttpRequest request,
         int maximumBytes,
         CancellationToken cancellationToken)
@@ -240,15 +266,6 @@ public static class FederationEndpoints
                 "Federation profile request is too large.",
                 StatusCodes.Status413PayloadTooLarge);
         }
-        if (request.ContentType is null ||
-            !request.ContentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new FederationException(
-                "FEDERATION_CONTENT_TYPE_REQUIRED",
-                "Federation profile requests require application/json.",
-                StatusCodes.Status415UnsupportedMediaType);
-        }
-
         using var output = new MemoryStream(Math.Min(maximumBytes, 2 * 1024));
         var buffer = new byte[1_024];
         while (true)
@@ -267,10 +284,7 @@ public static class FederationEndpoints
             }
             output.Write(buffer, 0, read);
         }
-        return JsonSerializer.Deserialize<FederationProfileRequest>(
-            output.ToArray(),
-            RequestJsonOptions)
-            ?? throw new JsonException("Federation profile request is empty.");
+        return output.ToArray();
     }
 
     private static void SetNoStore(HttpContext context)
@@ -282,6 +296,7 @@ public static class FederationEndpoints
 
     private static IResult Error(string code, string message, int statusCode) =>
         Results.Json(new { code, message }, statusCode: statusCode);
+
 }
 
 public static class FederationEndpointSecurity

@@ -266,6 +266,18 @@ closed with a stable code:
 .\tests\integration\economy-analytics-smoke.ps1
 ```
 
+The weekly-economy-report smoke creates two adjacent SQLite seasons and uses
+the production leaderboard freezer before archiving canonical aggregate and
+restricted pseudonymous artifacts. It proves dual-currency/product/resource
+metrics, a common-basket week-over-week inflation comparison, replay-stable
+manifests, two distinct review subjects, privacy, and fail-closed source and
+archive tampering. Synthetic weeks are not evidence for the real two-week
+production acceptance gate:
+
+```powershell
+.\tests\integration\weekly-economy-report-smoke.ps1
+```
+
 The Windows production-deployment smoke validates pinned archive hashes,
 immutable release manifests, isolated service identities, external state,
 Caddy persistent paths, repeated install and static-root drift repair,
@@ -303,4 +315,51 @@ the player response:
 
 ```powershell
 .\tests\integration\player-notifications-smoke.ps1
+```
+
+The soak-runner smoke first drives synthetic stable/leaking time series through
+the production analyzer, then samples a real short-lived .NET child process in
+bounded `--ci-mode`. It verifies process/GC, SQLite DB/WAL/SHM, log, active-
+session and three-queue samples, fixed read-only load, canonical JSON and the
+matching SHA-256 sidecar. API-key, response-body, log-body, URL and local-path
+canaries must all remain absent from the report. This short test validates the
+tool only; it is not evidence that the external 24-hour gate passed:
+
+```powershell
+.\tests\integration\soak-runner-smoke.ps1
+```
+
+The zone-calibration smoke uses a dedicated harness to create ephemeral,
+independent P-256 capture/reviewer keys and 31 signed artifacts. It proves the
+formal CLI, external trust-store SHA pin, controlled expected bindings, coordinate
+route transitions, inside-success/outside-fail-closed quote evidence, independent
+review signature and strict canonical report verification. Thirty-one negative
+mutations cover pin/binding/expiry/radius, campaign subject separation, artifact/
+capture/review signatures, nonce replay, key reuse, route/quote/risk failures,
+unsafe paths, IPv6 leakage, full artifact-metadata review binding, controlled
+evidence/trust/artifact/report/sidecar races and report tampering. The harness deletes its keys and
+coordinates and cannot satisfy P1-01's second-zone live Palworld acceptance:
+
+```powershell
+.\tests\integration\zone-calibration-smoke.ps1
+```
+
+The offline world-restore smoke uses only OS-temporary synthetic save trees and
+renamed short-lived host processes. It proves exact managed-backup validation,
+same-volume cross-process exclusion, all three PalServer executable names,
+P-256 curve-OID and dual-approval gates, schema-v3 external trust-store pin,
+frozen original/candidate inventories, rogue/swapped/legacy trust rejection,
+nested duplicate-property JSON rejection, and canonical evidence. Real child
+processes are force-terminated after each directory-move journal state and after
+result publication. Temporary execute approvals are deleted and their source
+trust is rotated; status takes a shared read-only lease on the existing lock
+without changing its bytes/mtime or any fixture file, refuses a missing lock
+and a concurrent execute, while recover requires two new
+current journal-bound approvals and durable operation snapshots. Wrong/missing
+pin, execute-purpose reuse, same-subject recovery, signed-but-expired recovery
+and forged OriginalInventory all fail without deleting or moving a tree.
+It never discovers or changes a real PalServer installation:
+
+```powershell
+.\tests\integration\world-restore-smoke.ps1
 ```

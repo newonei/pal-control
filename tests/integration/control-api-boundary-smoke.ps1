@@ -255,6 +255,12 @@ try {
         $operations.schemaVersion -ne 1 -or
         $operations.world.serverId -ne "local" -or
         $operations.content.versionId -ne $startupContent.pointer.versionId -or
+        $operations.runtime.sessions.active -ne 0 -or
+        $null -eq $operations.runtime.gc.heapSizeBytes -or
+        $null -eq $operations.runtime.gc.totalAllocatedBytes -or
+        $null -eq $operations.runtime.gc.gen0Collections -or
+        $null -eq $operations.runtime.gc.gen1Collections -or
+        $null -eq $operations.runtime.gc.gen2Collections -or
         $null -eq $operations.gate.circuits -or
         $null -eq $operations.queues.outbox -or
         $null -eq $operations.backups.game -or

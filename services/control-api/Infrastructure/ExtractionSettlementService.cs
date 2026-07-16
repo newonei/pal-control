@@ -841,11 +841,18 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 bool? inside = null;
                 if (playerMapPosition is not null)
                 {
-                    var deltaX = playerMapPosition.X - center.X;
-                    var deltaY = playerMapPosition.Y - center.Y;
-                    distanceToCenter = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
+                    distanceToCenter = ExtractionZoneGeometry.Distance(
+                        playerMapPosition.X,
+                        playerMapPosition.Y,
+                        center.X,
+                        center.Y);
                     distanceToBoundary = Math.Max(0, distanceToCenter.Value - zone.Radius);
-                    inside = distanceToCenter <= zone.Radius;
+                    inside = ExtractionZoneGeometry.IsInside(
+                        playerMapPosition.X,
+                        playerMapPosition.Y,
+                        center.X,
+                        center.Y,
+                        zone.Radius);
                 }
                 return new PlayerExtractionZone(
                     zone.Id,
@@ -1444,9 +1451,12 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         }
         return zones.FirstOrDefault(zone =>
         {
-            var deltaX = x - zone.MapX;
-            var deltaY = y - zone.MapY;
-            return deltaX * deltaX + deltaY * deltaY <= zone.Radius * zone.Radius;
+            return ExtractionZoneGeometry.IsInside(
+                x,
+                y,
+                zone.MapX,
+                zone.MapY,
+                zone.Radius);
         });
     }
 

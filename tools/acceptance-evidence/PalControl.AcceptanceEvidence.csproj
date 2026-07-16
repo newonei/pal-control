@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="acceptance-evidence.schema.v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="identity-trust-store.schema.v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="gate-catalog.schema.v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="gate-catalog.v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="acceptance-evidence.schema.v1.json"
+                      LogicalName="PalControl.AcceptanceEvidence.acceptance-evidence.schema.v1.json" />
+    <EmbeddedResource Include="gate-catalog.v1.json"
+                      LogicalName="PalControl.AcceptanceEvidence.gate-catalog.v1.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\soak\PalControl.Soak.csproj" />
+  </ItemGroup>
+</Project>

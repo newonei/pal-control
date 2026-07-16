@@ -1,18 +1,6 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { AdminAccessGate } from "../features/auth/AdminAccessGate";
-import { AnnouncementBoard } from "../features/announcements/AnnouncementBoard";
-import { ServerConfigurationPanel } from "../features/configuration/ServerConfigurationPanel";
-import { ContentManagement } from "../features/content/ContentManagement";
 import { DashboardOverview } from "../features/dashboard/DashboardOverview";
-import { EconomyAnalyticsDashboard } from "../features/economy-analytics/EconomyAnalyticsDashboard";
-import { EconomyOperationsWorkbench } from "../features/economy-operations/EconomyOperationsWorkbench";
-import { ExtractionCenter } from "../features/extraction";
-import { LivePlayerMap } from "../features/map/LivePlayerMap";
-import { PalDefenderDirectory } from "../features/paldefender/PalDefenderDirectory";
-import { PalDefenderOperations } from "../features/paldefender/PalDefenderOperations";
-import { PalDefenderSystemPanel } from "../features/paldefender/PalDefenderSystemPanel";
-import { PlayerCenter as PlayerCenterView } from "../features/players/PlayerCenter";
-import { SaveManagement } from "../features/saves/SaveManagement";
 import {
   getCapabilities,
   getGameResourceCatalog,
@@ -29,6 +17,34 @@ import {
   type PlayerSummary,
   type ServerCapabilities
 } from "../lib/api/client";
+
+// Keep the first-screen dashboard eager and load every operational workspace only
+// after the operator selects it. The explicit imports also give Vite stable
+// feature boundaries instead of one ever-growing administration bundle.
+const AnnouncementBoard = lazy(() => import("../features/announcements/AnnouncementBoard")
+  .then(({ AnnouncementBoard: component }) => ({ default: component })));
+const ServerConfigurationPanel = lazy(() => import("../features/configuration/ServerConfigurationPanel")
+  .then(({ ServerConfigurationPanel: component }) => ({ default: component })));
+const ContentManagement = lazy(() => import("../features/content/ContentManagement")
+  .then(({ ContentManagement: component }) => ({ default: component })));
+const EconomyAnalyticsDashboard = lazy(() => import("../features/economy-analytics/EconomyAnalyticsDashboard")
+  .then(({ EconomyAnalyticsDashboard: component }) => ({ default: component })));
+const EconomyOperationsWorkbench = lazy(() => import("../features/economy-operations/EconomyOperationsWorkbench")
+  .then(({ EconomyOperationsWorkbench: component }) => ({ default: component })));
+const ExtractionCenter = lazy(() => import("../features/extraction/ExtractionCenter")
+  .then(({ ExtractionCenter: component }) => ({ default: component })));
+const LivePlayerMap = lazy(() => import("../features/map/LivePlayerMap")
+  .then(({ LivePlayerMap: component }) => ({ default: component })));
+const PalDefenderDirectory = lazy(() => import("../features/paldefender/PalDefenderDirectory")
+  .then(({ PalDefenderDirectory: component }) => ({ default: component })));
+const PalDefenderOperations = lazy(() => import("../features/paldefender/PalDefenderOperations")
+  .then(({ PalDefenderOperations: component }) => ({ default: component })));
+const PalDefenderSystemPanel = lazy(() => import("../features/paldefender/PalDefenderSystemPanel")
+  .then(({ PalDefenderSystemPanel: component }) => ({ default: component })));
+const PlayerCenterView = lazy(() => import("../features/players/PlayerCenter")
+  .then(({ PlayerCenter: component }) => ({ default: component })));
+const SaveManagement = lazy(() => import("../features/saves/SaveManagement")
+  .then(({ SaveManagement: component }) => ({ default: component })));
 
 type NavKey =
   | "dashboard"
@@ -256,9 +272,20 @@ function ConsoleApp() {
           <StatusItem label="命令队列" ready={capabilities?.commandQueueReady ?? false} readyText="可用" waitingText="未就绪" />
         </div>
 
-        {renderPage()}
+        <Suspense fallback={<PageLoading />}>
+          {renderPage()}
+        </Suspense>
       </section>
     </main>
+  );
+}
+
+function PageLoading() {
+  return (
+    <section className="dashboard-empty-state" aria-busy="true" aria-live="polite" role="status">
+      <strong>正在加载功能模块</strong>
+      <small>首次进入该页面时下载对应资源，之后会由浏览器缓存。</small>
+    </section>
   );
 }
 

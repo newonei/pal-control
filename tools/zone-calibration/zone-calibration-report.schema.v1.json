@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.pal-control.dev/zone-calibration-report.schema.v1.json",
+  "title": "Pal Control canonical live exchange-zone calibration report",
+  "type": "object",
+  "additionalProperties": false,
+  "x-pal-control-schema-version": "1.0.0",
+  "x-pal-control-source-revalidation": "evidence-trust-artifacts-report-and-sidecar",
+  "required": [
+    "schema", "schemaVersion", "schemaSha256", "canonicalization", "result",
+    "sourceEvidenceSha256", "evidenceSchemaSha256", "trustStoreSha256",
+    "calibrationId", "evidenceExpiresAt", "serverId", "gameBuild", "steamBuild",
+    "contentVersionId", "contentVersionNumber", "contentHash", "zoneId", "zoneAuthority",
+    "distanceFormula", "center", "radius", "centerTolerance", "centerDistance",
+    "insideSafetyMargin", "outsideSafetyMargin", "samplingStartedAt", "samplingEndedAt",
+    "coordinateSource", "executorSubjectId", "reviewerSubjectId", "captureKeyIds",
+    "reviewerKeyId", "reviewEvidencePayloadSha256", "reviewArtifactManifestSha256",
+    "reviewSignatureAlgorithm", "reviewSignatureBase64", "boundaryCalculations",
+    "routeCalculations", "accessibilityVerified", "returnPathConfirmed", "riskLevel",
+    "riskDisposition", "terrainHazardChecked", "hostileExposureChecked",
+    "respawnRouteAvailable", "artifactSetSha256", "artifacts", "reviewedAt"
+  ],
+  "properties": {
+    "schema": { "const": "https://schemas.pal-control.dev/zone-calibration-report.schema.v1.json" },
+    "schemaVersion": { "const": "1.0.0" },
+    "schemaSha256": { "$ref": "#/$defs/sha256" },
+    "canonicalization": { "const": "pal-control-zone-calibration-report-v1" },
+    "result": { "const": "pass" },
+    "sourceEvidenceSha256": { "$ref": "#/$defs/sha256" },
+    "evidenceSchemaSha256": { "$ref": "#/$defs/sha256" },
+    "trustStoreSha256": { "$ref": "#/$defs/sha256" },
+    "calibrationId": { "$ref": "#/$defs/identifier" },
+    "evidenceExpiresAt": { "$ref": "#/$defs/utcTimestamp" },
+    "serverId": { "$ref": "#/$defs/identifier" },
+    "gameBuild": { "type": "string", "minLength": 2, "maxLength": 128 },
+    "steamBuild": { "type": "string", "pattern": "^[0-9]{6,18}$" },
+    "contentVersionId": { "type": "string", "format": "uuid" },
+    "contentVersionNumber": { "type": "integer", "minimum": 1 },
+    "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "zoneId": { "$ref": "#/$defs/identifier" },
+    "zoneAuthority": { "const": "published-content-version" },
+    "distanceFormula": { "const": "pal-control-map-circle-squared-distance-v1" },
+    "center": { "$ref": "#/$defs/mapPoint" },
+    "radius": { "type": "number", "exclusiveMinimum": 0, "maximum": 10000 },
+    "centerTolerance": { "type": "number", "exclusiveMinimum": 0 },
+    "centerDistance": { "type": "number", "minimum": 0 },
+    "insideSafetyMargin": { "type": "number", "exclusiveMinimum": 0 },
+    "outsideSafetyMargin": { "type": "number", "exclusiveMinimum": 0 },
+    "samplingStartedAt": { "$ref": "#/$defs/utcTimestamp" },
+    "samplingEndedAt": { "$ref": "#/$defs/utcTimestamp" },
+    "coordinateSource": { "const": "palworld-authoritative-live-position" },
+    "executorSubjectId": { "$ref": "#/$defs/subject" },
+    "reviewerSubjectId": { "$ref": "#/$defs/subject" },
+    "captureKeyIds": {
+      "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/identifier" }
+    },
+    "reviewerKeyId": { "$ref": "#/$defs/identifier" },
+    "reviewEvidencePayloadSha256": { "$ref": "#/$defs/sha256" },
+    "reviewArtifactManifestSha256": { "$ref": "#/$defs/sha256" },
+    "reviewSignatureAlgorithm": { "const": "ecdsa-p256-sha256" },
+    "reviewSignatureBase64": { "type": "string", "minLength": 84, "maxLength": 88 },
+    "boundaryCalculations": {
+      "type": "array", "minItems": 8, "maxItems": 36,
+      "items": { "$ref": "#/$defs/boundary" }
+    },
+    "routeCalculations": {
+      "type": "array", "minItems": 2, "maxItems": 8,
+      "items": { "$ref": "#/$defs/route" }
+    },
+    "accessibilityVerified": { "const": true },
+    "returnPathConfirmed": { "const": true },
+    "riskLevel": { "enum": ["low", "medium", "high"] },
+    "riskDisposition": { "enum": ["approved", "acceptable"] },
+    "terrainHazardChecked": { "const": true },
+    "hostileExposureChecked": { "const": true },
+    "respawnRouteAvailable": { "const": true },
+    "artifactSetSha256": { "$ref": "#/$defs/sha256" },
+    "artifacts": {
+      "type": "array", "minItems": 31, "maxItems": 128,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "reviewedAt": { "$ref": "#/$defs/utcTimestamp" }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,127}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "subject": { "type": "string", "pattern": "^subj:hmac-sha256:[a-f0-9]{64}$" },
+    "utcTimestamp": { "type": "string", "format": "date-time" },
+    "mapPoint": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number", "minimum": -10000000, "maximum": 10000000 },
+        "y": { "type": "number", "minimum": -10000000, "maximum": 10000000 }
+      }
+    },
+    "boundary": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "directionDegrees", "insideDistance", "insideSafetyObserved", "outsideDistance",
+        "outsideSafetyObserved", "insideArtifactSha256", "outsideArtifactSha256"
+      ],
+      "properties": {
+        "directionDegrees": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
+        "insideDistance": { "type": "number", "minimum": 0 },
+        "insideSafetyObserved": { "type": "number", "minimum": 0 },
+        "outsideDistance": { "type": "number", "minimum": 0 },
+        "outsideSafetyObserved": { "type": "number", "minimum": 0 },
+        "insideArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "outsideArtifactSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "route": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "routeId", "kind", "tracePointCount", "transitionVerified",
+        "insideQuoteSucceeded", "outsideQuoteRejected"
+      ],
+      "properties": {
+        "routeId": { "$ref": "#/$defs/identifier" },
+        "kind": { "enum": ["ingress", "egress"] },
+        "tracePointCount": { "type": "integer", "minimum": 3, "maximum": 512 },
+        "transitionVerified": { "const": true },
+        "insideQuoteSucceeded": { "const": true },
+        "outsideQuoteRejected": { "const": true }
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "role", "sha256", "sizeBytes"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "role": {
+          "enum": [
+            "server-build-binding", "content-zone-binding", "position-capture",
+            "route-capture", "quote-request-capture", "quote-response-capture",
+            "accessibility-capture", "risk-capture"
+          ]
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+      }
+    }
+  }
+}

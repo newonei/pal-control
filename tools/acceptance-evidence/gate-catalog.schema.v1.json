@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/newonei/pal-control/schemas/acceptance-gate-catalog/v1",
+  "x-pal-control-schema-version": "1.0.0",
+  "title": "PalControl external acceptance gate catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "catalogVersion", "manifestSchemaId", "manifestSchemaSha256", "gates"],
+  "properties": {
+    "$schema": { "const": "https://github.com/newonei/pal-control/schemas/acceptance-gate-catalog/v1" },
+    "catalogVersion": { "const": "1.0.0" },
+    "manifestSchemaId": { "const": "https://github.com/newonei/pal-control/schemas/acceptance-evidence/v1" },
+    "manifestSchemaSha256": { "$ref": "#/$defs/sha256" },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/gate" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,127}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "artifactRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "minimum"],
+      "properties": {
+        "role": { "$ref": "#/$defs/id" },
+        "minimum": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "minimum", "maximum", "allMustNotBeImplementationContributors"],
+      "properties": {
+        "role": { "$ref": "#/$defs/id" },
+        "minimum": { "type": "integer", "minimum": 0 },
+        "maximum": { "type": ["integer", "null"], "minimum": 0 },
+        "allMustNotBeImplementationContributors": { "type": "boolean" }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "operator", "value", "unit"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "operator": { "enum": ["eq", "gte", "lte"] },
+        "value": { "type": "number" },
+        "unit": { "$ref": "#/$defs/id" }
+      }
+    },
+    "notApplicablePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredArtifactRoles", "requiredChecks"],
+      "properties": {
+        "requiredArtifactRoles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifactRole" }
+        },
+        "requiredChecks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "priority",
+        "title",
+        "todoReferences",
+        "allowedEnvironmentKinds",
+        "requiredExecutorRole",
+        "requireExecutorNotImplementationContributor",
+        "requireIndependentReviewer",
+        "requireReviewerNotImplementationContributor",
+        "minimumDurationSeconds",
+        "requiredPalworldVersion",
+        "requiredSteamBuild",
+        "requiredNativeCapability",
+        "participantConstraints",
+        "requiredArtifactRoles",
+        "requiredChecks",
+        "metricConstraints",
+        "requiredRelatedGates",
+        "notApplicablePolicy"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "priority": { "enum": ["P0", "P1", "P2"] },
+        "title": { "type": "string", "minLength": 8, "maxLength": 256 },
+        "todoReferences": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+        },
+        "allowedEnvironmentKinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["production", "controlled-live", "fresh-windows-vm", "multi-node-production"]
+          }
+        },
+        "requiredExecutorRole": { "$ref": "#/$defs/id" },
+        "requireExecutorNotImplementationContributor": { "type": "boolean" },
+        "requireIndependentReviewer": { "type": "boolean" },
+        "requireReviewerNotImplementationContributor": { "type": "boolean" },
+        "minimumDurationSeconds": { "type": "integer", "minimum": 0 },
+        "requiredPalworldVersion": { "type": ["string", "null"] },
+        "requiredSteamBuild": { "type": ["string", "null"] },
+        "requiredNativeCapability": {
+          "type": ["string", "null"],
+          "enum": ["unavailable", "experimental", "stable", null]
+        },
+        "participantConstraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/participant" }
+        },
+        "requiredArtifactRoles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactRole" }
+        },
+        "requiredChecks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "metricConstraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "requiredRelatedGates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "notApplicablePolicy": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/notApplicablePolicy" }
+          ]
+        }
+      }
+    }
+  }
+}

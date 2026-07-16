@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>PalControl.ZoneCalibration</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\services\control-api\Infrastructure\ExtractionZoneGeometry.cs"
+             Link="Shared\ExtractionZoneGeometry.cs" />
+    <EmbeddedResource Include="zone-calibration-evidence.schema.v1.json"
+                      LogicalName="PalControl.ZoneCalibration.Schemas.zone-calibration-evidence.schema.v1.json" />
+    <EmbeddedResource Include="zone-calibration-report.schema.v1.json"
+                      LogicalName="PalControl.ZoneCalibration.Schemas.zone-calibration-report.schema.v1.json" />
+  </ItemGroup>
+</Project>

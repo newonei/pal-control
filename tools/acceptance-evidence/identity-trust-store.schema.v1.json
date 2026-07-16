@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/newonei/pal-control/schemas/acceptance-identity-trust-store/v1",
+  "x-pal-control-schema-version": "1.0.0",
+  "title": "PalControl acceptance identity trust store v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "storeId", "keys"],
+  "properties": {
+    "$schema": {
+      "const": "https://github.com/newonei/pal-control/schemas/acceptance-identity-trust-store/v1"
+    },
+    "schemaVersion": { "const": "1.0.0" },
+    "storeId": { "$ref": "#/$defs/id" },
+    "keys": {
+      "type": "array",
+      "minItems": 2,
+      "description": "keyId, subjectId and the imported canonical P-256 public key must each be globally unique; canonical-key uniqueness is enforced by the verifier.",
+      "items": { "$ref": "#/$defs/key" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{2,127}$"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectId", "identityProvider", "role", "implementationContributor"],
+      "properties": {
+        "subjectId": {
+          "type": "string",
+          "pattern": "^subj:hmac-sha256:[a-f0-9]{64}$"
+        },
+        "identityProvider": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/id" },
+        "implementationContributor": { "type": "boolean" }
+      }
+    },
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keyId",
+        "algorithm",
+        "publicKeySpkiBase64",
+        "revoked",
+        "subject"
+      ],
+      "properties": {
+        "keyId": { "$ref": "#/$defs/id" },
+        "algorithm": { "const": "ecdsa-p256-sha256-p1363" },
+        "publicKeySpkiBase64": { "type": "string", "minLength": 80, "maxLength": 256 },
+        "revoked": { "type": "boolean" },
+        "subject": { "$ref": "#/$defs/subject" }
+      }
+    }
+  }
+}
