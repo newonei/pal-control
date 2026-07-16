@@ -29,7 +29,10 @@ public static class EconomyContentProductProjection
                 product.FeaturedRank,
                 product.GlobalStock,
                 version.VersionId,
-                version.ContentHash))
+                version.ContentHash,
+                product.IconKey,
+                product.Rarity,
+                product.Usage))
             .OrderBy(product => product.Sku, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
@@ -52,5 +55,8 @@ public static class EconomyContentProductProjection
         expected.FeaturedRank == actual.FeaturedRank &&
         expected.GlobalStock == actual.GlobalStock &&
         expected.ContentVersionId == actual.ContentVersionId &&
-        string.Equals(expected.ContentHash, actual.ContentHash, StringComparison.Ordinal);
+        string.Equals(expected.ContentHash, actual.ContentHash, StringComparison.Ordinal) &&
+        expected.IconKey == actual.IconKey &&
+        expected.Rarity == actual.Rarity &&
+        expected.Usage == actual.Usage;
 }

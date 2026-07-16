@@ -76,6 +76,10 @@ public sealed class PalworldRestClient
 
     public async Task<PalworldServerInfo?> TryGetInfoAsync(CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalworldRestClient),
+            "official-rest.info");
         try
         {
             using var request = CreateRequest(HttpMethod.Get, "info");
@@ -104,7 +108,7 @@ public sealed class PalworldRestClient
         }
         catch (HttpRequestException exception)
         {
-            _logger.LogWarning(exception, "Palworld REST info is unavailable.");
+            _logger.LogSafeWarning(exception, "Palworld REST info is unavailable.");
             return null;
         }
     }
@@ -125,6 +129,10 @@ public sealed class PalworldRestClient
     public async Task<IReadOnlyList<PalworldPlayerLocation>?> TryGetPlayerLocationsAsync(
         CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalworldRestClient),
+            "official-rest.players");
         try
         {
             using var request = CreateRequest(HttpMethod.Get, "players");
@@ -154,18 +162,22 @@ public sealed class PalworldRestClient
         }
         catch (HttpRequestException exception)
         {
-            _logger.LogWarning(exception, "Palworld REST players is unavailable.");
+            _logger.LogSafeWarning(exception, "Palworld REST players is unavailable.");
             return null;
         }
         catch (JsonException exception)
         {
-            _logger.LogWarning(exception, "Palworld REST players returned invalid JSON.");
+            _logger.LogSafeWarning(exception, "Palworld REST players returned invalid JSON.");
             return null;
         }
     }
 
     public async Task<PalworldMetrics?> TryGetMetricsAsync(CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalworldRestClient),
+            "official-rest.metrics");
         try
         {
             using var request = CreateRequest(HttpMethod.Get, "metrics");
@@ -201,6 +213,10 @@ public sealed class PalworldRestClient
         string message,
         CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalworldRestClient),
+            "official-rest.announce");
         try
         {
             using var request = CreateRequest(HttpMethod.Post, "announce");
@@ -241,7 +257,7 @@ public sealed class PalworldRestClient
         }
         catch (HttpRequestException exception)
         {
-            _logger.LogWarning(exception, "Palworld REST announce connection ended after dispatch.");
+            _logger.LogSafeWarning(exception, "Palworld REST announce connection ended after dispatch.");
             return PalworldCommandResult.OutcomeUncertain(
                 "PALWORLD_ANNOUNCE_OUTCOME_UNCERTAIN",
                 "The official REST connection ended after dispatch; it will not be sent again automatically.");
@@ -251,6 +267,10 @@ public sealed class PalworldRestClient
     public async Task<PalworldCommandResult> SaveWorldAsync(
         CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalworldRestClient),
+            "official-rest.save");
         try
         {
             using var request = CreateRequest(HttpMethod.Post, "save");
@@ -289,7 +309,7 @@ public sealed class PalworldRestClient
         }
         catch (HttpRequestException exception)
         {
-            _logger.LogWarning(exception, "Palworld REST save connection ended after dispatch.");
+            _logger.LogSafeWarning(exception, "Palworld REST save connection ended after dispatch.");
             return PalworldCommandResult.OutcomeUncertain(
                 "PALWORLD_SAVE_OUTCOME_UNCERTAIN",
                 "The official REST connection ended after the save request was dispatched; it will not be sent again automatically.");

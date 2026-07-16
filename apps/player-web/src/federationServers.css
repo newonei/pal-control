@@ -1,0 +1,250 @@
+.federation-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.federation-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1.2rem 1.3rem;
+  border: 1px solid #31535e;
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 100% 0, #29686644, transparent 44%),
+    linear-gradient(145deg, #102733, #091722);
+}
+
+.federation-panel-heading h3 {
+  margin: .25rem 0 .35rem;
+  font-size: 1.3rem;
+}
+
+.federation-panel-heading p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.65;
+}
+
+.federation-panel-heading > button {
+  flex: 0 0 auto;
+}
+
+.federation-state {
+  min-height: 96px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: .35rem;
+  padding: 1.15rem;
+  border: 1px dashed #31505f;
+  border-radius: 10px;
+  color: var(--muted);
+  background: #0b1a25;
+}
+
+.federation-state p {
+  margin: 0;
+  font-size: .76rem;
+}
+
+.federation-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .55rem;
+}
+
+.federation-summary span {
+  padding: .38rem .62rem;
+  border: 1px solid #294754;
+  border-radius: 99px;
+  color: #acc1ca;
+  background: #0e202c;
+  font-size: .68rem;
+}
+
+.federation-server-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .9rem;
+}
+
+.federation-server-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+  border: 1px solid #2e5260;
+  border-radius: 11px;
+  background: linear-gradient(150deg, #102631, #0a1823 66%);
+  box-shadow: 0 16px 38px #0002;
+}
+
+.federation-server-card.incompatible {
+  border-color: #70502d;
+  background: linear-gradient(150deg, #2a2318, #111a22 66%);
+}
+
+.federation-server-card.unavailable {
+  border-color: #4a4f59;
+  background: linear-gradient(150deg, #191f27, #0b151e 66%);
+}
+
+.federation-server-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: .8rem;
+  padding-bottom: .85rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.federation-server-card h4 {
+  margin: 0 0 .25rem;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.federation-server-card header small {
+  color: var(--muted);
+  font-size: .66rem;
+}
+
+.federation-status {
+  flex: 0 0 auto;
+  padding: .28rem .48rem;
+  border-radius: 99px;
+  color: var(--success);
+  background: #12372d;
+  font-size: .63rem;
+  font-weight: 800;
+}
+
+.federation-status.incompatible {
+  color: var(--amber);
+  background: #3b2f19;
+}
+
+.federation-status.unavailable {
+  color: #bac3ca;
+  background: #28313a;
+}
+
+.federation-server-card dl {
+  display: grid;
+  gap: .65rem;
+  margin: .9rem 0;
+}
+
+.federation-server-card dl > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: .55rem;
+  align-items: baseline;
+}
+
+.federation-server-card dt {
+  color: var(--muted);
+  font-size: .67rem;
+}
+
+.federation-server-card dd {
+  min-width: 0;
+  margin: 0;
+  color: #d8e7ed;
+  font-size: .75rem;
+  overflow-wrap: anywhere;
+}
+
+.federation-server-card dd small {
+  display: block;
+  margin-top: .2rem;
+  color: #79909c;
+  font-size: .58rem;
+}
+
+.federation-balance {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  min-height: 70px;
+  padding: .8rem;
+  border: 1px solid #315c5d;
+  border-radius: 8px;
+  background: #102c31;
+}
+
+.federation-balance.unavailable {
+  border-color: #3a4650;
+  background: #151e27;
+}
+
+.federation-balance strong {
+  color: var(--cyan);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.federation-balance.unavailable strong {
+  color: #c2ccd2;
+  font-size: .82rem;
+}
+
+.federation-balance span {
+  color: #9eb2bc;
+  font-size: .66rem;
+  line-height: 1.45;
+}
+
+.federation-error-code {
+  margin: .65rem 0 0;
+  color: #b4a58e;
+  font-size: .61rem;
+  overflow-wrap: anywhere;
+}
+
+.federation-error-code code {
+  color: #e1c792;
+}
+
+.federation-switch {
+  display: block;
+  margin-top: auto;
+  padding: .62rem .8rem;
+  text-align: center;
+  text-decoration: none;
+  font-size: .72rem;
+}
+
+.federation-switch-note {
+  display: block;
+  margin-top: auto;
+  padding-top: .75rem;
+  color: #738793;
+  text-align: center;
+  font-size: .65rem;
+}
+
+@media (max-width: 1180px) {
+  .federation-server-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .federation-panel-heading {
+    flex-direction: column;
+  }
+
+  .federation-panel-heading > button {
+    width: 100%;
+  }
+
+  .federation-server-grid {
+    grid-template-columns: 1fr;
+  }
+}

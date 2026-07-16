@@ -388,11 +388,13 @@ public static class EconomyContentEndpoints
                 "CONTENT_MAINTENANCE_REQUIRED",
                 "Enter maintenance and drain active player operations before publishing or rolling back content.");
         }
-        if ((await runStore.ListRolloverBlockingAsync(cancellationToken)).Count != 0)
+        var inFlightRuns = await runStore.ListRolloverBlockingAsync(cancellationToken);
+        if (inFlightRuns.Any(run => run.State != ExtractionSettlementState.Quoted))
         {
             throw new ContentStoreException(
                 "CONTENT_SETTLEMENT_DRAIN_REQUIRED",
-                "All resource quotes and settlements must reach a terminal state before content activation.");
+                "All resource consumptions must reach a terminal state before content activation. " +
+                "Unconsumed quotes are invalidated by immutable content evidence after the pointer switches.");
         }
     }
 

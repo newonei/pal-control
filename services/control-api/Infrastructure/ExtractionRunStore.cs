@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
@@ -25,7 +27,23 @@ public sealed record ExtractionLootLine(
     string DisplayName,
     int Quantity,
     long UnitValue,
-    long TotalValue);
+    long TotalValue,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? IconKey = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ContentRarity? Rarity = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Usage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PresentationSource = null);
+
+public sealed record ExtractionQuoteSelectionLine(string ItemId, int Quantity);
+
+public sealed record ExtractionQuoteSelectionResult(
+    ExtractionSettlementRun Run,
+    bool Created,
+    bool IdempotentReplay,
+    bool IdempotencyConflict);
 
 public sealed record ExtractionSettlementRun(
     Guid RunId,
@@ -68,6 +86,12 @@ public sealed record ExtractionSettlementRun(
     public string? RotationSeed { get; init; }
     public int ZoneYieldMultiplierBasisPoints { get; init; } = 10_000;
     public bool Hotspot { get; init; }
+    public EconomyDynamicQuoteEvidence? DynamicEconomyEvidence { get; init; }
+    public Guid? SourceQuoteRunId { get; init; }
+    public long? SourceQuoteRevision { get; init; }
+    public string? SelectionIdempotencyKey { get; init; }
+    public string? SelectionRequestHash { get; init; }
+    public Guid? SelectedChildRunId { get; init; }
 }
 
 public sealed record ExtractionConsumptionStart(
@@ -90,12 +114,25 @@ public sealed record ExtractionRunCreditCommit(
     WalletLedgerEntry LedgerEntry,
     bool CreditCreated);
 
+public sealed record ExtractionSettlementRunWrite(
+    ExtractionSettlementRun? Expected,
+    ExtractionSettlementRun Run)
+{
+    public static ExtractionSettlementRunWrite Insert(ExtractionSettlementRun run) =>
+        new(null, run);
+
+    public static ExtractionSettlementRunWrite Update(
+        ExtractionSettlementRun expected,
+        ExtractionSettlementRun run) =>
+        new(expected, run);
+}
+
 public interface IExtractionSettlementPersistence
 {
     IReadOnlyList<ExtractionSettlementRun> LoadAndMigrateSettlementRuns(string legacyJsonPath);
 
-    Task PersistSettlementRunsAsync(
-        IReadOnlyCollection<ExtractionSettlementRun> runs,
+    Task PersistSettlementRunWritesAsync(
+        IReadOnlyCollection<ExtractionSettlementRunWrite> writes,
         CancellationToken cancellationToken);
 
     Task<ExtractionRunCreditCommit> CreditRemovedRunAsync(
@@ -106,6 +143,9 @@ public interface IExtractionSettlementPersistence
 public sealed class ExtractionRunStore : IDisposable
 {
     public static readonly TimeSpan SettlementLeaseDuration = TimeSpan.FromMinutes(2);
+    public const int MaximumSelectedLineQuantity = 999_999;
+    public const int MaximumSelectedTotalQuantity = 16_000_000;
+    public const int MaximumSelectionLines = 64;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Dictionary<Guid, ExtractionSettlementRun> _runs = [];
@@ -141,7 +181,8 @@ public sealed class ExtractionRunStore : IDisposable
         ExtractionNativeInventoryQuoteSnapshot? nativeInventorySnapshot = null,
         EconomyRuntimeContent? runtimeContent = null,
         int zoneYieldMultiplierBasisPoints = 10_000,
-        bool hotspot = false)
+        bool hotspot = false,
+        EconomyDynamicQuoteEvidence? dynamicEconomyEvidence = null)
     {
         ArgumentNullException.ThrowIfNull(items);
         if (nativeInventorySnapshot is not null &&
@@ -158,6 +199,7 @@ public sealed class ExtractionRunStore : IDisposable
         {
             EnsureReady();
             var snapshot = CloneSnapshot();
+            var changedRunIds = new HashSet<Guid>();
             var now = DateTimeOffset.UtcNow;
             foreach (var expired in snapshot.Values.Where(run =>
                          run.AccountId == accountId &&
@@ -173,6 +215,7 @@ public sealed class ExtractionRunStore : IDisposable
                     ErrorCode = "QUOTE_EXPIRED",
                     ErrorMessage = "资源兑换报价已过期。"
                 };
+                changedRunIds.Add(expired.RunId);
             }
             var blocking = snapshot.Values.FirstOrDefault(run =>
                 run.AccountId == accountId &&
@@ -200,6 +243,7 @@ public sealed class ExtractionRunStore : IDisposable
                     ErrorCode = "QUOTE_REPLACED",
                     ErrorMessage = "已生成新的资源兑换报价。"
                 };
+                changedRunIds.Add(previous.RunId);
             }
             var totalValue = checked(items.Sum(item => item.TotalValue));
             var itemCount = checked(items.Sum(item => item.Quantity));
@@ -233,10 +277,12 @@ public sealed class ExtractionRunStore : IDisposable
                 ContentRulesVersion = runtimeContent?.Version.RulesVersion,
                 RotationSeed = runtimeContent?.Rotation.Seed,
                 ZoneYieldMultiplierBasisPoints = zoneYieldMultiplierBasisPoints,
-                Hotspot = hotspot
+                Hotspot = hotspot,
+                DynamicEconomyEvidence = CloneDynamicEconomyEvidence(dynamicEconomyEvidence)
             };
             snapshot[run.RunId] = run;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            changedRunIds.Add(run.RunId);
+            await PersistAndSwapSnapshotAsync(snapshot, changedRunIds, cancellationToken);
             return Clone(run);
         }
         finally
@@ -254,6 +300,288 @@ public sealed class ExtractionRunStore : IDisposable
         {
             EnsureReady();
             return _runs.TryGetValue(runId, out var run) ? Clone(run) : null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<ExtractionQuoteSelectionResult> CreateSelectedQuoteAsync(
+        Guid sourceRunId,
+        long sourceRevision,
+        Guid accountId,
+        Guid seasonId,
+        string userId,
+        string idempotencyKey,
+        IReadOnlyList<ExtractionQuoteSelectionLine> selection,
+        Guid? currentContentVersionId,
+        string? currentContentHash,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
+        ArgumentNullException.ThrowIfNull(selection);
+        if (idempotencyKey.Length is < 8 or > 128 || idempotencyKey.Any(char.IsControl))
+        {
+            throw new ExtractionModeException(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "选择资源必须提供 8 到 128 个非控制字符的 Idempotency-Key。",
+                StatusCodes.Status400BadRequest);
+        }
+        if (sourceRevision < 1)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_SELECTION_REVISION_REQUIRED",
+                "选择资源必须携带原报价的正整数 revision。",
+                StatusCodes.Status400BadRequest);
+        }
+        if (selection.Count == 0)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_SELECTION_EMPTY",
+                "至少选择一项资源。",
+                StatusCodes.Status400BadRequest);
+        }
+        if (selection.Count > MaximumSelectionLines)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_SELECTION_TOO_LARGE",
+                $"单次最多选择 {MaximumSelectionLines} 项资源。",
+                StatusCodes.Status422UnprocessableEntity);
+        }
+
+        var normalizedSelection = new List<ExtractionQuoteSelectionLine>(selection.Count);
+        var seenItemIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long requestedTotalQuantity = 0;
+        foreach (var requested in selection)
+        {
+            if (string.IsNullOrWhiteSpace(requested.ItemId) ||
+                requested.ItemId.Length > 128 ||
+                requested.ItemId.Any(character =>
+                    !(char.IsAsciiLetterOrDigit(character) || character is '_' or '-')))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_SELECTION_ITEM_INVALID",
+                    "选择项必须包含有效的 Palworld ItemID。",
+                    StatusCodes.Status400BadRequest);
+            }
+            var normalizedItemId = requested.ItemId.Trim();
+            if (!seenItemIds.Add(normalizedItemId))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_SELECTION_DUPLICATE_ITEM",
+                    $"选择项 {normalizedItemId} 重复。",
+                    StatusCodes.Status400BadRequest);
+            }
+            if (requested.Quantity <= 0)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_SELECTION_QUANTITY_INVALID",
+                    $"选择项 {normalizedItemId} 的数量必须大于零。",
+                    StatusCodes.Status400BadRequest);
+            }
+            if (requested.Quantity > MaximumSelectedLineQuantity)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_SELECTION_QUANTITY_TOO_LARGE",
+                    $"选择项 {normalizedItemId} 超过单项安全上限 {MaximumSelectedLineQuantity}。",
+                    StatusCodes.Status422UnprocessableEntity);
+            }
+            requestedTotalQuantity = checked(requestedTotalQuantity + requested.Quantity);
+            if (requestedTotalQuantity > MaximumSelectedTotalQuantity)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_SELECTION_TOTAL_TOO_LARGE",
+                    $"选择资源总数超过安全上限 {MaximumSelectedTotalQuantity}。",
+                    StatusCodes.Status422UnprocessableEntity);
+            }
+            normalizedSelection.Add(new ExtractionQuoteSelectionLine(
+                normalizedItemId,
+                requested.Quantity));
+        }
+
+        var requestHash = HashSelectionRequest(
+            sourceRunId,
+            sourceRevision,
+            accountId,
+            seasonId,
+            normalizedSelection);
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureReady();
+            var existingKeyOwner = _runs.Values.FirstOrDefault(candidate =>
+                string.Equals(
+                    candidate.SelectionIdempotencyKey,
+                    idempotencyKey,
+                    StringComparison.Ordinal));
+            if (existingKeyOwner is not null)
+            {
+                var exactReplay = existingKeyOwner.AccountId == accountId &&
+                    existingKeyOwner.SeasonId == seasonId &&
+                    existingKeyOwner.SourceQuoteRunId == sourceRunId &&
+                    existingKeyOwner.SourceQuoteRevision == sourceRevision &&
+                    string.Equals(
+                        existingKeyOwner.SelectionRequestHash,
+                        requestHash,
+                        StringComparison.Ordinal);
+                return new ExtractionQuoteSelectionResult(
+                    Clone(existingKeyOwner),
+                    Created: false,
+                    IdempotentReplay: exactReplay,
+                    IdempotencyConflict: !exactReplay);
+            }
+
+            if (!_runs.TryGetValue(sourceRunId, out var source))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RUN_NOT_FOUND",
+                    "原资源兑换报价不存在。",
+                    StatusCodes.Status404NotFound);
+            }
+            if (source.AccountId != accountId ||
+                !string.Equals(source.UserId, userId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RUN_OWNER_MISMATCH",
+                    "原资源兑换报价不属于当前玩家。",
+                    StatusCodes.Status403Forbidden);
+            }
+            if (source.SeasonId != seasonId)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_RUN_SEASON_MISMATCH",
+                    "原资源兑换报价不属于当前周世界。",
+                    StatusCodes.Status409Conflict);
+            }
+            if (source.Revision != sourceRevision)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_QUOTE_REVISION_CHANGED",
+                    "原资源兑换报价已被其他操作更新，请刷新后重试。",
+                    StatusCodes.Status409Conflict);
+            }
+            if (source.State != ExtractionSettlementState.Quoted)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_QUOTE_NOT_SELECTABLE",
+                    "原资源兑换报价已不处于可选择状态。",
+                    StatusCodes.Status409Conflict);
+            }
+            if (DateTimeOffset.UtcNow >= source.ExpiresAt)
+            {
+                throw new ExtractionModeException(
+                    "EXTRACTION_QUOTE_EXPIRED",
+                    "原资源兑换报价已过期，请重新扫描。",
+                    StatusCodes.Status409Conflict);
+            }
+            if (source.ContentVersionId != currentContentVersionId ||
+                !string.Equals(
+                    source.ContentHash,
+                    currentContentHash,
+                    StringComparison.Ordinal))
+            {
+                throw new ExtractionModeException(
+                    "QUOTE_CONTENT_CHANGED",
+                    "报价对应的本周经济内容已经切换，请重新扫描。",
+                    StatusCodes.Status409Conflict);
+            }
+
+            var sourceByItemId = source.Items.ToDictionary(
+                line => line.ItemId,
+                StringComparer.OrdinalIgnoreCase);
+            var quantityByItemId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var requested in normalizedSelection)
+            {
+                if (!sourceByItemId.TryGetValue(requested.ItemId, out var quoted))
+                {
+                    throw new ExtractionModeException(
+                        "EXTRACTION_SELECTION_ITEM_UNKNOWN",
+                        $"选择项 {requested.ItemId} 不在原报价中。",
+                        StatusCodes.Status422UnprocessableEntity);
+                }
+                if (requested.Quantity > quoted.Quantity)
+                {
+                    throw new ExtractionModeException(
+                        "EXTRACTION_SELECTION_OVER_QUANTITY",
+                        $"选择项 {quoted.ItemId} 的数量超过原报价数量 {quoted.Quantity}。",
+                        StatusCodes.Status422UnprocessableEntity);
+                }
+                quantityByItemId[quoted.ItemId] = requested.Quantity;
+            }
+
+            var selectedItems = source.Items
+                .Where(line => quantityByItemId.ContainsKey(line.ItemId))
+                .Select(line =>
+                {
+                    var quantity = quantityByItemId[line.ItemId];
+                    return line with
+                    {
+                        Quantity = quantity,
+                        TotalValue = checked((long)quantity * line.UnitValue)
+                    };
+                })
+                .ToArray();
+            var itemCount = checked(selectedItems.Sum(line => line.Quantity));
+            var totalValue = checked(selectedItems.Sum(line => line.TotalValue));
+            var snapshotHash = source.NativeInventorySnapshot is null
+                ? HashDevelopmentSelectionSnapshot(source.Items, selectedItems)
+                : source.QuoteSnapshotHash;
+            var now = DateTimeOffset.UtcNow;
+            var child = source with
+            {
+                RunId = Guid.NewGuid(),
+                State = ExtractionSettlementState.Quoted,
+                Items = selectedItems,
+                ItemCount = itemCount,
+                TotalValue = totalValue,
+                QuoteSnapshotHash = snapshotHash,
+                PreDeleteTotals = null,
+                SettlementIdempotencyKey = null,
+                ErrorCode = null,
+                ErrorMessage = null,
+                UpdatedAt = now,
+                SettledAt = null,
+                Revision = 1,
+                StateChangedAt = now,
+                LeaseId = null,
+                LeaseOwner = null,
+                LeaseExpiresAt = null,
+                AttemptCount = 0,
+                LastHeartbeatAt = null,
+                ReconciliationActor = null,
+                SettlementRequestHash = null,
+                NativeConsumeReceipt = null,
+                SourceQuoteRunId = source.RunId,
+                SourceQuoteRevision = source.Revision,
+                SelectionIdempotencyKey = idempotencyKey,
+                SelectionRequestHash = requestHash,
+                SelectedChildRunId = null
+            };
+            var cancelledSource = source with
+            {
+                State = ExtractionSettlementState.Cancelled,
+                Revision = checked(source.Revision + 1),
+                StateChangedAt = now,
+                UpdatedAt = now,
+                ErrorCode = "QUOTE_SELECTION_DERIVED",
+                ErrorMessage = $"已派生选择性报价 {child.RunId:N}。",
+                SelectedChildRunId = child.RunId
+            };
+            var snapshot = CloneSnapshot();
+            snapshot[source.RunId] = cancelledSource;
+            snapshot[child.RunId] = child;
+            await PersistAndSwapSnapshotAsync(
+                snapshot,
+                [source.RunId, child.RunId],
+                cancellationToken);
+            return new ExtractionQuoteSelectionResult(
+                Clone(child),
+                Created: true,
+                IdempotentReplay: false,
+                IdempotencyConflict: false);
         }
         finally
         {
@@ -448,7 +776,7 @@ public sealed class ExtractionRunStore : IDisposable
                         ErrorMessage = "资源兑换报价已过期。"
                     };
                     snapshot[runId] = expired;
-                    await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+                    await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
                 }
                 throw new ExtractionModeException(
                     "EXTRACTION_QUOTE_NOT_SETTLEABLE",
@@ -475,7 +803,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LastHeartbeatAt = now
             };
             updatedSnapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(updatedSnapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(updatedSnapshot, [runId], cancellationToken);
             return new ExtractionConsumptionStart(Clone(updated), true, false);
         }
         finally
@@ -535,7 +863,7 @@ public sealed class ExtractionRunStore : IDisposable
                 UpdatedAt = DateTimeOffset.UtcNow
             };
             snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -756,7 +1084,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LeaseExpiresAt = now.Add(SettlementLeaseDuration)
             };
             snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -800,7 +1128,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LeaseExpiresAt = null
             };
             snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -858,7 +1186,7 @@ public sealed class ExtractionRunStore : IDisposable
                 LastHeartbeatAt = now
             };
             snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -952,7 +1280,7 @@ public sealed class ExtractionRunStore : IDisposable
                 ReconciliationActor = reconciliationActor ?? run.ReconciliationActor
             };
             snapshot[runId] = updated;
-            await PersistAndSwapSnapshotAsync(snapshot, cancellationToken);
+            await PersistAndSwapSnapshotAsync(snapshot, [runId], cancellationToken);
             return new ExtractionRunMutation(Clone(updated), true);
         }
         finally
@@ -992,20 +1320,41 @@ public sealed class ExtractionRunStore : IDisposable
         }
     }
 
-    private async Task PersistSnapshotAsync(
-        IReadOnlyDictionary<Guid, ExtractionSettlementRun> snapshot,
-        CancellationToken cancellationToken) =>
-        await _persistence.PersistSettlementRunsAsync(
-            snapshot.Values.OrderBy(run => run.QuotedAt).ToArray(),
-            cancellationToken);
-
     private async Task PersistAndSwapSnapshotAsync(
         Dictionary<Guid, ExtractionSettlementRun> snapshot,
+        IReadOnlyCollection<Guid> changedRunIds,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(changedRunIds);
+        if (changedRunIds.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one extraction settlement run must be written.",
+                nameof(changedRunIds));
+        }
+
+        var seen = new HashSet<Guid>();
+        var writes = new List<ExtractionSettlementRunWrite>(changedRunIds.Count);
+        foreach (var runId in changedRunIds)
+        {
+            if (!seen.Add(runId))
+            {
+                throw new InvalidOperationException(
+                    $"Extraction run '{runId}' was included more than once in one persistence batch.");
+            }
+            if (!snapshot.TryGetValue(runId, out var updated))
+            {
+                throw new InvalidOperationException(
+                    $"Extraction run '{runId}' is missing from the replacement snapshot.");
+            }
+            writes.Add(_runs.TryGetValue(runId, out var expected)
+                ? ExtractionSettlementRunWrite.Update(expected, updated)
+                : ExtractionSettlementRunWrite.Insert(updated));
+        }
+
         // The SQLite commit is the persistence point. No cancellable or fallible
         // work may be introduced between it and the in-memory reference swap.
-        await PersistSnapshotAsync(snapshot, cancellationToken);
+        await _persistence.PersistSettlementRunWritesAsync(writes, cancellationToken);
         _runs = snapshot;
     }
 
@@ -1026,8 +1375,18 @@ public sealed class ExtractionRunStore : IDisposable
             ? null
             : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase),
         NativeInventorySnapshot = CloneNativeSnapshot(run.NativeInventorySnapshot),
-        NativeConsumeReceipt = CloneNativeReceipt(run.NativeConsumeReceipt)
+        NativeConsumeReceipt = CloneNativeReceipt(run.NativeConsumeReceipt),
+        DynamicEconomyEvidence = CloneDynamicEconomyEvidence(run.DynamicEconomyEvidence)
     };
+
+    private static EconomyDynamicQuoteEvidence? CloneDynamicEconomyEvidence(
+        EconomyDynamicQuoteEvidence? evidence) =>
+        evidence is null
+            ? null
+            : evidence with
+            {
+                WorldEvents = evidence.WorldEvents.Select(worldEvent => worldEvent with { }).ToArray()
+            };
 
     private static ExtractionNativeInventoryQuoteSnapshot? CloneNativeSnapshot(
         ExtractionNativeInventoryQuoteSnapshot? snapshot) =>
@@ -1044,4 +1403,34 @@ public sealed class ExtractionRunStore : IDisposable
     private static ExtractionNativeConsumeReceipt? CloneNativeReceipt(
         ExtractionNativeConsumeReceipt? receipt) =>
         receipt is null ? null : receipt with { Items = receipt.Items.ToArray() };
+
+    internal static string HashDevelopmentSelectionSnapshot(
+        IReadOnlyList<ExtractionLootLine> sourceItems,
+        IReadOnlyList<ExtractionLootLine> selectedItems)
+    {
+        var selectedIds = selectedItems.Select(line => line.ItemId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var canonical = string.Join('\n', sourceItems
+            .Where(line => selectedIds.Contains(line.ItemId))
+            .OrderBy(line => line.ItemId, StringComparer.OrdinalIgnoreCase)
+            .Select(line => $"{line.ItemId}={line.Quantity}"));
+        return Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    private static string HashSelectionRequest(
+        Guid sourceRunId,
+        long sourceRevision,
+        Guid accountId,
+        Guid seasonId,
+        IReadOnlyList<ExtractionQuoteSelectionLine> selection)
+    {
+        var canonicalSelection = string.Join('\n', selection
+            .OrderBy(line => line.ItemId, StringComparer.OrdinalIgnoreCase)
+            .Select(line => $"{line.ItemId.ToLowerInvariant()}={line.Quantity}"));
+        var canonical =
+            $"source={sourceRunId:N}\nrevision={sourceRevision}\naccount={accountId:N}\nseason={seasonId:N}\n{canonicalSelection}";
+        return Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
 }

@@ -70,7 +70,12 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(exception, "The extraction delivery worker iteration failed.");
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(ExtractionDeliveryWorker),
+                    "delivery.scan.failure",
+                    serverId: _options.ServerId);
+                _logger.LogSafeError(exception, "The extraction delivery worker iteration failed.");
             }
 
             await Task.Delay(_options.DeliveryPollMilliseconds, stoppingToken);
@@ -86,6 +91,13 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
             : await _commerce.ListAllPendingDeliveriesAsync(cancellationToken);
         foreach (var delivery in deliveries)
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(ExtractionDeliveryWorker),
+                "delivery.dispatch",
+                delivery.DeliveryId,
+                _options.ServerId,
+                PlayerIdentitySecurityStore.FingerprintSubject(delivery.PlayerIdentifier));
             try
             {
                 if (string.IsNullOrWhiteSpace(delivery.PlayerUid) ||
@@ -193,7 +205,7 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Failed to dispatch extraction delivery {DeliveryId}.",
                     delivery.DeliveryId);
@@ -206,6 +218,12 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
         var deliveries = await _commerce.ListInFlightDeliveriesAsync(25, cancellationToken);
         foreach (var delivery in deliveries)
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(ExtractionDeliveryWorker),
+                "delivery.reconcile",
+                delivery.DeliveryId,
+                _options.ServerId);
             try
             {
                 var registration = await _receipts.GetAsync(
@@ -241,7 +259,7 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Failed to reconcile extraction delivery {DeliveryId}.",
                     delivery.DeliveryId);
@@ -273,7 +291,7 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
                         // Successful item delivery is already durable; task
                         // projection failure must not turn it into an uncertain
                         // delivery or trigger a refund.
-                        _logger.LogError(
+                        _logger.LogSafeError(
                             exception,
                             "Reliable tasks could not project delivered shop order {OrderId}.",
                             delivered.Order.OrderId);
@@ -316,6 +334,13 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
         var orders = await _commerce.ListBlockingOrdersAsync(cancellationToken);
         foreach (var order in orders.Where(order => order.State == ShopOrderState.DeliveryFailed))
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(ExtractionDeliveryWorker),
+                "delivery.refund",
+                order.OrderId,
+                _options.ServerId,
+                PlayerIdentitySecurityStore.FingerprintSubject(order.PlayerIdentifier));
             try
             {
                 var result = await _commerce.RefundFailedOrderAsync(
@@ -327,15 +352,15 @@ public sealed class ExtractionDeliveryWorker : BackgroundService
                 if (result.ErrorCode is not null)
                 {
                     _logger.LogWarning(
-                        "Automatic extraction refund for order {OrderId} remains pending: {ErrorCode}: {ErrorMessage}",
+                        "Automatic extraction refund for order {OrderId} remains pending: {ErrorCode} ({ErrorFingerprint}).",
                         order.OrderId,
                         result.ErrorCode,
-                        result.ErrorMessage);
+                        ControlPlaneLog.Fingerprint(result.ErrorMessage));
                 }
             }
             catch (Exception exception)
             {
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Automatic extraction refund for order {OrderId} failed and will be retried.",
                     order.OrderId);

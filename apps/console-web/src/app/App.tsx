@@ -4,6 +4,8 @@ import { AnnouncementBoard } from "../features/announcements/AnnouncementBoard";
 import { ServerConfigurationPanel } from "../features/configuration/ServerConfigurationPanel";
 import { ContentManagement } from "../features/content/ContentManagement";
 import { DashboardOverview } from "../features/dashboard/DashboardOverview";
+import { EconomyAnalyticsDashboard } from "../features/economy-analytics/EconomyAnalyticsDashboard";
+import { EconomyOperationsWorkbench } from "../features/economy-operations/EconomyOperationsWorkbench";
 import { ExtractionCenter } from "../features/extraction";
 import { LivePlayerMap } from "../features/map/LivePlayerMap";
 import { PalDefenderDirectory } from "../features/paldefender/PalDefenderDirectory";
@@ -32,6 +34,8 @@ type NavKey =
   | "dashboard"
   | "players"
   | "extraction"
+  | "economy-analytics"
+  | "economy-operations"
   | "content"
   | "operations"
   | "directory"
@@ -45,6 +49,8 @@ const navigation: Array<{ key: NavKey; label: string; glyph: string; group: stri
   { key: "dashboard", label: "仪表盘", glyph: "总", group: "总览" },
   { key: "players", label: "玩家中心", glyph: "玩", group: "玩家运营" },
   { key: "extraction", label: "资源经济", glyph: "兑", group: "玩家运营" },
+  { key: "economy-analytics", label: "运营分析", glyph: "析", group: "玩家运营" },
+  { key: "economy-operations", label: "经济运营", glyph: "营", group: "玩家运营" },
   { key: "operations", label: "奖励与管理", glyph: "奖", group: "玩家运营" },
   { key: "directory", label: "公会与封禁", glyph: "会", group: "玩家运营" },
   { key: "content", label: "内容版本", glyph: "版", group: "内容运营" },
@@ -167,6 +173,8 @@ function ConsoleApp() {
         onSelectPlayer={() => setActiveNav("players")}
       />;
     }
+    if (activeNav === "economy-analytics") return <EconomyAnalyticsDashboard />;
+    if (activeNav === "economy-operations") return <EconomyOperationsWorkbench />;
     if (activeNav === "directory") return <PalDefenderDirectory connected={pdConnected} />;
     if (activeNav === "content") return <ContentManagement serverId={capabilities?.serverId ?? "local"} />;
     if (activeNav === "announcements") {

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Domain;
 using PalControl.ControlApi.Extraction;
 
@@ -213,6 +214,8 @@ public static class PlayerPortalEndpoints
             ExtractionModeCoordinator coordinator,
             ExtractionSettlementService settlement,
             ExtractionOperationGate operationGate,
+            EconomyAnalyticsStore analytics,
+            EconomyContentRuntimeService contentRuntime,
             CancellationToken cancellationToken) =>
         {
             try
@@ -231,6 +234,14 @@ public static class PlayerPortalEndpoints
                 var statistics = await settlement.GetSeasonStatisticsAsync(
                     context.Account.AccountId,
                     context.Season.SeasonId,
+                    cancellationToken);
+                var currentContent = await coordinator.GetCurrentContentAsync(cancellationToken);
+                await analytics.RecordPortalSessionAsync(
+                    context.Account.AccountId,
+                    context.Season.ServerId,
+                    context.Season.SeasonId,
+                    currentContent?.Version.VersionId,
+                    currentContent?.Version.BusinessDate ?? contentRuntime.GetCurrentBusinessDate(),
                     cancellationToken);
                 return Results.Ok(new
                 {
@@ -285,6 +296,10 @@ public static class PlayerPortalEndpoints
                     status = snapshot.Status,
                     statusMessage = snapshot.StatusMessage,
                     sampledAt = snapshot.SampledAt,
+                    nextOpensAt = snapshot.NextOpensAt,
+                    dynamicPolicyVersion = snapshot.DynamicPolicyVersion,
+                    dynamicSeed = snapshot.DynamicSeed,
+                    worldEvents = snapshot.WorldEvents ?? [],
                     positionSource = "paldefender-map-location",
                     coordinateTransform = new
                     {
@@ -320,6 +335,8 @@ public static class PlayerPortalEndpoints
             PlayerPortalAuthenticationService authentication,
             ExtractionModeCoordinator coordinator,
             ExtractionOperationGate operationGate,
+            EconomyAnalyticsStore analytics,
+            EconomyContentRuntimeService contentRuntime,
             CancellationToken cancellationToken) =>
         {
             try
@@ -363,6 +380,21 @@ public static class PlayerPortalEndpoints
                     $"{product.ProductId:N}:{product.Revision}:{product.Active}"));
                 var revision = Convert.ToHexString(
                     SHA256.HashData(Encoding.UTF8.GetBytes(revisionSource))).ToLowerInvariant();
+                var businessDate = content?.Version.BusinessDate ?? contentRuntime.GetCurrentBusinessDate();
+                await analytics.RecordPortalSessionAsync(
+                    context.Account.AccountId,
+                    context.Season.ServerId,
+                    context.Season.SeasonId,
+                    content?.Version.VersionId,
+                    businessDate,
+                    cancellationToken);
+                await analytics.RecordCatalogViewAsync(
+                    context.Account.AccountId,
+                    context.Season.ServerId,
+                    context.Season.SeasonId,
+                    content?.Version.VersionId,
+                    businessDate,
+                    cancellationToken);
                 return Results.Ok(new
                 {
                     revision,
@@ -584,6 +616,48 @@ public static class PlayerPortalEndpoints
             }
         });
 
+        me.MapPost("/runs/{runId:guid}/select", async (
+            Guid runId,
+            SelectPlayerPortalQuote request,
+            HttpContext httpContext,
+            PlayerPortalAuthenticationService authentication,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                RejectIdentityOverride(httpContext);
+                if (!string.IsNullOrWhiteSpace(request.UserId) ||
+                    request.AccountId is not null ||
+                    request.SeasonId is not null)
+                {
+                    throw new PlayerPortalException(
+                        "PLAYER_IDENTITY_OVERRIDE_FORBIDDEN",
+                        "玩家身份、账户和周世界只能由已验证的登录会话确定。",
+                        StatusCodes.Status400BadRequest);
+                }
+                var session = authentication.RequireSession(httpContext);
+                authentication.RequireCsrf(httpContext, session);
+                var idempotencyKey = RequireIdempotencyKey(httpContext.Request);
+                using var operationLease = operationGate.AcquireOperation();
+                var result = await settlement.SelectQuoteAsync(
+                    runId,
+                    request.SourceRevision,
+                    session.UserId,
+                    idempotencyKey,
+                    request.Items?.Select(item => new ExtractionQuoteSelectionLine(
+                        item.ItemId,
+                        item.Quantity)).ToArray() ?? [],
+                    cancellationToken);
+                return Results.Ok(ExtractionModeEndpoints.QuoteDto(result.Run));
+            }
+            catch (Exception exception)
+            {
+                return ToPortalError(httpContext, exception, anonymous: false);
+            }
+        });
+
         me.MapPost("/runs/{runId:guid}/settle", async (
             Guid runId,
             HttpContext httpContext,
@@ -788,7 +862,10 @@ public static class PlayerPortalEndpoints
             return exception switch
             {
                 ExtractionModeException modeException => Results.Json(
-                    new ApiError(modeException.Code, modeException.Message),
+                    new ApiError(modeException.Code, modeException.Message)
+                    {
+                        NextOpensAt = modeException.NextOpensAt
+                    },
                     statusCode: modeException.StatusCode),
                 NewPlayerActivityException activityException => Results.Json(
                     new ApiError(activityException.Code, activityException.Message),
@@ -836,4 +913,11 @@ public static class PlayerPortalEndpoints
         Guid? ContentVersionId = null,
         string? ContentHash = null,
         string? Sku = null);
+
+    public sealed record SelectPlayerPortalQuote(
+        long SourceRevision,
+        IReadOnlyList<ExtractionModeEndpoints.SelectExtractionQuoteItem>? Items,
+        string? UserId = null,
+        Guid? AccountId = null,
+        Guid? SeasonId = null);
 }

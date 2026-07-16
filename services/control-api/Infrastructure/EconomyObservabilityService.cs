@@ -218,6 +218,12 @@ public sealed class EconomyObservabilityService : BackgroundService
         try
         {
             var observedAt = _timeProvider.GetUtcNow();
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(EconomyObservabilityService),
+                "observability.collect",
+                observedAt.UtcTicks,
+                _modeOptions.ServerId);
             EconomyObservabilitySnapshot snapshot;
             try
             {
@@ -229,8 +235,8 @@ public sealed class EconomyObservabilityService : BackgroundService
             }
             catch (Exception exception)
             {
-                var correlationId = Guid.NewGuid().ToString("N");
-                _logger.LogError(
+                var correlationId = ControlPlaneLog.CurrentCorrelationId!;
+                _logger.LogSafeError(
                     exception,
                     "Economy metrics collection failed; correlation {CorrelationId}.",
                     correlationId);
@@ -274,8 +280,13 @@ public sealed class EconomyObservabilityService : BackgroundService
             }
             catch (Exception exception)
             {
-                var correlationId = Guid.NewGuid().ToString("N");
-                _logger.LogError(
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(EconomyObservabilityService),
+                    "observability.loop.failure",
+                    serverId: _modeOptions.ServerId);
+                var correlationId = ControlPlaneLog.CurrentCorrelationId!;
+                _logger.LogSafeError(
                     exception,
                     "Economy observability loop failed; correlation {CorrelationId}.",
                     correlationId);
@@ -514,7 +525,9 @@ public sealed class EconomyObservabilityService : BackgroundService
             {
                 continue;
             }
-            var correlationId = Guid.NewGuid().ToString("N");
+            var correlationId = ControlPlaneLog.CurrentCorrelationId ??
+                throw new InvalidOperationException(
+                    "Automatic circuit evaluation requires a correlation scope.");
             var reason =
                 $"Automatic economy circuit ({correlationId}): {string.Join(',', active)}";
             await _safetyGate.SetCircuitAsync(

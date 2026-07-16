@@ -159,6 +159,35 @@ public sealed partial class ExtractionModeCoordinator
         };
     }
 
+    /// <summary>
+    /// Resolves an already-created account for an administrator operation
+    /// without disclosing or round-tripping the platform subject through the
+    /// browser. Unlike the player-subject path this overload never creates an
+    /// account and never needs to query PalDefender.
+    /// </summary>
+    public async Task<ExtractionAccountContext> GetExistingAccountContextAsync(
+        Guid accountId,
+        CancellationToken cancellationToken)
+    {
+        EnsureEnabled();
+        await EnsureInitializedAsync(cancellationToken);
+        var account = await _commerce.GetAccountAsync(accountId, cancellationToken)
+            ?? throw new ExtractionModeException(
+                "ACCOUNT_NOT_FOUND",
+                "指定的经济账户不存在。",
+                StatusCodes.Status404NotFound);
+        var season = await _commerce.GetActiveSeasonAsync(_options.ServerId, cancellationToken)
+            ?? throw new ExtractionModeException(
+                "ACTIVE_SEASON_UNAVAILABLE",
+                "当前没有可读取的活动经济周档。",
+                StatusCodes.Status503ServiceUnavailable);
+        var wallet = await _commerce.GetWalletAsync(
+            account.AccountId,
+            season.SeasonId,
+            cancellationToken);
+        return new ExtractionAccountContext(account, season, wallet, false);
+    }
+
     public async Task<ExtractionLivePlayer> GetLivePlayerAsync(
         string userId,
         CancellationToken cancellationToken)
@@ -732,7 +761,16 @@ public sealed partial class ExtractionModeCoordinator
                     product.PurchaseLimitPerSeason,
                     product.Active,
                     product.AvailableFrom,
-                    product.AvailableUntil),
+                    product.AvailableUntil,
+                    product.Category,
+                    product.Tags,
+                    product.FeaturedRank,
+                    product.GlobalStock,
+                    product.ContentVersionId,
+                    product.ContentHash,
+                    product.IconKey,
+                    product.Rarity,
+                    product.Usage),
                 product.Revision,
                 actor,
                 cancellationToken);
@@ -1021,8 +1059,8 @@ public sealed partial class ExtractionModeCoordinator
             // able to sign in; use an explicit audited adjustment/migration for a
             // changed policy instead of retrying bootstrap with a new key.
             _logger.LogWarning(
-                "Bootstrap policy {PolicyVersion} differs from the recorded grant for account fingerprint {AccountFingerprint} season {SeasonId}; existing balance was left unchanged.",
-                policyVersion,
+                "Bootstrap policy fingerprint {PolicyFingerprint} differs from the recorded grant for account fingerprint {AccountFingerprint} season {SeasonId}; existing balance was left unchanged.",
+                ControlPlaneLog.Fingerprint(policyVersion),
                 PlayerIdentitySecurityStore.FingerprintSubject(accountId.ToString("N")),
                 seasonId);
             return;
@@ -1095,13 +1133,19 @@ public sealed record ExtractionRolloverPreflight(
 
 public sealed class ExtractionModeException : Exception
 {
-    public ExtractionModeException(string code, string message, int statusCode)
+    public ExtractionModeException(
+        string code,
+        string message,
+        int statusCode,
+        DateTimeOffset? nextOpensAt = null)
         : base(message)
     {
         Code = code;
         StatusCode = statusCode;
+        NextOpensAt = nextOpensAt;
     }
 
     public string Code { get; }
     public int StatusCode { get; }
+    public DateTimeOffset? NextOpensAt { get; }
 }

@@ -2,6 +2,8 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$')]
     [string]$Version = "0.1.0",
+    [ValidatePattern('^[0-9a-fA-F]{40,64}$')]
+    [string]$SourceRevision,
     [switch]$SkipRestore,
     [switch]$SkipInstaller
 )
@@ -14,6 +16,37 @@ $artifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "artifacts\re
 $bundleRoot = Join-Path $artifactRoot "幻兽商域"
 $publishRoot = $bundleRoot
 $expectedPrefix = $repoRoot.TrimEnd('\') + "\artifacts\"
+
+try {
+    $gitHead = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+}
+catch {
+    throw "A clean Git worktree is required to produce release provenance."
+}
+if ($LASTEXITCODE -ne 0 -or $gitHead -notmatch '^[0-9a-fA-F]{40,64}$') {
+    throw "A clean Git worktree is required to produce release provenance."
+}
+if ([string]::IsNullOrWhiteSpace($SourceRevision)) {
+    $SourceRevision = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
+        $env:GITHUB_SHA.Trim()
+    }
+    else { $gitHead }
+}
+if ($SourceRevision -notmatch '^[0-9a-fA-F]{40,64}$') {
+    throw "SourceRevision must be a 40-64 character hexadecimal commit identifier."
+}
+if (-not $SourceRevision.Equals($gitHead, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "SourceRevision does not match the checked-out Git HEAD."
+}
+$gitStatus = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all 2>$null)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to determine whether the release worktree is clean."
+}
+$sourceDirty = $gitStatus.Count -gt 0
+$releaseId = "$($Version.Replace('+', '-'))-$($SourceRevision.Substring(0, 12).ToLowerInvariant())"
+if ($releaseId -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]{2,100}$') {
+    throw "Version produces an invalid or overly long production release id."
+}
 
 if (-not $artifactRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to clean a release path outside the repository artifacts directory: $artifactRoot"
@@ -28,6 +61,18 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
     }
+}
+
+function Get-RelativePath {
+    param(
+        [Parameter(Mandatory)] [string]$BasePath,
+        [Parameter(Mandatory)] [string]$Path
+    )
+    $baseFull = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\') + '\'
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    $baseUri = New-Object System.Uri($baseFull)
+    $pathUri = New-Object System.Uri($pathFull)
+    [System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($pathUri).ToString())
 }
 
 Write-Host "[1/7] Preparing release directory..."
@@ -115,6 +160,8 @@ try {
     $versionInfo = [ordered]@{
         product = "幻兽商域"
         version = $Version
+        sourceRevision = $SourceRevision.ToLowerInvariant()
+        sourceDirty = $sourceDirty
         platform = "win-x64"
         builtAtUtc = [DateTime]::UtcNow.ToString("o")
         selfContainedDotNet = $true
@@ -128,6 +175,39 @@ try {
     [System.IO.File]::WriteAllText(
         (Join-Path $bundleRoot "版本信息.json"),
         $versionInfo + [Environment]::NewLine,
+        (New-Object System.Text.UTF8Encoding($false)))
+
+    $releaseFiles = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relativePath = (Get-RelativePath -BasePath $bundleRoot -Path $_.FullName).Replace('\', '/')
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            [ordered]@{
+                path = $relativePath
+                bytes = $_.Length
+                sha256 = $hash.Hash.ToLowerInvariant()
+            }
+        })
+    $releaseManifest = [ordered]@{
+        schemaVersion = 1
+        product = "PalControl"
+        version = $Version
+        releaseId = $releaseId
+        sourceRevision = $SourceRevision.ToLowerInvariant()
+        sourceDirty = $sourceDirty
+        platform = "win-x64"
+        executable = "PalControl.ControlApi.exe"
+        dataContract = [ordered]@{
+            provider = "sqlite"
+            version = 1
+            migrationMode = "startup-idempotent"
+            rollbackPolicy = "same-contract-only"
+        }
+        files = $releaseFiles
+    } | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText(
+        (Join-Path $bundleRoot "release-manifest.json"),
+        $releaseManifest + [Environment]::NewLine,
         (New-Object System.Text.UTF8Encoding($false)))
 
     Write-Host "[6/7] Creating portable ZIP..."

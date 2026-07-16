@@ -53,7 +53,14 @@ public sealed class InGameNotificationCommandQueue : BackgroundService
             FileOptions.WriteThrough);
         _eventPath = Path.Combine(dataDirectory, "in-game-notification-command-audit.jsonl");
         EnsureWritable();
-        LoadEvents();
+        using (ControlPlaneLog.BeginOperation(
+                   _logger,
+                   nameof(InGameNotificationCommandQueue),
+                   "persistence.load",
+                   "in-game-notification-command-audit"))
+        {
+            LoadEvents();
+        }
     }
 
     public bool IsReady => _isReady && _workerRunning && _notifications.IsReady;
@@ -239,7 +246,11 @@ public sealed class InGameNotificationCommandQueue : BackgroundService
         catch (Exception exception)
         {
             _isReady = false;
-            _logger.LogCritical(exception, "The in-game notification command worker stopped unexpectedly.");
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(InGameNotificationCommandQueue),
+                "worker.failure");
+            _logger.LogSafeCritical(exception, "The in-game notification command worker stopped unexpectedly.");
             throw;
         }
         finally
@@ -332,6 +343,13 @@ public sealed class InGameNotificationCommandQueue : BackgroundService
             return;
         }
 
+        using var scope = ControlPlaneLog.BeginWorker(
+            _logger,
+            nameof(InGameNotificationCommandQueue),
+            "notification.dispatch",
+            command.CommandId,
+            command.ServerId);
+
         if (command.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
         {
             await TransitionAsync(
@@ -398,7 +416,7 @@ public sealed class InGameNotificationCommandQueue : BackgroundService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _isReady = false;
-            _logger.LogError(
+            _logger.LogSafeError(
                 exception,
                 "Could not persist native dispatch for in-game notification command {CommandId}.",
                 commandId);
@@ -441,7 +459,7 @@ public sealed class InGameNotificationCommandQueue : BackgroundService
         }
         catch (Exception exception)
         {
-            _logger.LogError(
+            _logger.LogSafeError(
                 exception,
                 "Unexpected native notification dispatch failure for command {CommandId}.",
                 commandId);

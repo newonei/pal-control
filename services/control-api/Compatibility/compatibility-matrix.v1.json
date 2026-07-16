@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "matrixVersion": "1.0.0",
+  "generatedAt": "2026-07-15T19:00:00Z",
+  "canonicalSha256": "3edd0fe96d70a8438362afaa0d6a8b8638797988275abaa02f00538055f68342",
+  "combinations": [
+    {
+      "id": "pal-1.0.0.100427-native-dev36",
+      "gameVersion": "v1.0.0.100427",
+      "steamBuild": "unknown",
+      "palDefenderVersion": "1.8.1.3933",
+      "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
+      "nativeProtocolVersion": "1.0",
+      "nativeModVersion": "0.3.0-dev.36",
+      "bridgeAvailability": "available",
+      "capabilities": [
+        "bridge.handshake",
+        "inventory.consume.experimental",
+        "inventory.probe",
+        "player.position.read"
+      ],
+      "status": "experimental",
+      "verifiedAt": "2026-07-15T03:07:00Z",
+      "evidence": [
+        {
+          "kind": "artifact",
+          "source": "mods/pal-control-native/dependencies.lock.json",
+          "observedAt": "2026-07-15T03:07:00Z",
+          "summary": "Repository lock pins Palworld target, full UE4SS commit and the reviewed Native DLL digest.",
+          "artifactSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
+        },
+        {
+          "kind": "runtime",
+          "source": "docs/MOD能力与接口维护手册.md",
+          "observedAt": "2026-07-15T03:07:00Z",
+          "summary": "A prior compatible process loaded dev36 and established Bridge; inventory consumption remains experimental and lacks the production persistence gate."
+        }
+      ],
+      "notes": "Experimental target only. Steam build is not pinned and the Native inventory write capability has not passed the controlled save-stop-restart-relogin acceptance, so this is not production stable."
+    },
+    {
+      "id": "pal-1.0.1.100619-build-24181105-quarantine",
+      "gameVersion": "v1.0.1.100619",
+      "steamBuild": "24181105",
+      "palDefenderVersion": "unknown",
+      "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
+      "nativeProtocolVersion": "1.0",
+      "nativeModVersion": "0.3.0-dev.36",
+      "bridgeAvailability": "unavailable",
+      "capabilities": [
+        "official-rest.read"
+      ],
+      "status": "quarantined",
+      "verifiedAt": "2026-07-15T06:30:00Z",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "source": "docs/MOD能力与接口维护手册.md",
+          "observedAt": "2026-07-15T06:30:00Z",
+          "summary": "Official REST reported v1.0.1.100619 and Steam build 24181105; the compatibility guard isolated the old loader and the Native named pipe was unavailable."
+        },
+        {
+          "kind": "artifact",
+          "source": "mods/pal-control-native/dependencies.lock.json",
+          "observedAt": "2026-07-15T06:30:00Z",
+          "summary": "The disk Native artifact still matches the dev36 digest, but it is not loaded into the updated process and does not prove runtime compatibility.",
+          "artifactSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
+        }
+      ],
+      "notes": "Unsupported runtime combination. The old loader remains quarantined; do not restore it. ABI and schema adaptation plus read-only probes are required before any write-capability acceptance."
+    }
+  ]
+}

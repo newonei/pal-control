@@ -129,6 +129,12 @@ public sealed class ExtractionOperationGate
             {
                 previous = _state;
             }
+            if (previous.Maintenance == maintenance &&
+                string.Equals(previous.Reason, reason.Trim(), StringComparison.Ordinal) &&
+                string.Equals(previous.Actor, actor.Trim(), StringComparison.Ordinal))
+            {
+                return previous;
+            }
             var updated = new ExtractionOperationGateState(
                 maintenance,
                 reason.Trim(),

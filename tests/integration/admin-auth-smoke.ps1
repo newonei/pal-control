@@ -259,10 +259,22 @@ try {
         "X-Pal-Admin-Totp" = Get-Totp
         "X-Pal-Admin-Reason" = "admin auth smoke"
         "X-Correlation-ID" = "11111111-2222-3333-4444-555555555555"
+        "Idempotency-Key" = "admin-auth-maintenance-0001"
     } $maintenanceBody
     Assert-Status $seasonWrite 200 "SeasonAdmin with TOTP could not enter maintenance."
     if (-not $seasonWrite.body.maintenance -or $seasonWrite.body.actor -ne "season-a") {
         throw "Maintenance state did not persist the authenticated administrator actor."
+    }
+    $maintenanceReplay = Invoke-Api "POST" $maintenanceUri @{
+        "X-Pal-Admin-Key" = $seasonKey
+        "X-Pal-Admin-Totp" = Get-Totp
+        "X-Pal-Admin-Reason" = "admin auth smoke"
+        "X-Correlation-ID" = "11111111-2222-3333-4444-666666666666"
+        "Idempotency-Key" = "admin-auth-maintenance-0001"
+    } $maintenanceBody
+    Assert-Status $maintenanceReplay 200 "Exact maintenance replay was not idempotent."
+    if ($maintenanceReplay.body.updatedAt -ne $seasonWrite.body.updatedAt) {
+        throw "Exact maintenance replay changed persisted state or UpdatedAt."
     }
 
     $circuitUri = "$baseUri/api/v1/extraction/admin/safety-gate/purchase"
@@ -270,6 +282,7 @@ try {
         "X-Pal-Admin-Key" = $ownerKey
         "X-Pal-Admin-Totp" = Get-Totp
         "X-Pal-Admin-Reason" = "purchase circuit smoke"
+        "Idempotency-Key" = "admin-auth-circuit-close-0001"
     }
     $closedCircuit = Invoke-Api "PUT" $circuitUri $circuitHeaders @{
         writesEnabled = $false
@@ -293,11 +306,31 @@ try {
         }).Count -ne 0) {
         throw "Capabilities did not expose the independent stable circuit blocker."
     }
-    $reopenedCircuit = Invoke-Api "PUT" $circuitUri $circuitHeaders @{
+    $reopenHeaders = $circuitHeaders.Clone()
+    $reopenHeaders["Idempotency-Key"] = "admin-auth-circuit-open-0001"
+    $reopenHeaders["X-Pal-Admin-Reason"] = "purchase circuit recovered"
+    $reopenedCircuit = Invoke-Api "PUT" $circuitUri $reopenHeaders @{
         writesEnabled = $true
         reason = "purchase circuit recovered"
     }
     Assert-Status $reopenedCircuit 200 "Owner could not reopen purchase without a restart."
+    $replayedCircuit = Invoke-Api "PUT" $circuitUri $reopenHeaders @{
+        writesEnabled = $true
+        reason = "purchase circuit recovered"
+    }
+    Assert-Status $replayedCircuit 200 "Exact circuit replay was not idempotent."
+    if ($replayedCircuit.body.purchase.updatedAt -ne $reopenedCircuit.body.purchase.updatedAt) {
+        throw "Exact circuit replay changed persisted state or UpdatedAt."
+    }
+    $conflictingReplay = Invoke-Api "PUT" $circuitUri $reopenHeaders @{
+        writesEnabled = $false
+        reason = "different request with reused operation key"
+    }
+    Assert-Status $conflictingReplay 409 `
+        "A high-risk Idempotency-Key was reused for a different circuit request."
+    if ($conflictingReplay.body.code -ne "ADMIN_IDEMPOTENCY_CONFLICT") {
+        throw "High-risk idempotency conflict did not expose its stable code."
+    }
     $reopenedCapabilities = Invoke-Api "GET" `
         "$baseUri/api/v1/extraction/capabilities" @{
             "X-Pal-Admin-Key" = $ownerKey

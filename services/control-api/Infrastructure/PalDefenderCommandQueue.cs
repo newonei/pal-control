@@ -142,10 +142,17 @@ public sealed partial class PalDefenderCommandQueue : BackgroundService
             FileOptions.WriteThrough);
         try
         {
-            InitializeStore();
-            ImportLegacyEventsOnce();
-            LoadProjection();
-            EnsureWritable();
+            using (ControlPlaneLog.BeginOperation(
+                       _logger,
+                       nameof(PalDefenderCommandQueue),
+                       "persistence.load",
+                       "paldefender-command-store"))
+            {
+                InitializeStore();
+                ImportLegacyEventsOnce();
+                LoadProjection();
+                EnsureWritable();
+            }
         }
         catch
         {
@@ -357,6 +364,15 @@ public sealed partial class PalDefenderCommandQueue : BackgroundService
                     _ = await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(1), stoppingToken);
                     continue;
                 }
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(PalDefenderCommandQueue),
+                    "command.dispatch",
+                    command.CommandId,
+                    command.ServerId,
+                    TryGetEconomyDeliveryPlayer(command, out var scopedPlayer)
+                        ? PlayerIdentitySecurityStore.FingerprintSubject(scopedPlayer)
+                        : null);
                 try
                 {
                     await ProcessAsync(command, stoppingToken);
@@ -381,7 +397,11 @@ public sealed partial class PalDefenderCommandQueue : BackgroundService
         catch (Exception exception)
         {
             _storeReady = false;
-            _logger.LogCritical(exception, "The PalDefender command worker stopped unexpectedly.");
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(PalDefenderCommandQueue),
+                "worker.failure");
+            _logger.LogSafeCritical(exception, "The PalDefender command worker stopped unexpectedly.");
             throw;
         }
         finally

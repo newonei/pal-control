@@ -53,6 +53,8 @@ git -C .\third_party\RE-UE4SS-Palworld-c2ac246 submodule update --init --recursi
 `X 248 / Y -504 / 半径 100`。修改撤离点配置时必须同步
 `GameAdapter/ExtractionChatCommand.cpp` 中的两行玩家提示并重新构建 MOD；后续应改为由
 Native Bridge 下发只读、带版本的撤离点快照，消除这处构建期副本。
+该聊天提示只覆盖兼容主点，不读取 current content，也不代表今日热点；多点开放状态、
+下一开放时间、有效收益倍率和风险提示以玩家门户地图为准。
 
 ## 随机安全复活
 

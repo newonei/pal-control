@@ -58,7 +58,14 @@ public sealed class AnnouncementStore
         Directory.CreateDirectory(dataDirectory);
         _eventPath = Path.Combine(dataDirectory, "announcement-events.jsonl");
         EnsureWritable();
-        LoadEvents();
+        using (ControlPlaneLog.BeginOperation(
+                   _logger,
+                   nameof(AnnouncementStore),
+                   "persistence.load",
+                   "announcement-events"))
+        {
+            LoadEvents();
+        }
     }
 
     public bool IsReady => _isReady;

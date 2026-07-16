@@ -9,8 +9,15 @@ try
 {
     await VerifyProvenArbitrageBlocksPublishAsync(testRoot);
     VerifyIndeterminatePathsAreExplicit();
+    VerifyAttestedBundleCraftingAndCrossCurrencyPath();
+    VerifyGraphCycleFailsClosed();
+    VerifyGraphStateLimitFailsClosed();
+    VerifyMultiInputTransformationMustBeActuallyReachable();
+    VerifyReferenceCostAndCategoryPolicyFailClosed();
+    VerifyMissingGraphEvidenceFailsClosed();
+    VerifyDynamicExtremaParticipateInGraphGuard();
     VerifyReproducibleSevenDaySimulation();
-    Console.WriteLine("PASS: economy balance guard and deterministic 100-player x 7-day simulation invariants hold.");
+    Console.WriteLine("PASS: direct and attested graph balance guards cover bundle splitting, crafting, cross-currency paths, cycles, state limits, category policy, missing evidence, and deterministic 100-player x 7-day simulation invariants.");
 }
 finally
 {
@@ -44,9 +51,10 @@ static async Task VerifyProvenArbitrageBlocksPublishAsync(string directory)
     Assert(issue.Path == "/products/0/unitPrice", "The direct resale issue did not identify the SKU price path.");
     Assert(issue.Message.Contains("LOOP-PACK", StringComparison.Ordinal) &&
            issue.Message.Contains("ResaleItem x2", StringComparison.Ordinal) &&
-           issue.Message.Contains("ridge, 12500bp", StringComparison.Ordinal) &&
-           issue.Message.Contains("returns 24", StringComparison.Ordinal) &&
-           issue.Message.Contains("profit 4", StringComparison.Ordinal),
+           issue.Message.Contains("ridge, 15000bp", StringComparison.Ordinal) &&
+           issue.Message.Contains("returns 28", StringComparison.Ordinal) &&
+           issue.Message.Contains("costs 18", StringComparison.Ordinal) &&
+           issue.Message.Contains("profit 10", StringComparison.Ordinal),
         "The direct resale issue omitted its concrete SKU/item/quantity/maximum-zone proof path.");
 
     await using var store = new SqliteEconomyContentStore(directory, new FixedTimeProvider());
@@ -97,6 +105,216 @@ static void VerifyIndeterminatePathsAreExplicit()
     Assert(validation.Warnings.Any(warning => warning.Code == "INDIRECT_ARBITRAGE_NOT_EVALUATED" &&
                                               warning.Message.Contains("recipe graph", StringComparison.OrdinalIgnoreCase)),
         "The validator implied recipe/crafting paths were covered when no recipe graph exists.");
+    Assert(validation.Warnings.Any(warning => warning.Code == "BALANCE_POLICY_NOT_CONFIGURED"),
+        "Legacy content without a balance policy did not retain its explicit compatibility warning.");
+}
+
+static void VerifyAttestedBundleCraftingAndCrossCurrencyPath()
+{
+    var definition = Definition(
+        new ContentProductDefinition(
+            "BUNDLE-CRAFT", "Bundle craft", "Intentional cross-currency graph loop", "test", ["test"], null,
+            ExtractionCurrency.MarketCoin, 10,
+            [new ContentItemGrant("Wrapper", 1), new ContentItemGrant("Catalyst", 1)],
+            5, null, true, null, null),
+        new ContentResourceDefinition(
+            "ResaleItem", "Resale item", "test", ["test"], ExtractionCurrency.SeasonVoucher,
+            1, ["harbor", "ridge"], true));
+    definition = definition with
+    {
+        BalancePolicy = GraphPolicy(
+            [
+                Transform("unpack-wrapper", [new("Wrapper", 1)], [new("Intermediate", 1)]),
+                Transform("craft-resale", [new("Intermediate", 1), new("Catalyst", 1)], [new("ResaleItem", 60)])
+            ],
+            ["Wrapper", "Catalyst", "Intermediate", "ResaleItem"])
+    };
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Wrapper", "Catalyst", "Intermediate", "ResaleItem"));
+    var issue = validation.Errors.SingleOrDefault(error => error.Code == "PROVEN_REACHABLE_ARBITRAGE");
+
+    if (validation.Valid || issue is null)
+    {
+        throw new InvalidOperationException(
+            "An attested bundle -> craft -> cross-currency resale path was accepted.");
+    }
+    Assert(issue.Message.Contains("BUNDLE-CRAFT", StringComparison.Ordinal) &&
+           issue.Message.Contains("9 MarketCoin", StringComparison.Ordinal) &&
+           issue.Message.Contains("90 shadow units", StringComparison.Ordinal) &&
+           issue.Message.Contains("TRANSFORM unpack-wrapper", StringComparison.Ordinal) &&
+           issue.Message.Contains("TRANSFORM craft-resale", StringComparison.Ordinal) &&
+           issue.Message.Contains("120 shadow units", StringComparison.Ordinal) &&
+           issue.Message.Contains("SELL 120 SeasonVoucher", StringComparison.Ordinal),
+        "The graph rejection omitted its concrete bundle, transformation, currency or sale path.");
+    Assert(!validation.Warnings.Any(warning => warning.Code == "INDIRECT_ARBITRAGE_NOT_EVALUATED"),
+        "A complete attested graph was incorrectly reported as legacy direct-only analysis.");
+}
+
+static void VerifyGraphCycleFailsClosed()
+{
+    var definition = GraphDefinition(
+        "CYCLE-PACK",
+        1_000,
+        1,
+        [
+            Transform("forward", [new("Token", 1)], [new("ResaleItem", 1)]),
+            Transform("reverse", [new("ResaleItem", 1)], [new("Token", 1)])
+        ]);
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "ResaleItem"));
+    Assert(!validation.Valid && validation.Errors.Any(error => error.Code == "TRANSFORMATION_GRAPH_CYCLE"),
+        "A cyclic transformation graph was not blocked before publication.");
+}
+
+static void VerifyGraphStateLimitFailsClosed()
+{
+    var definition = GraphDefinition(
+        "STATE-PACK",
+        1_000,
+        100,
+        [Transform("one-at-a-time", [new("Token", 1)], [new("ResaleItem", 1)])],
+        stateLimit: 100);
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "ResaleItem"));
+    Assert(!validation.Valid && validation.Errors.Any(error =>
+            error.Code == "ARBITRAGE_ANALYSIS_STATE_LIMIT" &&
+            error.Message.Contains("STATE-PACK", StringComparison.Ordinal) &&
+            error.Message.Contains("100 reachable", StringComparison.Ordinal)),
+        "Exhaustive enumeration reaching its configured state limit did not fail closed.");
+}
+
+static void VerifyMultiInputTransformationMustBeActuallyReachable()
+{
+    var definition = GraphDefinition(
+        "MISSING-COINPUT",
+        1_000,
+        1,
+        [Transform("needs-unavailable-coinput",
+            [new("Token", 1), new("CoInput", 1)],
+            [new("ResaleItem", 1)])]);
+    definition = definition with
+    {
+        BalancePolicy = definition.BalancePolicy! with
+        {
+            Attestation = definition.BalancePolicy!.Attestation! with
+            {
+                CoveredItemIds = ["Token", "CoInput", "ResaleItem"]
+            }
+        }
+    };
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "CoInput", "ResaleItem"));
+    Assert(!validation.Valid &&
+           validation.Errors.Any(error =>
+               error.Code == "BALANCE_GRAPH_UNRECOVERABLE_REACHABLE_STATE" &&
+               error.Message.Contains("MISSING-COINPUT", StringComparison.Ordinal) &&
+               error.Message.Contains("Token", StringComparison.Ordinal)) &&
+           validation.Errors.Any(error => error.Code == "BALANCE_TRANSFORMATION_LAYER_NOT_REACHABLE"),
+        "A multi-input edge with an unavailable co-input was incorrectly treated as an actually reachable transformation path.");
+}
+
+static void VerifyReferenceCostAndCategoryPolicyFailClosed()
+{
+    var definition = GraphDefinition(
+        "CATEGORY-PACK",
+        1_000,
+        1,
+        [Transform("to-resource", [new("Token", 1)], [new("ResaleItem", 1)])],
+        resourceReferenceCost: 1,
+        targetRecoveryBasisPoints: 7_500,
+        riskBufferBasisPoints: 1_000);
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "ResaleItem"));
+    Assert(!validation.Valid && validation.Errors.Any(error =>
+            error.Code == "RESOURCE_RECOVERY_POLICY_EXCEEDED" &&
+            error.Message.Contains("ResaleItem", StringComparison.Ordinal) &&
+            error.Message.Contains("6500bp", StringComparison.Ordinal)),
+        "Per-ItemID reference cost and category risk buffer did not participate in publication validation.");
+}
+
+static void VerifyMissingGraphEvidenceFailsClosed()
+{
+    var definition = GraphDefinition(
+        "MISSING-EVIDENCE",
+        1_000,
+        1,
+        [Transform("to-resource", [new("Token", 1)], [new("ResaleItem", 1)])]);
+    definition = definition with
+    {
+        BalancePolicy = definition.BalancePolicy! with
+        {
+            ResourceShadowCosts = [],
+            Attestation = definition.BalancePolicy!.Attestation! with
+            {
+                ReachableGraphComplete = false,
+                CoveredItemIds = ["Token"]
+            }
+        }
+    };
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "ResaleItem"));
+    Assert(!validation.Valid &&
+           validation.Errors.Any(error => error.Code == "RESOURCE_SHADOW_COST_REQUIRED") &&
+           validation.Errors.Any(error => error.Code == "INCOMPLETE_BALANCE_GRAPH_ATTESTATION") &&
+           validation.Errors.Any(error => error.Code == "BALANCE_GRAPH_ITEM_NOT_ATTESTED"),
+        "Missing reference costs or incomplete graph attestation did not fail closed.");
+}
+
+static void VerifyDynamicExtremaParticipateInGraphGuard()
+{
+    var allWeek = Enum.GetValues<DayOfWeek>()
+        .Select(day => new ContentExchangeWindow(
+            day,
+            TimeOnly.MinValue,
+            TimeOnly.MaxValue,
+            60))
+        .ToArray();
+    var definition = Definition(
+        new ContentProductDefinition(
+            "DYNAMIC-LOOP", "Dynamic loop", "Only profitable across event extrema", "test", ["test"], null,
+            ExtractionCurrency.SeasonVoucher, 35,
+            [new ContentItemGrant("Token", 1)], 5, null, true, null, null),
+        new ContentResourceDefinition(
+            "ResaleItem", "Resale item", "test", ["test"], ExtractionCurrency.SeasonVoucher,
+            9, ["harbor", "ridge"], true));
+    definition = definition with
+    {
+        ExchangeZones = definition.ExchangeZones.Select(zone => zone with { OpenWindows = allWeek }).ToArray(),
+        DynamicEconomyPolicy = EconomyContentDefaults.CreateDynamicEconomyPolicy(["harbor", "ridge"]),
+        BalancePolicy = GraphPolicy(
+            [Transform("dynamic-conversion", [new("Token", 1)], [new("ResaleItem", 2)])],
+            ["Token", "ResaleItem"],
+            resourceReferenceCost: 100)
+    };
+
+    var validation = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition, Context("Token", "ResaleItem"));
+    var issue = validation.Errors.SingleOrDefault(error =>
+        error.Code == "PROVEN_REACHABLE_ARBITRAGE" &&
+        error.Message.Contains("DYNAMIC-LOOP", StringComparison.Ordinal));
+    var ridge = definition.ExchangeZones.Single(zone => zone.ZoneId == "ridge");
+    var maximumMultiplier = EconomyContentRuntimeService
+        .CalculateMaximumPossibleZoneYieldMultiplierBasisPoints(definition, ridge);
+    var minimumPrice = EconomyContentRuntimeService.CalculateMinimumPossibleEffectiveUnitPrice(
+        definition,
+        definition.Products.Single());
+    Assert(issue is not null &&
+           issue.Message.Contains("minimum event-adjusted price", StringComparison.OrdinalIgnoreCase) &&
+           issue.Message.Contains("costs 28", StringComparison.OrdinalIgnoreCase) &&
+           issue.Message.Contains("returns 32", StringComparison.OrdinalIgnoreCase) &&
+           maximumMultiplier == 17_250 && minimumPrice == 28,
+        "The attested graph omitted the cross-day maximum yield/hotspot and minimum discount/daily-price combination.");
+
+    var policyMissingDiscount = definition.DynamicEconomyPolicy! with
+    {
+        WorldEvents = definition.DynamicEconomyPolicy!.WorldEvents.Select(worldEvent =>
+            worldEvent with { ProductPriceMultiplierBasisPoints = 10_000 }).ToArray()
+    };
+    var missingModel = new EconomyContentDefinitionValidator(new FixedTimeProvider())
+        .Validate(definition with { DynamicEconomyPolicy = policyMissingDiscount }, Context("Token", "ResaleItem"));
+    Assert(!missingModel.Valid && missingModel.Errors.Any(error =>
+            error.Code == "WORLD_EVENT_DISCOUNT_REQUIRED"),
+        "A dynamic policy that omitted the discount side of the temporal arbitrage model did not fail closed.");
 }
 
 static void VerifyReproducibleSevenDaySimulation()
@@ -111,19 +329,43 @@ static void VerifyReproducibleSevenDaySimulation()
     Assert(firstJson == secondJson, "The same seed/content/options produced different seven-day reports.");
     Assert(first.PlayerCount == 100 && first.BusinessDays == 7,
         "The reproducible launch simulation is not 100 players x 7 business days.");
+    Assert(first.ScopeLimit.Contains("maximum timed-hotspot/yield-event", StringComparison.Ordinal) &&
+           first.ScopeLimit.Contains("minimum daily/event purchase-price", StringComparison.Ordinal),
+        "The 100x7 report does not attest its maximum-yield/minimum-discount stress combination.");
+    var policy = definition.DynamicEconomyPolicy
+        ?? throw new InvalidOperationException("The simulation fixture is missing dynamic policy.");
+    var contentHash = EconomyContentCanonicalizer.Hash(definition);
+    var simulatedKinds = Enumerable.Range(0, 7)
+        .SelectMany(day => EconomyDynamicEconomyRuntime.Create(
+            new EconomyContentVersion(
+                SchemeADefaultScenario.ContentVersionId,
+                definition.ServerId,
+                day + 1,
+                options.StartingBusinessDate.AddDays(day),
+                definition.Dependencies.RulesVersion,
+                contentHash,
+                definition,
+                Guid.Empty,
+                "simulation-test",
+                DateTimeOffset.MinValue),
+            EconomyDynamicEconomyRuntime.ResolveTimeZone(definition))!.WorldEvents)
+        .Select(worldEvent => worldEvent.Kind)
+        .ToHashSet();
+    Assert(policy.WorldEvents.Select(worldEvent => worldEvent.Kind).All(simulatedKinds.Contains),
+        "The seven-day deterministic evidence did not cover every configured economic event kind.");
     Assert(first.ContentVersionId == SchemeADefaultScenario.ContentVersionId &&
-           first.ContentHash == "16a8f0e7cdc8f56a7f3db9a0e4faf95fb76397e6d0e7af4006e3f152755aefdd",
+           first.ContentHash == "e7b6866df8c3085c180399e388e7a5e4ad37c02ef71058ed20c5baeddf1827e7",
         "The simulation report lost its immutable content-version evidence.");
 
     var voucher = first.Currencies.Single(currency => currency.Currency == ExtractionCurrency.SeasonVoucher);
-    Assert(voucher.Produced == 96_167 && voucher.Consumed == 24_110 &&
-           voucher.EndingBalanceMedian == 436 && voucher.EndingBalanceP95 == 2_016,
+    Assert(voucher.Produced == 137_292 && voucher.Consumed == 24_922 &&
+           voucher.EndingBalanceMedian == 692 && voucher.EndingBalanceP95 == 2_829,
         "The fixed-seed currency production/consumption/balance snapshot changed unexpectedly.");
-    Assert(first.ProductPurchases.Purchases == 275 &&
-           first.ProductPurchases.UniqueBuyerRateBasisPoints == 9_100,
+    Assert(first.ProductPurchases.Purchases == 324 &&
+           first.ProductPurchases.UniqueBuyerRateBasisPoints == 9_800,
         "The fixed-seed product purchase-rate snapshot changed unexpectedly.");
-    Assert(first.ResourceExchange.PrimaryCurrencyEarnings == 96_167 &&
-           first.ResourceExchange.PrimaryCurrencyEarningsPerPlayer == 961,
+    Assert(first.ResourceExchange.PrimaryCurrencyEarnings == 137_292 &&
+           first.ResourceExchange.PrimaryCurrencyEarningsPerPlayer == 1_372,
         "The fixed-seed resource-exchange earnings snapshot changed unexpectedly.");
     Assert(first.TargetAssessments.Count == EconomySimulationTargets.SchemeADefault.Count &&
            first.WithinDefaultTargets &&
@@ -152,6 +394,72 @@ static EconomyContentDefinition Definition(
     ],
     [],
     new ContentRotationPolicy("scheme-a-v1", 1, "balance-test-v1", [], 0, [], 0, ["ridge"], 1));
+
+static EconomyContentDefinition GraphDefinition(
+    string sku,
+    long price,
+    int tokenQuantity,
+    IReadOnlyList<ContentItemTransformation> transformations,
+    int stateLimit = 20_000,
+    long resourceReferenceCost = 4,
+    int targetRecoveryBasisPoints = 7_500,
+    int riskBufferBasisPoints = 1_000)
+{
+    var definition = Definition(
+        new ContentProductDefinition(
+            sku, sku, "Graph guard fixture", "test", ["test"], null,
+            ExtractionCurrency.SeasonVoucher, price,
+            [new ContentItemGrant("Token", tokenQuantity)],
+            5, null, true, null, null),
+        new ContentResourceDefinition(
+            "ResaleItem", "Resale item", "test", ["test"], ExtractionCurrency.SeasonVoucher,
+            1, ["harbor", "ridge"], true));
+    return definition with
+    {
+        BalancePolicy = GraphPolicy(
+            transformations,
+            ["Token", "ResaleItem"],
+            stateLimit,
+            resourceReferenceCost,
+            targetRecoveryBasisPoints,
+            riskBufferBasisPoints)
+    };
+}
+
+static ContentEconomyBalancePolicy GraphPolicy(
+    IReadOnlyList<ContentItemTransformation> transformations,
+    IReadOnlyList<string> coveredItemIds,
+    int stateLimit = 20_000,
+    long resourceReferenceCost = 4,
+    int targetRecoveryBasisPoints = 7_500,
+    int riskBufferBasisPoints = 1_000) => new(
+    "balance-test-shadow-v1",
+    [
+        new ContentCurrencyShadowRate(ExtractionCurrency.MarketCoin, 10),
+        new ContentCurrencyShadowRate(ExtractionCurrency.SeasonVoucher, 1)
+    ],
+    [new ContentResourceShadowCost("ResaleItem", ExtractionCurrency.SeasonVoucher, resourceReferenceCost)],
+    [new ContentResourceCategoryPolicy("test", targetRecoveryBasisPoints, riskBufferBasisPoints)],
+    transformations,
+    stateLimit,
+    new ContentEconomyGraphAttestation(
+        EconomyArbitrageGraphAnalyzer.OperationalShadowGraphEvidenceKind,
+        "catalog-v1",
+        "balance-test-reviewer",
+        DateTimeOffset.Parse("2026-07-13T00:00:00Z"),
+        ReachableGraphComplete: true,
+        coveredItemIds));
+
+static ContentItemTransformation Transform(
+    string id,
+    IReadOnlyList<ContentItemGrant> inputs,
+    IReadOnlyList<ContentItemGrant> outputs) => new(
+    id,
+    id,
+    inputs,
+    outputs,
+    Active: true,
+    EvidenceNote: "Operator-audited economic shadow edge for tests; not an actual Palworld recipe.");
 
 static EconomyContentValidationContext Context(params string[] knownItems) => new(
     new HashSet<string>(knownItems, StringComparer.OrdinalIgnoreCase),

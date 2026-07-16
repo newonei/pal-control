@@ -89,10 +89,16 @@ public sealed class PalworldResourceCatalogService
         ILogger<PalworldResourceCatalogService> logger)
     {
         _logger = logger;
-        _catalogPath = Path.Combine(
-            environment.ContentRootPath,
-            "Resources",
-            "palworld-resource-catalog.json");
+        var configuredCatalogPath = configuration["Palworld:ResourceCatalogPath"];
+        _catalogPath = string.IsNullOrWhiteSpace(configuredCatalogPath)
+            ? Path.Combine(
+                environment.ContentRootPath,
+                "Resources",
+                "palworld-resource-catalog.json")
+            : Path.GetFullPath(
+                Path.IsPathRooted(configuredCatalogPath)
+                    ? configuredCatalogPath
+                    : Path.Combine(environment.ContentRootPath, configuredCatalogPath));
 
         var installRoot = configuration["Palworld:InstallRoot"] ?? "../../../PalServer";
         var resolvedInstallRoot = Path.GetFullPath(
@@ -220,7 +226,10 @@ public sealed class PalworldResourceCatalogService
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            _logger.LogWarning(exception, "PalDefender template {FileName} could not be read.", file.Name);
+            _logger.LogSafeWarning(
+                exception,
+                "A PalDefender template could not be read ({TemplateFingerprint}).",
+                ControlPlaneLog.Fingerprint(file.Name));
             return InvalidTemplate(file, "invalid", "模板文件无法读取。");
         }
 
@@ -281,7 +290,10 @@ public sealed class PalworldResourceCatalogService
         }
         catch (JsonException exception)
         {
-            _logger.LogWarning(exception, "PalDefender template {FileName} is invalid JSON.", file.Name);
+            _logger.LogSafeWarning(
+                exception,
+                "A PalDefender template is invalid JSON ({TemplateFingerprint}).",
+                ControlPlaneLog.Fingerprint(file.Name));
             return InvalidTemplate(file, "invalid", "模板 JSON 无法解析。", sha256);
         }
     }

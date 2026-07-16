@@ -1213,7 +1213,9 @@ function Invoke-StepAction([string]$Step, [object]$Wrapper) {
                         -Method POST `
                         -Path "/extraction/admin/rollover/maintenance" `
                         -Body @{ maintenance = $true; reason = $Reason.Trim() } `
-                        -HighRisk $true | Out-Null
+                        -HighRisk $true `
+                        -IdempotencyKey (Get-DerivedIdempotencyKey `
+                            $stepKey "maintenance-enable") | Out-Null
                 }
                 catch {
                     $afterMaintenance = Get-RolloverReadiness

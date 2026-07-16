@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   CodeChallenge,
   getAuthenticationMode,
@@ -20,17 +20,33 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(initialMessage ?? null);
+  const [messageKind, setMessageKind] = useState<"status" | "error">(
+    initialMessage ? "error" : "status"
+  );
   const [authentication, setAuthentication] = useState<PlayerAuthenticationMode | null>(null);
+  const userIdRef = useRef<HTMLInputElement>(null);
+  const messageRef = useRef<HTMLDivElement>(null);
+
+  function showMessage(next: string | null, kind: "status" | "error" = "status") {
+    setMessageKind(kind);
+    setMessage(next);
+  }
 
   useEffect(() => {
     let active = true;
     getAuthenticationMode()
       .then((mode) => { if (active) setAuthentication(mode); })
       .catch((error) => {
-        if (active) setMessage(error instanceof Error ? error.message : "无法读取登录模式");
+        if (active) showMessage(error instanceof Error ? error.message : "无法读取登录模式", "error");
       });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!message || messageKind !== "error") return;
+    const frame = globalThis.requestAnimationFrame(() => messageRef.current?.focus());
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [message, messageKind]);
 
   const rawIdentifier = userId.trim().toLowerCase();
   const normalizedUserId = /^\d{17}$/.test(rawIdentifier)
@@ -46,17 +62,20 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
     const openIdPending = authentication?.steamOpenIdRequired === true &&
       authentication.pendingPlatformIdentity;
     if (!openIdPending && !validUserId) {
-      return setMessage("请输入完整的平台 UserId，Steam 玩家也可以直接填写 17 位 SteamID64。");
+      return showMessage(
+        "请输入完整的平台 UserId，Steam 玩家也可以直接填写 17 位 SteamID64。",
+        "error"
+      );
     }
     setBusy(true);
-    setMessage(null);
+    showMessage(null);
     try {
       const next = await requestCode(openIdPending ? null : normalizedUserId);
       setChallenge(next);
       setCode("");
-      setMessage("验证码已发送到游戏内，请保持角色在线并查看通知。");
+      showMessage("验证码已发送到游戏内，请保持角色在线并查看通知。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "验证码请求失败");
+      showMessage(error instanceof Error ? error.message : "验证码请求失败", "error");
     } finally {
       setBusy(false);
     }
@@ -70,13 +89,13 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
     event.preventDefault();
     if (!challenge || code.length !== 8) return;
     setBusy(true);
-    setMessage(null);
+    showMessage(null);
     try {
       const session = await verifyCode(challenge.challengeId, code);
       if (!session.authenticated || !session.csrfToken) throw new Error("服务器没有建立有效会话，请重新验证");
       onAuthenticated(session);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "验证码验证失败");
+      showMessage(error instanceof Error ? error.message : "验证码验证失败", "error");
     } finally {
       setBusy(false);
     }
@@ -118,6 +137,7 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
                 <>
                   <label htmlFor="platform-user-id">平台 UserId / SteamID64</label>
                   <input
+                    ref={userIdRef}
                     id="platform-user-id"
                     value={userId}
                     onChange={(event) => setUserId(event.target.value)}
@@ -126,7 +146,8 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
                     spellCheck={false}
                     maxLength={69}
                     required
-                    aria-describedby="user-id-help"
+                    aria-describedby={`user-id-help${message ? " login-status" : ""}`}
+                    aria-invalid={messageKind === "error" && message ? true : undefined}
                   />
                   <small id="user-id-help">可信好友服 fallback：验证码证明你控制当前在线角色，但不等同于 Steam 网站身份验证。</small>
                 </>
@@ -145,7 +166,11 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
             <div className="challenge-user">
               <span>正在验证</span>
               <strong>{authentication?.steamOpenIdRequired ? "Steam 身份 + 当前周角色" : normalizedUserId}</strong>
-              <button type="button" className="text-button" onClick={() => setChallenge(null)}>更换账号</button>
+              <button type="button" className="text-button" onClick={() => {
+                setChallenge(null);
+                showMessage(null);
+                globalThis.requestAnimationFrame(() => userIdRef.current?.focus());
+              }}>更换账号</button>
             </div>
             <label htmlFor="verify-code">8 位游戏内验证码</label>
             <input
@@ -160,15 +185,25 @@ export function Login({ initialMessage, onAuthenticated }: Props) {
               maxLength={8}
               autoFocus
               required
+              aria-describedby={`verify-code-expiry${message ? " login-status" : ""}`}
+              aria-invalid={messageKind === "error" && message ? true : undefined}
             />
-            <small>有效期至 {new Date(challenge.expiresAt).toLocaleTimeString("zh-CN")}</small>
+            <small id="verify-code-expiry">有效期至 {new Date(challenge.expiresAt).toLocaleTimeString("zh-CN")}</small>
             <button className="primary full" disabled={busy || code.length !== 8} type="submit">
               {busy ? "正在验证…" : "进入玩家商城"}
             </button>
           </form>
         )}
 
-        <div className="status-line" role="status" aria-live="polite">{message}</div>
+        <div
+          id="login-status"
+          className={`status-line ${messageKind}`}
+          role={messageKind === "error" ? "alert" : "status"}
+          aria-live={messageKind === "error" ? "assertive" : "polite"}
+          aria-atomic="true"
+          ref={messageRef}
+          tabIndex={messageKind === "error" && message ? -1 : undefined}
+        >{message}</div>
         <p className="security-note">安全提示：不要把游戏内验证码发送给其他人。</p>
       </section>
     </main>

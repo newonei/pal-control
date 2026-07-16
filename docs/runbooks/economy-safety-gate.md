@@ -54,6 +54,7 @@ $headers = @{
   "X-Pal-Admin-Key"    = $env:PAL_CONTROL_ADMIN_KEY
   "X-Pal-Admin-Totp"   = Read-Host "TOTP"
   "X-Pal-Admin-Reason" = "PalDefender version incident"
+  "Idempotency-Key"    = [guid]::NewGuid().ToString("D")
 }
 $body = @{
   writesEnabled = $false
@@ -64,7 +65,7 @@ Invoke-RestMethod `
   -Method Put -Headers $headers -ContentType "application/json" -Body $body
 ```
 
-恢复时把 `writesEnabled` 改为 `true`。资源兑换使用路径 `resource-exchange`。权威状态会原子写入 `ExtractionMode:Persistence:DataDirectory/extraction-commerce.db` 的 `economy_gate_state` 表；旧版 `economy-safety-gate.json` 只会被一次性迁移，之后不再作为权威来源。关闭操作会先阻止新写入，再等待已准入操作排空，重启后状态不会丢失。
+恢复时把 `writesEnabled` 改为 `true` 并生成新的 `Idempotency-Key`。同一逻辑请求超时或响应丢失时必须复用原 key；SQLite `admin_operation_keys` 会把 key、请求 hash 与认证主体跨重启绑定，同键不同目标、作用域或操作者返回 `ADMIN_IDEMPOTENCY_CONFLICT`。资源兑换使用路径 `resource-exchange`。权威状态会原子写入 `ExtractionMode:Persistence:DataDirectory/extraction-commerce.db` 的 `economy_gate_state` 表；旧版 `economy-safety-gate.json` 只会被一次性迁移，之后不再作为权威来源。关闭操作会先阻止新写入，再等待已准入操作排空，重启后状态不会丢失。
 
 ## 生产配置
 

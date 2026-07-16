@@ -30,7 +30,14 @@ public sealed class InGameNotificationStore
         Directory.CreateDirectory(dataDirectory);
         _eventPath = Path.Combine(dataDirectory, "in-game-notification-events.jsonl");
         EnsureWritable();
-        LoadEvents();
+        using (ControlPlaneLog.BeginOperation(
+                   _logger,
+                   nameof(InGameNotificationStore),
+                   "persistence.load",
+                   "in-game-notification-events"))
+        {
+            LoadEvents();
+        }
     }
 
     public bool IsReady => _isReady;

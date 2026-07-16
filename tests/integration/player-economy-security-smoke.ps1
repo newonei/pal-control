@@ -222,6 +222,7 @@ function Admin-Headers([string] $reason) {
         "X-Pal-Admin-Key" = $script:adminKey
         "X-Pal-Admin-Totp" = Get-TestTotp
         "X-Pal-Admin-Reason" = $reason
+        "Idempotency-Key" = "admin-operation-$([guid]::NewGuid().ToString('N'))"
     }
 }
 
@@ -385,7 +386,11 @@ try {
         "--Palworld:OfficialRestApi:BaseUrl=$script:fakeBase/v1/api/",
         "--Palworld:OfficialRestApi:Username=admin",
         "--Palworld:OfficialRestApi:Password=test-password",
-        "--Palworld:OfficialRestApi:TimeoutSeconds=2",
+        # This black-box suite performs two API generations, content publication,
+        # delivery and settlement under the unified test runner's build load.
+        # Keep the fake dependency timeout above short scheduler stalls; the
+        # production fail-closed world check itself is unchanged.
+        "--Palworld:OfficialRestApi:TimeoutSeconds=5",
         "--Palworld:PalDefenderRestApi:Enabled=true",
         "--Palworld:PalDefenderRestApi:BaseUrl=$script:fakeBase/v1/pdapi/",
         "--Palworld:PalDefenderRestApi:Token=integration-pd-token",
@@ -431,12 +436,29 @@ try {
         "--ExtractionMode:ExtractionZones:0:MapX=0",
         "--ExtractionMode:ExtractionZones:0:MapY=0",
         "--ExtractionMode:ExtractionZones:0:Radius=1000",
+        # The production defaults intentionally contain two daily-rotated zones.
+        # Pin both test candidates to the fake players' authoritative map
+        # position so the date-selected zone cannot make this identity/security
+        # smoke depend on the wall-clock rotation.
+        "--ExtractionMode:ExtractionZones:1:Id=portal-e2e-zone-secondary",
+        "--ExtractionMode:ExtractionZones:1:DisplayName=Portal E2E Zone Secondary",
+        "--ExtractionMode:ExtractionZones:1:RouteHint=Remain near the test origin.",
+        "--ExtractionMode:ExtractionZones:1:MapX=0",
+        "--ExtractionMode:ExtractionZones:1:MapY=0",
+        "--ExtractionMode:ExtractionZones:1:Radius=1000",
         "--PlayerPortal:Enabled=true",
         "--PlayerPortal:PublicSteam=false",
         "--PlayerPortal:CookieSecure=false",
         "--PlayerPortal:AllowedOrigins:0=$script:playerOrigin",
+        # This case deliberately fans out 100 authenticated map reads to prove
+        # an unchanged content version no longer reacquires the SQLite writer.
+        # Raise only the isolated test host limit; the production default stays
+        # at its conservative value and is covered by the regular rate tests.
+        "--PlayerPortal:ConcurrentRequestLimit=128",
         "--PlayerPortal:UserCooldownSeconds=1",
         "--PlayerPortal:IpCooldownSeconds=1",
+        "--TeamEconomy:Enabled=true",
+        "--TeamEconomy:InvitePepper=team-economy-smoke-pepper-value-with-more-than-32-characters",
         "--SaveManagement:BackupRoot=$gameBackupRoot",
         "--SaveManagement:RequireRunningProcess=false",
         "--SaveManagement:MinimumFreeSpaceBytes=16777216"
@@ -563,6 +585,102 @@ try {
     $bobOverviewResponse = Invoke-TestRequest $bobClient "GET" `
         "$script:apiBase/api/v1/player/me/overview"
     Assert-Status $bobOverviewResponse 200 "Bob bound economy overview"
+
+    # Once-per-process projection verification must not turn every map poll
+    # into a SQLite writer. Start all reads before awaiting any response so a
+    # regression is exposed as busy/timeout/5xx under realistic fan-out.
+    $mapTasks = @(1..100 | ForEach-Object {
+        $aliceClient.GetAsync(
+            "$script:apiBase/api/v1/player/me/extraction-zones")
+    })
+    foreach ($mapTask in $mapTasks) {
+        $mapResponse = $mapTask.GetAwaiter().GetResult()
+        try {
+            if ([int]$mapResponse.StatusCode -ne 200) {
+                $mapBody = $mapResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                throw "Concurrent player map read returned HTTP $([int]$mapResponse.StatusCode): $mapBody"
+            }
+        }
+        finally {
+            $mapResponse.Dispose()
+        }
+    }
+
+    # These routes are mapped below the operator-protected /api/v1 group, but
+    # must authenticate with only the player session. Never attach an admin
+    # credential here: this is the production-policy black-box regression for
+    # the explicit player route boundary.
+    Assert-ErrorCode (
+        Invoke-TestRequest $anonymousClient "GET" `
+            "$script:apiBase/api/v1/player/me/notifications") `
+        401 "PLAYER_SESSION_REQUIRED" "anonymous player notification feed"
+    $notificationFeedResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/notifications"
+    Assert-Status $notificationFeedResponse 200 "player-only notification feed"
+    $notificationFeed = Convert-ResponseJson $notificationFeedResponse `
+        "player-only notification feed"
+    if ($null -eq $notificationFeed.items -or $null -eq $notificationFeed.unreadCount) {
+        throw "Player notification feed omitted its stable schema: $($notificationFeedResponse.Text)"
+    }
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "GET" `
+            "$script:apiBase/api/v1/player/me/notifications?accountId=00000000-0000-0000-0000-000000000001") `
+        400 "PLAYER_IDENTITY_OVERRIDE_FORBIDDEN" `
+        "player notification identity override"
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/notifications/read-all" $null @{
+                Origin = $script:playerOrigin
+            }) `
+        403 "CSRF_TOKEN_INVALID" "player notification missing CSRF"
+    $readAllNotifications = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/notifications/read-all" $null @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+        }
+    Assert-Status $readAllNotifications 200 "player-only notification read-all"
+
+    Assert-ErrorCode (
+        Invoke-TestRequest $anonymousClient "GET" `
+            "$script:apiBase/api/v1/player/me/team-economy") `
+        401 "PLAYER_SESSION_REQUIRED" "anonymous team economy dashboard"
+    $emptyTeamResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/team-economy"
+    Assert-Status $emptyTeamResponse 200 "player-only team economy dashboard"
+    $emptyTeam = Convert-ResponseJson $emptyTeamResponse `
+        "player-only team economy dashboard"
+    if ($emptyTeam.enabled -ne $true -or $emptyTeam.hasTeam -ne $false) {
+        throw "Team economy did not return the enabled no-team state: $($emptyTeamResponse.Text)"
+    }
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/team-economy/teams" `
+            '{"name":"Player Boundary Team"}' @{
+                Origin = $script:playerOrigin
+                "Idempotency-Key" = "team-player-boundary-missing-csrf"
+            }) `
+        403 "CSRF_TOKEN_INVALID" "team economy missing CSRF"
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/team-economy/teams" `
+            '{"name":"Player Boundary Team","accountId":"00000000-0000-0000-0000-000000000001"}' @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = "team-player-boundary-identity-override"
+            }) `
+        400 "TEAM_IDENTITY_OVERRIDE_FORBIDDEN" "team economy identity override"
+    $createdTeamResponse = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/team-economy/teams" `
+        '{"name":"Player Boundary Team"}' @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+            "Idempotency-Key" = "team-player-boundary-create-0001"
+        }
+    Assert-Status $createdTeamResponse 200 "player-only team creation"
+    $createdTeam = Convert-ResponseJson $createdTeamResponse "player-only team creation"
+    if ($createdTeam.name -ne "Player Boundary Team" -or $createdTeam.isOwner -ne $true) {
+        throw "Player-only team creation returned an invalid result: $($createdTeamResponse.Text)"
+    }
 
     # Read-only overview deliberately does not require the player online and
     # therefore does not create a current-world PlayerUID binding. A quote is
@@ -704,6 +822,87 @@ try {
         throw "The resource-exchange quote did not contain positive whitelist value."
     }
 
+    $firstQuotedItem = @($quote.items)[0]
+    $validSelectionBody = @{
+        sourceRevision = [long]$quote.revision
+        items = @(@{
+            itemId = [string]$firstQuotedItem.itemId
+            quantity = 1
+        })
+    } | ConvertTo-Json -Depth 10 -Compress
+    $bobSelect = Invoke-TestRequest $bobClient "POST" `
+        "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/select" `
+        $validSelectionBody @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $bobCsrf
+            "Idempotency-Key" = "bob-idor-select-0001"
+        }
+    Assert-ErrorCode $bobSelect 403 "EXTRACTION_RUN_OWNER_MISMATCH" `
+        "cross-player selective-sale IDOR"
+
+    $identityOverrideBody = @{
+        sourceRevision = [long]$quote.revision
+        userId = "steam_222"
+        items = @(@{
+            itemId = [string]$firstQuotedItem.itemId
+            quantity = 1
+        })
+    } | ConvertTo-Json -Depth 10 -Compress
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/select" `
+            $identityOverrideBody @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = "alice-select-identity-override-0001"
+            }) `
+        400 "PLAYER_IDENTITY_OVERRIDE_FORBIDDEN" "selective-sale body identity override"
+
+    $rejectedSelections = @(
+        @{
+            Name = "empty"
+            Code = "EXTRACTION_SELECTION_EMPTY"
+            Items = @()
+        },
+        @{
+            Name = "duplicate"
+            Code = "EXTRACTION_SELECTION_DUPLICATE_ITEM"
+            Items = @(
+                @{ itemId = [string]$firstQuotedItem.itemId; quantity = 1 },
+                @{ itemId = ([string]$firstQuotedItem.itemId).ToLowerInvariant(); quantity = 1 }
+            )
+        },
+        @{
+            Name = "unknown"
+            Code = "EXTRACTION_SELECTION_ITEM_UNKNOWN"
+            Items = @(@{ itemId = "UnknownItem"; quantity = 1 })
+        },
+        @{
+            Name = "overqty"
+            Code = "EXTRACTION_SELECTION_OVER_QUANTITY"
+            Items = @(@{
+                itemId = [string]$firstQuotedItem.itemId
+                quantity = [int]$firstQuotedItem.quantity + 1
+            })
+        }
+    )
+    foreach ($rejectedSelection in $rejectedSelections) {
+        $body = @{
+            sourceRevision = [long]$quote.revision
+            items = $rejectedSelection.Items
+        } | ConvertTo-Json -Depth 10 -Compress
+        Assert-ErrorCode (
+            Invoke-TestRequest $aliceClient "POST" `
+                "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/select" `
+                $body @{
+                    Origin = $script:playerOrigin
+                    "X-CSRF-Token" = $aliceCsrf
+                    "Idempotency-Key" = "alice-select-reject-$($rejectedSelection.Name)-0001"
+                }) `
+            $(if ($rejectedSelection.Name -in @("empty", "duplicate")) { 400 } else { 422 }) `
+            $rejectedSelection.Code "rejected $($rejectedSelection.Name) selection"
+    }
+
     $bobSettle = Invoke-TestRequest $bobClient "POST" `
         "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/settle" $null @{
             Origin = $script:playerOrigin
@@ -713,12 +912,268 @@ try {
     Assert-ErrorCode $bobSettle 403 "EXTRACTION_RUN_SCOPE_MISMATCH" `
         "cross-player settlement IDOR"
 
+    # A quote is immutable evidence from content A. Publish content B by the
+    # normal maintenance-gated atomic pointer switch, then prove that settling
+    # A fails before any inventory dispatch or durable economy mutation.
+    $beforeContentSwitchOverviewResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/overview"
+    Assert-Status $beforeContentSwitchOverviewResponse 200 `
+        "pre-content-switch overview"
+    $beforeContentSwitchOverview = Convert-ResponseJson `
+        $beforeContentSwitchOverviewResponse "pre-content-switch overview"
+    $beforeContentSwitchLedgerResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/ledger"
+    Assert-Status $beforeContentSwitchLedgerResponse 200 `
+        "pre-content-switch ledger"
+    $beforeContentSwitchLedger = Convert-ResponseJson `
+        $beforeContentSwitchLedgerResponse "pre-content-switch ledger"
+    $beforeContentSwitchRunsResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/runs"
+    Assert-Status $beforeContentSwitchRunsResponse 200 `
+        "pre-content-switch runs"
+    $beforeContentSwitchRuns = Convert-ResponseJson `
+        $beforeContentSwitchRunsResponse "pre-content-switch runs"
+    $beforeContentSwitchState = Get-FakeState
+    $beforeContentSwitchInventory = [long](Get-ObjectProperty (
+        Get-ObjectProperty $beforeContentSwitchState.pdInventories "steam_111") "Leather")
+    $beforeEvidenceResponse = Invoke-TestRequest $script:adminClient "GET" `
+        "$script:apiBase/api/v1/extraction/admin/operations/runs/$($quote.runId)/evidence" `
+        $null (Admin-Headers "capture quote A evidence before content switch")
+    Assert-Status $beforeEvidenceResponse 200 "pre-content-switch run evidence"
+    $beforeEvidence = Convert-ResponseJson $beforeEvidenceResponse `
+        "pre-content-switch run evidence"
+    if ([string]$beforeEvidence.run.state -ne "Quoted" -or
+        [string]$beforeEvidence.run.contentVersionId -ne [string]$catalog.contentVersionId -or
+        $null -ne $beforeEvidence.settlement.settlementIdempotencyKey -or
+        $null -ne $beforeEvidence.settlement.settlementRequestHash -or
+        [int]$beforeEvidence.settlement.attemptCount -ne 0) {
+        throw "Quote A was not pristine before the content switch: $($beforeEvidenceResponse.Text)"
+    }
+
+    $currentContentResponse = Invoke-TestRequest $script:adminClient "GET" `
+        "$script:apiBase/api/v1/servers/local/economy-content/current" $null `
+        (Admin-Headers "read content A for stale quote test")
+    Assert-Status $currentContentResponse 200 "read current content A"
+    $currentContent = Convert-ResponseJson $currentContentResponse "read current content A"
+    if ([string]$currentContent.version.versionId -ne [string]$beforeEvidence.run.contentVersionId) {
+        throw "Quote A did not bind the current content pointer before publication."
+    }
+    $currentContent.version.definition.displayName =
+        ([string]$currentContent.version.definition.displayName) + " / black-box content B"
+    $draftBody = @{
+        name = "black-box quote invalidation B"
+        basedOnVersionId = [string]$currentContent.version.versionId
+        definition = $currentContent.version.definition
+    } | ConvertTo-Json -Depth 100 -Compress
+    $draftResponse = Invoke-TestRequest $script:adminClient "POST" `
+        "$script:apiBase/api/v1/servers/local/economy-content/drafts" $draftBody `
+        (Admin-Headers "create content B for stale quote test")
+    Assert-Status $draftResponse 201 "create content B draft"
+    $draft = Convert-ResponseJson $draftResponse "create content B draft"
+
+    Set-Maintenance $true "atomically switch quote test content A to B"
+    try {
+        $publishHeaders = Admin-Headers "publish content B for stale quote test"
+        $publishHeaders["If-Match"] = [string]$draft.revision
+        $publishHeaders["Idempotency-Key"] = "quote-content-switch-publish-0001"
+        $publishBody = @{
+            businessDate = [string]$currentContent.version.businessDate
+            reason = "Prove stale quote rejection before inventory dispatch"
+            confirmation = "PUBLISH ECONOMY CONTENT"
+        } | ConvertTo-Json -Compress
+        $publishResponse = Invoke-TestRequest $script:adminClient "POST" `
+            "$script:apiBase/api/v1/servers/local/economy-content/drafts/$($draft.draftId)/publish" `
+            $publishBody $publishHeaders
+        Assert-Status $publishResponse 200 "publish content B"
+        $publishedContent = Convert-ResponseJson $publishResponse "publish content B"
+        if ([string]$publishedContent.pointer.versionId -eq [string]$beforeEvidence.run.contentVersionId -or
+            [string]$publishedContent.pointer.versionId -ne [string]$publishedContent.version.versionId) {
+            throw "Content B did not atomically replace current pointer A: $($publishResponse.Text)"
+        }
+    }
+    finally {
+        Set-Maintenance $false "content B pointer switch complete"
+    }
+
+    $staleSelectBody = @{
+        sourceRevision = [long]$quote.revision
+        items = @(@{
+            itemId = [string]@($quote.items)[0].itemId
+            quantity = 1
+        })
+    } | ConvertTo-Json -Depth 10 -Compress
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/select" `
+            $staleSelectBody @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = "alice-stale-content-select-0001"
+            }) `
+        409 "QUOTE_CONTENT_CHANGED" "content A selective quote after pointer switch"
+
+    $staleSettleResponse = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/settle" $null @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+            "Idempotency-Key" = "alice-stale-content-settle-0001"
+        }
+    Assert-ErrorCode $staleSettleResponse 409 "QUOTE_CONTENT_CHANGED" `
+        "content A quote after atomic pointer switch to B"
+
+    $afterContentSwitchOverviewResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/overview"
+    Assert-Status $afterContentSwitchOverviewResponse 200 `
+        "post-stale-quote overview"
+    $afterContentSwitchOverview = Convert-ResponseJson `
+        $afterContentSwitchOverviewResponse "post-stale-quote overview"
+    $afterContentSwitchLedgerResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/ledger"
+    Assert-Status $afterContentSwitchLedgerResponse 200 `
+        "post-stale-quote ledger"
+    $afterContentSwitchLedger = Convert-ResponseJson `
+        $afterContentSwitchLedgerResponse "post-stale-quote ledger"
+    $afterContentSwitchRunsResponse = Invoke-TestRequest $aliceClient "GET" `
+        "$script:apiBase/api/v1/player/me/runs"
+    Assert-Status $afterContentSwitchRunsResponse 200 `
+        "post-stale-quote runs"
+    $afterContentSwitchRuns = Convert-ResponseJson `
+        $afterContentSwitchRunsResponse "post-stale-quote runs"
+    $afterContentSwitchState = Get-FakeState
+    $afterContentSwitchInventory = [long](Get-ObjectProperty (
+        Get-ObjectProperty $afterContentSwitchState.pdInventories "steam_111") "Leather")
+    $afterEvidenceResponse = Invoke-TestRequest $script:adminClient "GET" `
+        "$script:apiBase/api/v1/extraction/admin/operations/runs/$($quote.runId)/evidence" `
+        $null (Admin-Headers "verify stale quote has no side effects")
+    Assert-Status $afterEvidenceResponse 200 "post-stale-quote run evidence"
+    $afterEvidence = Convert-ResponseJson $afterEvidenceResponse `
+        "post-stale-quote run evidence"
+
+    if ([int]$afterContentSwitchState.rconDeleteCount -ne
+            [int]$beforeContentSwitchState.rconDeleteCount -or
+        $afterContentSwitchInventory -ne $beforeContentSwitchInventory) {
+        throw "A stale content quote dispatched inventory deletion or changed Leather: " +
+            "delete $($beforeContentSwitchState.rconDeleteCount)->$($afterContentSwitchState.rconDeleteCount), " +
+            "Leather $beforeContentSwitchInventory->$afterContentSwitchInventory."
+    }
+    if ([long]$afterContentSwitchOverview.balances.weeklyTicket -ne
+            [long]$beforeContentSwitchOverview.balances.weeklyTicket -or
+        [long]$afterContentSwitchOverview.balances.merchantCoin -ne
+            [long]$beforeContentSwitchOverview.balances.merchantCoin -or
+        ($afterContentSwitchLedger | ConvertTo-Json -Depth 20 -Compress) -ne
+            ($beforeContentSwitchLedger | ConvertTo-Json -Depth 20 -Compress)) {
+        throw "A stale content quote changed the wallet or ledger."
+    }
+    $beforePlayerRun = @($beforeContentSwitchRuns.items | Where-Object {
+        [string]$_.runId -eq [string]$quote.runId
+    }) | Select-Object -First 1
+    $afterPlayerRun = @($afterContentSwitchRuns.items | Where-Object {
+        [string]$_.runId -eq [string]$quote.runId
+    }) | Select-Object -First 1
+    if ($null -eq $beforePlayerRun -or $null -eq $afterPlayerRun -or
+        [string]$beforePlayerRun.internalState -ne "Quoted" -or
+        [string]$afterPlayerRun.internalState -ne "Quoted" -or
+        [long]$afterEvidence.run.revision -ne [long]$beforeEvidence.run.revision -or
+        [string]$afterEvidence.run.updatedAt -ne [string]$beforeEvidence.run.updatedAt -or
+        [string]$afterEvidence.run.contentVersionId -ne [string]$beforeEvidence.run.contentVersionId -or
+        [string]$afterEvidence.run.contentHash -ne [string]$beforeEvidence.run.contentHash -or
+        $null -ne $afterEvidence.settlement.settlementIdempotencyKey -or
+        $null -ne $afterEvidence.settlement.settlementRequestHash -or
+        $null -ne $afterEvidence.settlement.nativeConsumeReceipt -or
+        [int]$afterEvidence.settlement.attemptCount -ne 0) {
+        throw "QUOTE_CONTENT_CHANGED mutated the quoted run or settlement evidence: $($afterEvidenceResponse.Text)"
+    }
+
+    # Continue the happy path only with a fresh quote carrying content B.
+    $freshQuoteResponse = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/runs/quote" $null @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+        }
+    Assert-Status $freshQuoteResponse 200 "fresh content B resource-exchange quote"
+    $quote = Convert-ResponseJson $freshQuoteResponse "fresh content B resource-exchange quote"
+    if ([long]$quote.totalValue -le 0 -or @($quote.items).Count -eq 0) {
+        throw "The fresh content B quote did not contain positive whitelist value."
+    }
+
+    $sourceQuote = $quote
+    $selectedSourceItem = @($sourceQuote.items | Where-Object {
+        [string]$_.itemId -eq "Bone"
+    }) | Select-Object -First 1
+    if ($null -eq $selectedSourceItem -or [int]$selectedSourceItem.quantity -lt 2) {
+        throw "The selective-sale HTTP fixture did not expose Bone x2."
+    }
+    $selectionKey = "alice-resource-selection-0001"
+    $selectionBody = @{
+        sourceRevision = [long]$sourceQuote.revision
+        items = @(@{ itemId = "bone"; quantity = 2 })
+    } | ConvertTo-Json -Depth 10 -Compress
+    $selectionResponse = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/runs/$($sourceQuote.runId)/select" `
+        $selectionBody @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+            "Idempotency-Key" = $selectionKey
+        }
+    Assert-Status $selectionResponse 200 "select Bone x2 child quote"
+    $selectedQuote = Convert-ResponseJson $selectionResponse "select Bone x2 child quote"
+    $expectedSelectedValue = 2L * [long]$selectedSourceItem.unitValue
+    if ($selectedQuote.selectionDerived -ne $true -or
+        [string]$selectedQuote.sourceQuoteRunId -ne [string]$sourceQuote.runId -or
+        [long]$selectedQuote.revision -ne 1 -or
+        @($selectedQuote.items).Count -ne 1 -or
+        [string]@($selectedQuote.items)[0].itemId -ne "Bone" -or
+        [int]@($selectedQuote.items)[0].quantity -ne 2 -or
+        [long]$selectedQuote.totalValue -ne $expectedSelectedValue) {
+        throw "Selected child quote did not contain exactly canonical Bone x2 / value $expectedSelectedValue`: $($selectionResponse.Text)"
+    }
+    for ($replayIndex = 0; $replayIndex -lt 20; $replayIndex++) {
+        $selectionReplay = Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/runs/$($sourceQuote.runId)/select" `
+            $selectionBody @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = $selectionKey
+            }
+        Assert-Status $selectionReplay 200 "selection replay $replayIndex"
+        $replayedSelection = Convert-ResponseJson $selectionReplay "selection replay $replayIndex"
+        if ([string]$replayedSelection.runId -ne [string]$selectedQuote.runId) {
+            throw "Selection replay $replayIndex created a different child."
+        }
+    }
+    $conflictingSelectionBody = @{
+        sourceRevision = [long]$sourceQuote.revision
+        items = @(@{ itemId = "Bone"; quantity = 1 })
+    } | ConvertTo-Json -Depth 10 -Compress
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/runs/$($sourceQuote.runId)/select" `
+            $conflictingSelectionBody @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = $selectionKey
+            }) `
+        409 "IDEMPOTENCY_CONFLICT" "same selection key with different quantity"
+    Assert-ErrorCode (
+        Invoke-TestRequest $aliceClient "POST" `
+            "$script:apiBase/api/v1/player/me/runs/$($sourceQuote.runId)/settle" $null @{
+                Origin = $script:playerOrigin
+                "X-CSRF-Token" = $aliceCsrf
+                "Idempotency-Key" = "cancelled-source-settle-0001"
+            }) `
+        409 "EXTRACTION_QUOTE_NOT_SETTLEABLE" "cancelled source cannot settle"
+    $quote = $selectedQuote
+
     $beforeSettleOverviewResponse = Invoke-TestRequest $aliceClient "GET" `
         "$script:apiBase/api/v1/player/me/overview"
     Assert-Status $beforeSettleOverviewResponse 200 "pre-settlement overview"
     $beforeSettleOverview = Convert-ResponseJson $beforeSettleOverviewResponse `
         "pre-settlement overview"
     $beforeSettleState = Get-FakeState
+    $beforeSettleLeather = [long](Get-ObjectProperty (
+        Get-ObjectProperty $beforeSettleState.pdInventories "steam_111") "Leather")
+    $beforeSettleBone = [long](Get-ObjectProperty (
+        Get-ObjectProperty $beforeSettleState.pdInventories "steam_111") "Bone")
     $settlementKey = "alice-resource-settle-0001"
     $settledResponse = Invoke-TestRequest $aliceClient "POST" `
         "$script:apiBase/api/v1/player/me/runs/$($quote.runId)/settle" $null @{
@@ -735,6 +1190,18 @@ try {
     if ([int]$afterSettleState.rconDeleteCount -ne
         ([int]$beforeSettleState.rconDeleteCount + 1)) {
         throw "The settled exchange did not issue exactly one fake RCON deletion."
+    }
+    $afterSettleLeather = [long](Get-ObjectProperty (
+        Get-ObjectProperty $afterSettleState.pdInventories "steam_111") "Leather")
+    $afterSettleBone = [long](Get-ObjectProperty (
+        Get-ObjectProperty $afterSettleState.pdInventories "steam_111") "Bone")
+    $lastDeleteCommand = [string]@($afterSettleState.rconCommands)[-1]
+    if ($afterSettleLeather -ne $beforeSettleLeather -or
+        $afterSettleBone -ne ($beforeSettleBone - 2) -or
+        $lastDeleteCommand -ne "delitems steam_111 Bone:2" -or
+        $lastDeleteCommand.IndexOf("Leather", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        throw "Selective settlement touched an unselected item or sent an inexact RCON command: " +
+            "Leather $beforeSettleLeather->$afterSettleLeather, Bone $beforeSettleBone->$afterSettleBone, command '$lastDeleteCommand'."
     }
     $afterSettleOverviewResponse = Invoke-TestRequest $aliceClient "GET" `
         "$script:apiBase/api/v1/player/me/overview"
@@ -765,6 +1232,84 @@ try {
             }) `
         409 "IDEMPOTENCY_CONFLICT" "conflicting settlement replay"
 
+    # Publish an intentionally all-closed schedule and prove the public quote
+    # endpoint fails closed with a machine-readable earliest next opening.
+    $contentBResponse = Invoke-TestRequest $script:adminClient "GET" `
+        "$script:apiBase/api/v1/servers/local/economy-content/current" $null `
+        (Admin-Headers "read content B for all-closed schedule test")
+    Assert-Status $contentBResponse 200 "read current content B"
+    $contentB = Convert-ResponseJson $contentBResponse "read current content B"
+    $shanghai = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+    $nowInShanghai = [TimeZoneInfo]::ConvertTime([DateTimeOffset]::UtcNow, $shanghai)
+    if ($nowInShanghai.TimeOfDay -lt [TimeSpan]::FromHours(22)) {
+        $futureWindow = $nowInShanghai.AddHours(1)
+        $closedWindowOpensAt = $futureWindow.TimeOfDay
+        $closedWindowClosesAt = $futureWindow.AddMinutes(30).TimeOfDay
+    }
+    else {
+        # Keep the window non-wrapping. Today's 00:30 window has already
+        # passed, so the next matching weekday remains safely in the future.
+        $closedWindowOpensAt = [TimeSpan]::FromMinutes(30)
+        $closedWindowClosesAt = [TimeSpan]::FromHours(1)
+    }
+    $dailyClosedWindows = @(0..6 | ForEach-Object {
+        @{
+            dayOfWeek = $_
+            opensAt = $closedWindowOpensAt.ToString("hh\:mm\:ss")
+            closesAt = $closedWindowClosesAt.ToString("hh\:mm\:ss")
+            graceSeconds = 60
+        }
+    })
+    foreach ($zone in @($contentB.version.definition.exchangeZones)) {
+        $zone.openWindows = $dailyClosedWindows
+    }
+    $closedDraftBody = @{
+        name = "black-box all zones closed"
+        basedOnVersionId = [string]$contentB.version.versionId
+        definition = $contentB.version.definition
+    } | ConvertTo-Json -Depth 100 -Compress
+    $closedDraftResponse = Invoke-TestRequest $script:adminClient "POST" `
+        "$script:apiBase/api/v1/servers/local/economy-content/drafts" `
+        $closedDraftBody (Admin-Headers "create all-closed content draft")
+    Assert-Status $closedDraftResponse 201 "create all-closed content draft"
+    $closedDraft = Convert-ResponseJson $closedDraftResponse `
+        "create all-closed content draft"
+    Set-Maintenance $true "publish all-closed schedule test content"
+    try {
+        $closedPublishHeaders = Admin-Headers "publish all-closed schedule test content"
+        $closedPublishHeaders["If-Match"] = [string]$closedDraft.revision
+        $closedPublishHeaders["Idempotency-Key"] = "all-zones-closed-publish-0001"
+        $closedPublishBody = @{
+            businessDate = [string]$contentB.version.businessDate
+            reason = "Prove quote rejection and earliest next opening"
+            confirmation = "PUBLISH ECONOMY CONTENT"
+        } | ConvertTo-Json -Compress
+        $closedPublishResponse = Invoke-TestRequest $script:adminClient "POST" `
+            "$script:apiBase/api/v1/servers/local/economy-content/drafts/$($closedDraft.draftId)/publish" `
+            $closedPublishBody $closedPublishHeaders
+        Assert-Status $closedPublishResponse 200 "publish all-closed schedule"
+    }
+    finally {
+        Set-Maintenance $false "all-closed schedule test content published"
+    }
+    $closedQuoteResponse = Invoke-TestRequest $aliceClient "POST" `
+        "$script:apiBase/api/v1/player/me/runs/quote" $null @{
+            Origin = $script:playerOrigin
+            "X-CSRF-Token" = $aliceCsrf
+        }
+    Assert-ErrorCode $closedQuoteResponse 409 "EXTRACTION_ZONE_CLOSED" `
+        "all zones closed quote"
+    $closedQuoteError = Convert-ResponseJson $closedQuoteResponse `
+        "all zones closed quote"
+    $parsedNextOpen = [DateTimeOffset]::MinValue
+    if ([string]::IsNullOrWhiteSpace([string]$closedQuoteError.nextOpensAt) -or
+        -not [DateTimeOffset]::TryParse(
+            [string]$closedQuoteError.nextOpensAt,
+            [ref]$parsedNextOpen) -or
+        $parsedNextOpen -le [DateTimeOffset]::UtcNow) {
+        throw "All-closed quote did not return a future nextOpensAt: $($closedQuoteResponse.Text)"
+    }
+
     Assert-ErrorCode (
         Invoke-TestRequest $aliceClient "POST" `
             "$script:apiBase/api/v1/player/auth/logout" $null @{
@@ -786,6 +1331,9 @@ try {
         login = "in-game-code"
         originRejected = $true
         csrfRejected = $true
+        playerNotificationPolicyBoundaryVerified = $true
+        teamEconomyPolicyBoundaryVerified = $true
+        concurrentMapReads = 100
         identityOverrideRejected = $true
         crossPlayerOrderHidden = $true
         crossPlayerSettlementRejected = $true
@@ -795,6 +1343,10 @@ try {
         catalogContentVersion = $catalog.contentVersionId
         catalogEvidenceVerified = $true
         staleOfferRejected = $true
+        staleQuoteContentRejected = $true
+        staleQuoteNoInventoryDispatch = $true
+        staleQuoteNoWalletLedgerRunMutation = $true
+        allClosedQuoteRejectedWithNextOpen = $true
         orderId = $createdOrder.orderId
         deliveryState = $deliveredOrder.state
         settlementRunId = $quote.runId

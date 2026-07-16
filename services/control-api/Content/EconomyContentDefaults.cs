@@ -21,7 +21,8 @@ public static class EconomyContentDefaults
             10_000,
             Enum.GetValues<DayOfWeek>().Select(day =>
                 new ContentExchangeWindow(day, TimeOnly.MinValue, TimeOnly.MaxValue, 60)).ToArray(),
-            true)).ToArray();
+            true,
+            zone.RiskHint)).ToArray();
         var zoneIds = zones.Select(zone => zone.ZoneId).ToArray();
 
         var products = new[]
@@ -85,15 +86,27 @@ public static class EconomyContentDefaults
         };
         var activeResources = resources
             .Where(resource => names.ContainsKey(resource.Id))
-            .Select(resource => new ContentResourceDefinition(
-                resource.Id,
-                names[resource.Id],
-                resource.Category,
-                ["白名单", "方案A"],
-                ExtractionCurrency.SeasonVoucher,
-                resource.Value,
-                zoneIds,
-                true))
+            .Select(resource =>
+            {
+                var presentation = EconomyContentPresentation.DefaultResource(
+                    resource.Category,
+                    resource.Value);
+                return new ContentResourceDefinition(
+                    resource.Id,
+                    names[resource.Id],
+                    resource.Category,
+                    ["白名单", "方案A"],
+                    ExtractionCurrency.SeasonVoucher,
+                    resource.Value,
+                    zoneIds,
+                    true,
+                    presentation.IconKey,
+                    presentation.Rarity,
+                    presentation.Usage);
+            })
+            .ToArray();
+        var activeProducts = products
+            .Where(product => product.ItemGrants.All(grant => names.ContainsKey(grant.ItemId)))
             .ToArray();
 
         var tasks = new[]
@@ -124,6 +137,25 @@ public static class EconomyContentDefaults
             .Select(task => task.TaskKey)
             .ToArray();
 
+        var rotation = new ContentRotationPolicy(
+            EconomyContentRuntimeService.SupportedRulesVersion,
+            1,
+            "scheme-a-rotation-v1",
+            dailyTaskPool,
+            dailyTaskPool.Length,
+            weeklyTaskPool,
+            weeklyTaskPool.Length,
+            zoneIds,
+            Math.Min(1, zoneIds.Length),
+            12_000);
+        var balancePolicy = CreateBalancePolicy(
+            catalog.Revision,
+            activeProducts,
+            activeResources,
+            zones,
+            rotation);
+        var dynamicEconomyPolicy = CreateDynamicEconomyPolicy(zoneIds);
+
         return new EconomyContentDefinition(
             1,
             options.ServerId,
@@ -135,20 +167,171 @@ public static class EconomyContentDefaults
                 safety.ApprovedPalDefenderVersion),
             options.TimeZoneId,
             options.DailyRefreshHour,
-            products.Where(product => product.ItemGrants.All(grant => names.ContainsKey(grant.ItemId))).ToArray(),
+            activeProducts,
             activeResources,
             zones,
             activeTasks,
-            new ContentRotationPolicy(
-                EconomyContentRuntimeService.SupportedRulesVersion,
-                1,
-                "scheme-a-rotation-v1",
-                dailyTaskPool,
-                dailyTaskPool.Length,
-                weeklyTaskPool,
-                weeklyTaskPool.Length,
-                zoneIds,
-                Math.Min(1, zoneIds.Length)));
+            rotation,
+            balancePolicy,
+            dynamicEconomyPolicy);
+    }
+
+    public static ContentDynamicEconomyPolicy CreateDynamicEconomyPolicy(
+        IReadOnlyList<string> zoneIds)
+    {
+        var rules = zoneIds.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select((zoneId, index) => new ContentDynamicZoneRule(
+                zoneId,
+                index == 0 ? ContentZoneRiskLevel.Guarded : ContentZoneRiskLevel.Elevated))
+            .ToArray();
+        return new ContentDynamicEconomyPolicy(
+            "scheme-a-dynamic-economy-v1",
+            rules,
+            DailyOpenZoneCount: Math.Min(1, rules.Length),
+            DynamicOpenStartsAtMinute: 0,
+            DynamicOpenDurationMinutes: 1_440,
+            DynamicOpenGraceSeconds: 60,
+            TimedHotspotCount: Math.Min(1, rules.Length),
+            TimedHotspotStartsAtMinute: 8 * 60,
+            TimedHotspotDurationMinutes: 3 * 60,
+            TimedHotspotGraceSeconds: 60,
+            WorldEvents:
+            [
+                new ContentWorldEventDefinition(
+                    "resource-surge",
+                    "资源繁荣",
+                    ContentWorldEventKind.ResourceSurge,
+                    0,
+                    1_440,
+                    60,
+                    11_500,
+                    10_000),
+                new ContentWorldEventDefinition(
+                    "supply-relief",
+                    "战备补给",
+                    ContentWorldEventKind.SupplyRelief,
+                    0,
+                    1_440,
+                    60,
+                    10_000,
+                    9_000)
+            ],
+            DailyWorldEventCount: 1);
+    }
+
+    /// <summary>
+    /// Creates the repository-reviewed Scheme A economic shadow graph. These
+    /// edges are conservative operator valuation assumptions and are explicitly
+    /// not represented as actual Palworld crafting recipes.
+    /// </summary>
+    public static ContentEconomyBalancePolicy CreateBalancePolicy(
+        string catalogRevision,
+        IReadOnlyList<ContentProductDefinition> products,
+        IReadOnlyList<ContentResourceDefinition> resources,
+        IReadOnlyList<ContentExchangeZoneDefinition> zones,
+        ContentRotationPolicy rotation)
+    {
+        var activeResources = resources.Where(resource => resource.Active)
+            .OrderBy(resource => resource.ItemId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var activeResourceIds = activeResources.Select(resource => resource.ItemId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var activeZones = zones.Where(zone => zone.Active)
+            .ToDictionary(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase);
+        var provisionalDefinition = new EconomyContentDefinition(
+            1,
+            "balance-policy",
+            "balance-policy",
+            new EconomyContentDependencies(rotation.RulesVersion, catalogRevision, "balance", "balance"),
+            "UTC",
+            0,
+            products,
+            resources,
+            zones,
+            [],
+            rotation,
+            null,
+            CreateDynamicEconomyPolicy(zones.Select(zone => zone.ZoneId).ToArray()));
+        long MaximumSaleValue(ContentResourceDefinition resource)
+        {
+            var multiplier = resource.ExchangeZoneIds
+                .Where(activeZones.ContainsKey)
+                .Select(zoneId => activeZones[zoneId])
+                .Select(zone => EconomyContentRuntimeService
+                    .CalculateMaximumPossibleZoneYieldMultiplierBasisPoints(provisionalDefinition, zone))
+                .DefaultIfEmpty(10_000)
+                .Max();
+            return EconomyContentRuntimeService.CalculateEffectiveResourceUnitValue(
+                resource.UnitValue,
+                multiplier);
+        }
+
+        var saleValues = activeResources.ToDictionary(
+            resource => resource.ItemId,
+            MaximumSaleValue,
+            StringComparer.OrdinalIgnoreCase);
+        var terminalResource = activeResources
+            .OrderBy(resource => saleValues[resource.ItemId])
+            .ThenBy(resource => resource.ItemId, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        var transformations = new List<ContentItemTransformation>();
+        var edgeNumber = 0;
+        foreach (var product in products.Where(product => product.Active)
+                     .OrderBy(product => product.Sku, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var grant in product.ItemGrants
+                         .OrderBy(grant => grant.ItemId, StringComparer.OrdinalIgnoreCase))
+            {
+                if (terminalResource is null || activeResourceIds.Contains(grant.ItemId))
+                {
+                    continue;
+                }
+                edgeNumber++;
+                transformations.Add(new ContentItemTransformation(
+                    $"scheme-a-shadow-{edgeNumber:D4}",
+                    $"{product.Sku} / {grant.ItemId} 运营影子折算",
+                    [new ContentItemGrant(grant.ItemId, grant.Quantity)],
+                    [new ContentItemGrant(terminalResource.ItemId, 1)],
+                    Active: true,
+                    EvidenceNote:
+                    $"运营经济影子边，按授权目录 {catalogRevision} 保守估值；不是 Palworld 实际制作配方。"));
+            }
+        }
+
+        var coveredItemIds = activeResources.Select(resource => resource.ItemId)
+            .Concat(products.Where(product => product.Active)
+                .SelectMany(product => product.ItemGrants)
+                .Select(grant => grant.ItemId))
+            .Concat(transformations.SelectMany(transformation =>
+                transformation.Inputs.Concat(transformation.Outputs).Select(item => item.ItemId)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(itemId => itemId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new ContentEconomyBalancePolicy(
+            "scheme-a-balance-shadow-v1",
+            [
+                new ContentCurrencyShadowRate(ExtractionCurrency.MarketCoin, 10),
+                new ContentCurrencyShadowRate(ExtractionCurrency.SeasonVoucher, 1)
+            ],
+            activeResources.Select(resource => new ContentResourceShadowCost(
+                resource.ItemId,
+                ExtractionCurrency.SeasonVoucher,
+                checked(saleValues[resource.ItemId] * 2))).ToArray(),
+            activeResources.Select(resource => resource.Category)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(category => category, StringComparer.OrdinalIgnoreCase)
+                .Select(category => new ContentResourceCategoryPolicy(category, 7_500, 1_000))
+                .ToArray(),
+            transformations,
+            20_000,
+            new ContentEconomyGraphAttestation(
+                EconomyArbitrageGraphAnalyzer.OperationalShadowGraphEvidenceKind,
+                catalogRevision,
+                "repository-reviewed:scheme-a-shadow-policy-v1",
+                DateTimeOffset.Parse("2026-07-16T00:00:00Z"),
+                ReachableGraphComplete: true,
+                coveredItemIds));
     }
 
     private static ContentProductDefinition Product(
@@ -162,21 +345,28 @@ public static class EconomyContentDefaults
         long price,
         IReadOnlyList<(string ItemId, int Quantity)> grants,
         int? personalLimit,
-        long? globalStock = null) => new(
-        sku,
-        name,
-        description,
-        category,
-        tags,
-        featuredRank,
-        currency,
-        price,
-        grants.Select(grant => new ContentItemGrant(grant.ItemId, grant.Quantity)).ToArray(),
-        personalLimit,
-        globalStock,
-        true,
-        null,
-        null);
+        long? globalStock = null)
+    {
+        var presentation = EconomyContentPresentation.DefaultProduct(sku, category, description);
+        return new ContentProductDefinition(
+            sku,
+            name,
+            description,
+            category,
+            tags,
+            featuredRank,
+            currency,
+            price,
+            grants.Select(grant => new ContentItemGrant(grant.ItemId, grant.Quantity)).ToArray(),
+            personalLimit,
+            globalStock,
+            true,
+            null,
+            null,
+            presentation.IconKey,
+            presentation.Rarity,
+            presentation.Usage);
+    }
 
     private static ContentTaskDefinition Task(
         string key,

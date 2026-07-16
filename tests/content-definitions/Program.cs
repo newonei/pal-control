@@ -7,9 +7,11 @@ Directory.CreateDirectory(directory);
 try
 {
     VerifySchemeADefaults();
+    VerifyPresentationValidation();
+    VerifyRotationAndScheduleSemantics();
     await VerifyContentLifecycleAsync(directory, CancellationToken.None);
     Console.WriteLine(
-        "PASS: content validation, semantic diff, canonical hash, 20x publish replay, atomic publish faults, immutable versions, current-pointer rollback, stale-offer rejection, and restart persistence.");
+        "PASS: content validation, legacy hash compatibility, deterministic 20x dynamic-zone/event replay, adjacent-day rotation, risk levels, timed-hotspot and discount/yield authority, close/grace boundaries, next-open projection, semantic diff, atomic publish faults, immutable versions, current-pointer rollback, stale-offer rejection, and restart persistence.");
     return 0;
 }
 finally
@@ -67,7 +69,20 @@ static void VerifySchemeADefaults()
         BootstrapPolicyVersion = "legacy-v1",
         InitialMarketCoin = 1_000,
         InitialSeasonVoucher = 300,
-        ExtractionZones = [new ExtractionZoneOptions()]
+        ExtractionZones =
+        [
+            new ExtractionZoneOptions(),
+            new ExtractionZoneOptions
+            {
+                Id = "dev-extract-candidate-2",
+                DisplayName = "Development candidate zone 2",
+                RouteHint = "Local deterministic rotation test route; production coordinates remain unverified.",
+                RiskHint = "Candidate route and risk remain subject to real-server acceptance.",
+                MapX = 348,
+                MapY = -504,
+                Radius = 100
+            }
+        ]
     };
     var safety = new EconomySafetyOptions
     {
@@ -75,23 +90,98 @@ static void VerifySchemeADefaults()
         ApprovedPalDefenderVersion = "1.8.1-test"
     };
     var definition = EconomyContentDefaults.Create(options, safety, catalog);
-    var validation = new EconomyContentDefinitionValidator().Validate(
-        definition,
-        new EconomyContentValidationContext(
+    var validationContext = new EconomyContentValidationContext(
             itemIds.ToHashSet(StringComparer.OrdinalIgnoreCase),
             new HashSet<string>([EconomyContentRuntimeService.SupportedRulesVersion], StringComparer.Ordinal),
             catalog.Revision,
             safety.ApprovedGameVersion,
-            safety.ApprovedPalDefenderVersion));
+            safety.ApprovedPalDefenderVersion);
+    var validator = new EconomyContentDefinitionValidator();
+    var validation = validator.Validate(definition, validationContext);
     Assert(validation.Valid, "The built-in Scheme A content failed its own strict validation.");
-    Assert(definition.Products.Count == 10 && definition.Resources.Count >= 50 &&
-           definition.Tasks.Count == 6 && definition.ExchangeZones.Count >= 1,
-        "The built-in Scheme A content does not contain its launch products, resources, tasks, and zone.");
+    Assert(definition.Products.Count == 10 && definition.Resources.Count(resource => resource.Active) == 51 &&
+           definition.Tasks.Count == 6 && definition.ExchangeZones.Count >= 2 &&
+           definition.Rotation.HotspotZonePool.Count >= 2,
+        "The built-in Scheme A content does not contain its 10 launch products, 51 active resources, tasks, and two-zone hotspot pool.");
     Assert(definition.Products.All(product =>
-            !string.IsNullOrWhiteSpace(product.Category) && product.Tags.Count > 0),
-        "A built-in product is missing explicit category or tags.");
+            !string.IsNullOrWhiteSpace(product.Category) && product.Tags.Count > 0 &&
+            EconomyContentPresentation.IsSafeIconKey(product.IconKey) &&
+            product.Rarity is not null && Enum.IsDefined(product.Rarity.Value) &&
+            EconomyContentPresentation.IsSafeUsage(product.Usage)),
+        "A built-in product is missing safe, finite presentation metadata.");
     Assert(definition.Resources.All(resource => resource.ExchangeZoneIds.Count > 0),
         "A built-in sellable resource is not assigned to an exchange zone.");
+    Assert(definition.Resources.Where(resource => resource.Active).All(resource =>
+            EconomyContentPresentation.IsSafeIconKey(resource.IconKey) &&
+            resource.Rarity is not null && Enum.IsDefined(resource.Rarity.Value) &&
+            EconomyContentPresentation.IsSafeUsage(resource.Usage)),
+        "A built-in active resource is missing safe, finite presentation metadata.");
+    Assert(definition.ExchangeZones.All(zone => !string.IsNullOrWhiteSpace(zone.RouteHint) &&
+                                                !string.IsNullOrWhiteSpace(zone.RiskHint) &&
+                                                zone.OpenWindows.Count > 0),
+        "A built-in exchange zone is missing route, risk, or opening-window guidance.");
+    var balancePolicy = definition.BalancePolicy;
+    Assert(balancePolicy is not null &&
+           balancePolicy.CurrencyShadowRates.Count == Enum.GetValues<ExtractionCurrency>().Length &&
+           balancePolicy.ResourceShadowCosts.Count == definition.Resources.Count(resource => resource.Active) &&
+           balancePolicy.Transformations.Count > 0 &&
+           balancePolicy.Attestation is
+           {
+               ReachableGraphComplete: true,
+               EvidenceKind: EconomyArbitrageGraphAnalyzer.OperationalShadowGraphEvidenceKind
+           },
+        "The built-in Scheme A content is missing its complete attested economic shadow policy.");
+    Assert(balancePolicy!.Transformations.All(transformation =>
+            transformation.EvidenceNote.Contains("不是 Palworld 实际制作配方", StringComparison.Ordinal)),
+        "A built-in shadow transformation is not explicitly distinguished from a real game recipe.");
+    Assert(!validation.Warnings.Any(warning => warning.Code == "BALANCE_POLICY_NOT_CONFIGURED" ||
+                                               warning.Code == "INDIRECT_ARBITRAGE_NOT_EVALUATED" ||
+                                               warning.Code == "DYNAMIC_ECONOMY_POLICY_NOT_CONFIGURED"),
+        "The built-in attested policy fell back to legacy direct-only analysis.");
+
+    var lineLimitItemIds = Enumerable.Range(0, ExtractionRunStore.MaximumSelectionLines + 1)
+        .Select(index => $"SelectionLimitItem{index:000}")
+        .ToArray();
+    var lineLimitResources = lineLimitItemIds.Select(itemId =>
+        definition.Resources[0] with
+        {
+            ItemId = itemId,
+            DisplayName = itemId,
+            ExchangeZoneIds = [definition.ExchangeZones[0].ZoneId]
+        }).ToArray();
+    var lineLimitValidation = validator.Validate(
+        definition with
+        {
+            Resources = lineLimitResources,
+            BalancePolicy = null
+        },
+        validationContext with
+        {
+            KnownItemIds = itemIds.Concat(lineLimitItemIds)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+        });
+    Assert(lineLimitValidation.Errors.Any(error =>
+            error.Code == "ZONE_RESOURCE_SELECTION_LIMIT_EXCEEDED"),
+        "A zone exposing more ItemIDs than one atomic selective settlement accepted was publishable.");
+
+    var dynamicPolicy = definition.DynamicEconomyPolicy
+        ?? throw new InvalidOperationException("The built-in content is missing its dynamic policy.");
+    Assert(dynamicPolicy is
+           {
+               ZonePool.Count: >= 2,
+               DailyOpenZoneCount: 1,
+               TimedHotspotCount: 1,
+               TimedHotspotDurationMinutes: 180,
+               DailyWorldEventCount: 1
+           } &&
+           dynamicPolicy.ZonePool.Select(rule => rule.RiskLevel).Distinct().Count() >= 2 &&
+           dynamicPolicy.WorldEvents.Any(worldEvent =>
+               worldEvent.Kind == ContentWorldEventKind.ResourceSurge &&
+               worldEvent.ZoneYieldMultiplierBasisPoints > 10_000) &&
+           dynamicPolicy.WorldEvents.Any(worldEvent =>
+               worldEvent.Kind == ContentWorldEventKind.SupplyRelief &&
+               worldEvent.ProductPriceMultiplierBasisPoints < 10_000),
+        "The built-in content is missing two risk-rated candidates, one timed hotspot, or two purely economic event variants.");
 
     var version = new EconomyContentVersion(
         Guid.NewGuid(), "local", 1, new DateOnly(2026, 7, 15),
@@ -109,9 +199,91 @@ static void VerifySchemeADefaults()
     var product = definition.Products[0];
     var first = EconomyContentRuntimeService.CalculateEffectiveUnitPrice(version, product);
     var second = EconomyContentRuntimeService.CalculateEffectiveUnitPrice(version, product);
-    Assert(first == second && first >= product.UnitPrice * 90 / 100 &&
+    Assert(first == second && first >= product.UnitPrice * 81 / 100 &&
            first <= (product.UnitPrice * 110 + 99) / 100,
-        "Daily effective price is not deterministic or escaped the 90%-110% range.");
+        "Daily/event effective price is not deterministic or escaped the modeled 81%-110% range.");
+
+    var dynamicEvidence = EconomyDynamicEconomyRuntime.Create(version, options.ResolveTimeZone())
+        ?? throw new InvalidOperationException("Built-in dynamic economy evidence was not created.");
+    var serializedEvidence = System.Text.Json.JsonSerializer.Serialize(
+        dynamicEvidence,
+        EconomyContentJson.Options);
+    for (var replay = 0; replay < 20; replay++)
+    {
+        Assert(System.Text.Json.JsonSerializer.Serialize(
+                   EconomyDynamicEconomyRuntime.Create(version, options.ResolveTimeZone()),
+                   EconomyContentJson.Options) == serializedEvidence &&
+               EconomyContentRuntimeService.CalculateEffectiveUnitPrice(version, product) == first,
+            "Same-date dynamic zone/event/price evidence changed during a 20x replay.");
+    }
+    Assert(dynamicEvidence.Zones.Count(zoneEvidence => zoneEvidence.SelectedOpen) == 1 &&
+           dynamicEvidence.Zones.Count(zoneEvidence => zoneEvidence.SelectedHotspot) == 1 &&
+           dynamicEvidence.WorldEvents.Count == 1 &&
+           dynamicEvidence.WorldEvents.All(worldEvent =>
+               worldEvent.EventId.Length == 32 && worldEvent.Seed.Length == 64),
+        "Daily dynamic selection did not freeze one open zone, one timed hotspot, and one identified economic event.");
+    var selectedWorldEvent = dynamicEvidence.WorldEvents.Single();
+    Assert(EconomyDynamicEconomyRuntime.ActiveEvents(
+               dynamicEvidence,
+               selectedWorldEvent.Window.StartsAt.AddTicks(-1)).Count == 0 &&
+           EconomyDynamicEconomyRuntime.ActiveEvents(
+               dynamicEvidence,
+               selectedWorldEvent.Window.StartsAt).Single() == selectedWorldEvent &&
+           EconomyDynamicEconomyRuntime.ActiveEvents(
+               dynamicEvidence,
+               selectedWorldEvent.Window.EndsAt).Count == 0 &&
+           EconomyDynamicEconomyRuntime.ActiveEvents(
+               dynamicEvidence,
+               selectedWorldEvent.Window.EndsAt,
+               includeGrace: true).Single() == selectedWorldEvent &&
+           EconomyDynamicEconomyRuntime.ActiveEvents(
+               dynamicEvidence,
+               selectedWorldEvent.Window.GraceEndsAt,
+               includeGrace: true).Count == 0,
+        "World-event visibility did not honor before/during/after and grace-window boundaries.");
+
+    var nextVersion = version with
+    {
+        VersionId = Guid.NewGuid(),
+        VersionNumber = 2,
+        BusinessDate = version.BusinessDate.AddDays(1)
+    };
+    var nextEvidence = EconomyDynamicEconomyRuntime.Create(nextVersion, options.ResolveTimeZone())
+        ?? throw new InvalidOperationException("Next-day dynamic economy evidence was not created.");
+    Assert(!dynamicEvidence.Zones.Where(zoneEvidence => zoneEvidence.SelectedOpen)
+               .Select(zoneEvidence => zoneEvidence.ZoneId)
+               .SequenceEqual(nextEvidence.Zones.Where(zoneEvidence => zoneEvidence.SelectedOpen)
+                   .Select(zoneEvidence => zoneEvidence.ZoneId), StringComparer.OrdinalIgnoreCase) &&
+           dynamicEvidence.WorldEvents.Single().EventKey != nextEvidence.WorldEvents.Single().EventKey,
+        "Adjacent dates did not rotate both the two-zone pool and the two-event pool.");
+    var closedZone = definition.ExchangeZones.Single(zoneDefinition =>
+        !dynamicEvidence.Zones.Single(zoneEvidence =>
+            string.Equals(zoneEvidence.ZoneId, zoneDefinition.ZoneId, StringComparison.OrdinalIgnoreCase)).SelectedOpen);
+    Assert(EconomyDynamicEconomyRuntime.NextZoneOpen(
+               version,
+               closedZone,
+               dynamicEvidence.Zones[0].OpenWindow.StartsAt,
+               options.ResolveTimeZone()) is not null,
+        "A dynamically closed zone did not publish an authoritative nextOpensAt.");
+
+    var invalidPolicy = dynamicPolicy with
+    {
+        ZonePool =
+        [
+            dynamicPolicy.ZonePool[0] with { RiskLevel = (ContentZoneRiskLevel)999 }
+        ],
+        TimedHotspotStartsAtMinute = 1_400,
+        WorldEvents = [dynamicPolicy.WorldEvents[0]]
+    };
+    var invalidDynamicValidation = validator.Validate(
+        definition with { DynamicEconomyPolicy = invalidPolicy },
+        validationContext);
+    Assert(!invalidDynamicValidation.Valid &&
+           invalidDynamicValidation.Errors.Any(error => error.Code == "INVALID_DYNAMIC_ZONE_POOL") &&
+           invalidDynamicValidation.Errors.Any(error => error.Code == "INVALID_DYNAMIC_ZONE_RISK") &&
+           invalidDynamicValidation.Errors.Any(error => error.Code == "HOTSPOT_OUTSIDE_DYNAMIC_OPEN_WINDOW") &&
+           invalidDynamicValidation.Errors.Any(error => error.Code == "WORLD_EVENT_VARIETY_REQUIRED"),
+        "Malformed dynamic zones, risk, hotspot window, or event variety did not fail closed.");
 
     var zone = definition.ExchangeZones[0];
     var zoneTimeZone = options.ResolveTimeZone();
@@ -120,6 +292,175 @@ static void VerifySchemeADefaults()
             DateTimeOffset.Parse("2026-07-15T08:00:00Z"),
             zoneTimeZone),
         "The default exchange zone is unexpectedly closed during its all-day schedule.");
+}
+
+static void VerifyPresentationValidation()
+{
+    var validator = new EconomyContentDefinitionValidator();
+    var legacy = ValidDefinition();
+    var complete = legacy with
+    {
+        Products =
+        [
+            legacy.Products[0] with
+            {
+                IconKey = "capture",
+                Rarity = ContentRarity.Rare,
+                Usage = "用于每周捕捉补给。"
+            },
+            legacy.Products[1]
+        ],
+        Resources =
+        [
+            legacy.Resources[0] with
+            {
+                IconKey = "mineral",
+                Rarity = ContentRarity.Common,
+                Usage = "用于据点建设与常规制作。"
+            },
+            legacy.Resources[1]
+        ]
+    };
+    Assert(validator.Validate(complete, ValidationContext()).Valid,
+        "Complete safe presentation metadata was rejected.");
+
+    var invalidProducts = new[]
+    {
+        complete.Products[0] with { IconKey = "" },
+        complete.Products[0] with { IconKey = "unknown-icon" },
+        complete.Products[0] with { IconKey = "https://evil.example/icon.svg" },
+        complete.Products[0] with { IconKey = "../capture" },
+        complete.Products[0] with { IconKey = "<script>" },
+        complete.Products[0] with { Rarity = (ContentRarity)999 },
+        complete.Products[0] with { Usage = "" },
+        complete.Products[0] with { Usage = "<img src=x onerror=alert(1)>" },
+        complete.Products[0] with { Usage = "javascript:alert(1)" },
+        complete.Products[0] with { Usage = "data:text/html,evil" },
+        complete.Products[0] with { Usage = "../secrets" },
+        complete.Products[0] with { Usage = "unsafe\u0001text" },
+        complete.Products[0] with { Rarity = null, Usage = null }
+    };
+    foreach (var product in invalidProducts)
+    {
+        var result = validator.Validate(complete with
+        {
+            Products = [product, complete.Products[1]]
+        }, ValidationContext());
+        Assert(!result.Valid && result.Errors.Any(issue =>
+                issue.Code is "PRESENTATION_FIELDS_INCOMPLETE" or
+                    "INVALID_PRESENTATION_ICON" or
+                    "INVALID_PRESENTATION_RARITY" or
+                    "INVALID_PRESENTATION_USAGE"),
+            $"Unsafe product presentation was accepted: {product.IconKey}/{product.Rarity}/{product.Usage}");
+    }
+
+    var invalidResource = complete.Resources[0] with { Usage = "file:C:/secrets" };
+    var resourceResult = validator.Validate(complete with
+    {
+        Resources = [invalidResource, complete.Resources[1]]
+    }, ValidationContext());
+    Assert(!resourceResult.Valid && resourceResult.Errors.Any(issue =>
+            issue.Code == "INVALID_PRESENTATION_USAGE"),
+        "Unsafe resource presentation was accepted.");
+}
+
+static void VerifyRotationAndScheduleSemantics()
+{
+    var definition = ValidDefinition();
+    var legacyJson = EconomyContentCanonicalizer.Serialize(definition);
+    Assert(!legacyJson.Contains("dynamicEconomyPolicy", StringComparison.Ordinal) &&
+           !legacyJson.Contains("\"iconKey\"", StringComparison.Ordinal) &&
+           !legacyJson.Contains("\"rarity\"", StringComparison.Ordinal) &&
+           !legacyJson.Contains("\"usage\"", StringComparison.Ordinal) &&
+           EconomyContentCanonicalizer.Hash(
+               System.Text.Json.JsonSerializer.Deserialize<EconomyContentDefinition>(
+                   legacyJson,
+                   EconomyContentJson.Options)!) == EconomyContentCanonicalizer.Hash(definition),
+        "Omitting trailing optional presentation fields changed legacy canonical JSON/hash compatibility.");
+    var hash = EconomyContentCanonicalizer.Hash(definition);
+    Assert(hash == "c28cfbe0fb13380b4020de587bb529a62443e54bda23b203ea2d108fd5b89d7e",
+        $"Legacy presentation fixture hash changed: {hash}");
+    var monday = new EconomyContentVersion(
+        Guid.NewGuid(), "local", 1, new DateOnly(2026, 7, 13),
+        definition.Dependencies.RulesVersion, hash, definition, Guid.NewGuid(), "test",
+        DateTimeOffset.Parse("2026-07-13T00:00:00Z"));
+    var tuesday = monday with
+    {
+        VersionId = Guid.NewGuid(),
+        VersionNumber = 2,
+        BusinessDate = monday.BusinessDate.AddDays(1)
+    };
+    var mondayHotspots = EconomyContentRuntimeService.SelectDailyHotspots(monday);
+    var mondayReplay = EconomyContentRuntimeService.SelectDailyHotspots(monday);
+    var tuesdayHotspots = EconomyContentRuntimeService.SelectDailyHotspots(tuesday);
+    Assert(mondayHotspots.SetEquals(mondayReplay) && mondayHotspots.Count == 1,
+        "Replaying one business date did not reproduce its single deterministic hotspot.");
+    Assert(!mondayHotspots.SetEquals(tuesdayHotspots),
+        "A two-zone/one-hotspot pool did not move on the adjacent business date.");
+
+    var hotspotZone = definition.ExchangeZones.Single(zone => mondayHotspots.Contains(zone.ZoneId));
+    var effectiveMultiplier = EconomyContentRuntimeService.CalculateZoneYieldMultiplierBasisPoints(
+        definition.Rotation,
+        hotspotZone,
+        hotspot: true);
+    Assert(effectiveMultiplier > hotspotZone.YieldMultiplierBasisPoints,
+        "The selected hotspot did not increase the authoritative server-side yield multiplier.");
+    Assert(EconomyContentRuntimeService.CalculateEffectiveResourceUnitValue(9, effectiveMultiplier) ==
+           (long)Math.Ceiling(9m * effectiveMultiplier / 10_000m),
+        "Hotspot resource pricing does not match settlement's rounded-up unit-value rule.");
+
+    var utc = TimeZoneInfo.Utc;
+    var boundaryZone = new ContentExchangeZoneDefinition(
+        "boundary", "Boundary", "Test close boundary", 0, 0, 10, 10_000,
+        [new ContentExchangeWindow(DayOfWeek.Monday, new TimeOnly(10, 0), new TimeOnly(12, 0), 60)],
+        true,
+        "Test-only risk hint");
+    var atClose = DateTimeOffset.Parse("2026-07-13T12:00:00Z");
+    Assert(!EconomyContentSchedule.IsOpen(boundaryZone, atClose, utc, includeGrace: false),
+        "A new quote was accepted at the closing boundary.");
+    Assert(EconomyContentSchedule.IsOpen(boundaryZone, atClose, utc, includeGrace: true) &&
+           EconomyContentSchedule.IsOpen(
+               boundaryZone,
+               DateTimeOffset.Parse("2026-07-13T12:01:00Z"),
+               utc,
+               includeGrace: true),
+        "An existing quote could not settle through the configured close grace boundary.");
+    Assert(!EconomyContentSchedule.IsOpen(
+            boundaryZone,
+            DateTimeOffset.Parse("2026-07-13T12:01:00.001Z"),
+            utc,
+            includeGrace: true),
+        "A quote could settle after the configured close grace boundary.");
+
+    var laterZone = boundaryZone with
+    {
+        ZoneId = "later",
+        OpenWindows =
+        [
+            new ContentExchangeWindow(
+                DayOfWeek.Tuesday,
+                new TimeOnly(11, 0),
+                new TimeOnly(12, 0),
+                60)
+        ]
+    };
+    var earlierZone = laterZone with
+    {
+        ZoneId = "earlier",
+        OpenWindows =
+        [
+            new ContentExchangeWindow(
+                DayOfWeek.Tuesday,
+                new TimeOnly(9, 0),
+                new TimeOnly(10, 0),
+                60)
+        ]
+    };
+    Assert(EconomyContentSchedule.NextOpen(
+               [laterZone, earlierZone],
+               DateTimeOffset.Parse("2026-07-13T12:30:00Z"),
+               utc) == DateTimeOffset.Parse("2026-07-14T09:00:00Z"),
+        "An all-closed zone set did not project its earliest next opening.");
 }
 
 static async Task VerifyContentLifecycleAsync(string directory, CancellationToken cancellationToken)

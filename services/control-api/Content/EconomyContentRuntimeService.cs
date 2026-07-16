@@ -12,7 +12,8 @@ public sealed record EconomyRuntimeContent(
     IReadOnlyDictionary<string, ContentProductDefinition> Products,
     IReadOnlyDictionary<string, ContentResourceDefinition> Resources,
     IReadOnlyList<ContentExchangeZoneDefinition> ExchangeZones,
-    IReadOnlySet<string> HotspotZoneIds);
+    IReadOnlySet<string> HotspotZoneIds,
+    EconomyDynamicEconomyEvidence? DynamicEconomy = null);
 
 /// <summary>
 /// Bridges immutable content versions into the existing economy projections.
@@ -24,7 +25,7 @@ public sealed class EconomyContentRuntimeService
 {
     public const string SupportedRulesVersion = "weekly-economy-v1";
 
-    private static readonly long[] DailyPriceMultipliers = [9_000, 9_500, 10_000, 10_500, 11_000];
+    internal static readonly long[] DailyPriceMultipliers = [9_000, 9_500, 10_000, 10_500, 11_000];
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IEconomyContentStore _store;
     private readonly PalworldResourceCatalogService _catalog;
@@ -34,6 +35,7 @@ public sealed class EconomyContentRuntimeService
     private readonly TimeProvider _timeProvider;
     private readonly TimeZoneInfo _timeZone;
     private readonly ILogger<EconomyContentRuntimeService> _logger;
+    private Guid? _verifiedProjectionVersionId;
 
     public EconomyContentRuntimeService(
         IEconomyContentStore store,
@@ -104,12 +106,19 @@ public sealed class EconomyContentRuntimeService
                 }
                 else
                 {
-                    _ = await ActivateProductProjectionAsync(
-                        version,
-                        version.VersionId,
-                        "publish",
-                        $"content-version:{version.VersionNumber}",
-                        cancellationToken);
+                    // Startup verifies the immutable pointer/product
+                    // projection once per process and version. High-frequency
+                    // player reads must not repeatedly acquire SQLite's writer
+                    // lock for an unchanged business-day projection.
+                    if (_verifiedProjectionVersionId != version.VersionId)
+                    {
+                        _ = await ActivateProductProjectionAsync(
+                            version,
+                            version.VersionId,
+                            "publish",
+                            $"content-version:{version.VersionNumber}",
+                            cancellationToken);
+                    }
                 }
             }
             return CreateRuntime(version);
@@ -209,9 +218,57 @@ public sealed class EconomyContentRuntimeService
         ContentProductDefinition product)
     {
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{version.BusinessDate:yyyy-MM-dd}|{product.Sku}|{version.RulesVersion}"));
-        var multiplier = DailyPriceMultipliers[digest[0] % DailyPriceMultipliers.Length];
-        return Math.Max(1, checked((product.UnitPrice * multiplier + 5_000) / 10_000));
+            $"{version.BusinessDate:yyyy-MM-dd}|{product.Sku}|{version.RulesVersion}|{version.ContentHash}"));
+        var dailyMultiplier = DailyPriceMultipliers[digest[0] % DailyPriceMultipliers.Length];
+        var dynamic = EconomyDynamicEconomyRuntime.Create(
+            version,
+            EconomyDynamicEconomyRuntime.ResolveTimeZone(version.Definition));
+        var eventMultiplier = dynamic is null
+            ? 10_000
+            : EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+                dynamic.WorldEvents.Select(worldEvent => worldEvent.ProductPriceMultiplierBasisPoints));
+        var multiplier = EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            [(int)dailyMultiplier, eventMultiplier]);
+        return ApplyPriceMultiplier(product.UnitPrice, multiplier);
+    }
+
+    public static long CalculateMinimumPossibleEffectiveUnitPrice(
+        EconomyContentDefinition definition,
+        ContentProductDefinition product)
+    {
+        var eventMultiplier = EconomyDynamicEconomyRuntime
+            .MinimumPossibleEventPriceMultiplierBasisPoints(definition.DynamicEconomyPolicy);
+        var multiplier = EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            [(int)DailyPriceMultipliers.Min(), eventMultiplier]);
+        return ApplyPriceMultiplier(product.UnitPrice, multiplier);
+    }
+
+    public static long CalculateMaximumPossibleEffectiveUnitPrice(
+        EconomyContentDefinition definition,
+        ContentProductDefinition product)
+    {
+        var policy = definition.DynamicEconomyPolicy;
+        var eventMultiplier = policy is null
+            ? 10_000
+            : EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+                policy.WorldEvents.Where(worldEvent => worldEvent.Active)
+                    .Select(worldEvent => worldEvent.ProductPriceMultiplierBasisPoints)
+                    .OrderDescending()
+                    .Take(Math.Max(0, policy.DailyWorldEventCount)));
+        var multiplier = EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            [(int)DailyPriceMultipliers.Max(), eventMultiplier]);
+        return ApplyPriceMultiplier(product.UnitPrice, multiplier);
+    }
+
+    private static long ApplyPriceMultiplier(long unitPrice, int multiplierBasisPoints)
+    {
+        var adjusted = Math.Floor(
+            ((decimal)unitPrice * multiplierBasisPoints + 5_000m) / 10_000m);
+        if (adjusted <= 1m)
+        {
+            return 1;
+        }
+        return adjusted >= long.MaxValue ? long.MaxValue : (long)adjusted;
     }
 
     private async Task<EconomyContentVersion> PublishBootstrapAsync(
@@ -286,7 +343,7 @@ public sealed class EconomyContentRuntimeService
         return prepared.Version;
     }
 
-    private Task<ContentProductProjectionActivationResult> ActivateProductProjectionAsync(
+    private async Task<ContentProductProjectionActivationResult> ActivateProductProjectionAsync(
         EconomyContentVersion version,
         Guid? expectedCurrentVersionId,
         string action,
@@ -294,7 +351,7 @@ public sealed class EconomyContentRuntimeService
         CancellationToken cancellationToken)
     {
         var products = EconomyContentProductProjection.Create(version);
-        return _commerce.ActivateContentProductProjectionAsync(
+        var result = await _commerce.ActivateContentProductProjectionAsync(
             new ContentProductProjectionActivation(
                 version.ServerId,
                 version.VersionId,
@@ -307,15 +364,19 @@ public sealed class EconomyContentRuntimeService
                 actor,
                 products),
             cancellationToken);
+        _verifiedProjectionVersionId = version.VersionId;
+        return result;
     }
 
-    private static EconomyRuntimeContent CreateRuntime(EconomyContentVersion version)
+    private EconomyRuntimeContent CreateRuntime(EconomyContentVersion version)
     {
         var rotation = EconomyContentRotation.Create(version);
-        var hotspots = SelectStable(
-            version.Definition.Rotation.HotspotZonePool,
-            version.Definition.Rotation.DailyHotspotCount,
-            rotation.Seed);
+        var dynamicEconomy = EconomyDynamicEconomyRuntime.Create(version, _timeZone);
+        var hotspots = dynamicEconomy is null
+            ? SelectDailyHotspots(version)
+            : dynamicEconomy.Zones.Where(zone => zone.SelectedHotspot)
+                .Select(zone => zone.ZoneId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return new EconomyRuntimeContent(
             version,
             rotation,
@@ -326,27 +387,117 @@ public sealed class EconomyContentRuntimeService
                 resource => resource.ItemId,
                 StringComparer.OrdinalIgnoreCase),
             version.Definition.ExchangeZones.Where(zone => zone.Active).ToArray(),
-            hotspots);
+            hotspots,
+            dynamicEconomy);
     }
 
-    private static IReadOnlySet<string> SelectStable(
-        IReadOnlyList<string> pool,
-        int count,
-        string seed)
+    /// <summary>
+    /// Selects a deterministic circular slice from a content-stable zone order.
+    /// For a two-zone pool with one daily hotspot this guarantees that adjacent
+    /// business dates select different zones, while a replay of the same date
+    /// always selects the same set.
+    /// </summary>
+    public static IReadOnlySet<string> SelectDailyHotspots(EconomyContentVersion version)
     {
-        var selected = pool
+        ArgumentNullException.ThrowIfNull(version);
+        var policy = version.Definition.Rotation;
+        var stableOrderSeed = string.Join('|',
+            version.ServerId,
+            policy.RulesVersion,
+            policy.AlgorithmVersion,
+            policy.SeedNamespace,
+            version.ContentHash);
+        var orderedPool = policy.HotspotZonePool
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(value => new
             {
                 Value = value,
                 Key = Convert.ToHexString(SHA256.HashData(
-                    Encoding.UTF8.GetBytes($"{seed}|{value}")))
+                    Encoding.UTF8.GetBytes($"{stableOrderSeed}|{value}")))
             })
             .OrderBy(item => item.Key, StringComparer.Ordinal)
-            .Take(Math.Clamp(count, 0, pool.Count))
             .Select(item => item.Value)
+            .ToArray();
+        if (orderedPool.Length == 0 || policy.DailyHotspotCount <= 0)
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var count = Math.Clamp(policy.DailyHotspotCount, 0, orderedPool.Length);
+        var start = version.BusinessDate.DayNumber % orderedPool.Length;
+        return Enumerable.Range(0, count)
+            .Select(offset => orderedPool[(start + offset) % orderedPool.Length])
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return selected;
+    }
+
+    public static int CalculateZoneYieldMultiplierBasisPoints(
+        ContentRotationPolicy policy,
+        ContentExchangeZoneDefinition zone,
+        bool hotspot)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(zone);
+        if (!hotspot)
+        {
+            return zone.YieldMultiplierBasisPoints;
+        }
+        var hotspotMultiplier = policy.HotspotYieldMultiplierBasisPoints > 0
+            ? policy.HotspotYieldMultiplierBasisPoints
+            : 12_000;
+        var effectiveMultiplier = Math.Ceiling(
+            (decimal)zone.YieldMultiplierBasisPoints * hotspotMultiplier / 10_000m);
+        return (int)Math.Clamp(effectiveMultiplier, int.MinValue, int.MaxValue);
+    }
+
+    public static long CalculateEffectiveResourceUnitValue(
+        long unitValue,
+        int zoneYieldMultiplierBasisPoints)
+    {
+        var value = Math.Ceiling(
+            (decimal)unitValue * zoneYieldMultiplierBasisPoints / 10_000m);
+        if (value <= 1m)
+        {
+            return 1;
+        }
+        return value >= long.MaxValue ? long.MaxValue : (long)value;
+    }
+
+    public static int CalculateRuntimeZoneYieldMultiplierBasisPoints(
+        EconomyContentVersion version,
+        ContentExchangeZoneDefinition zone,
+        bool hotspot,
+        IReadOnlyList<EconomyWorldEventEvidence>? activeEvents = null)
+    {
+        var hotspotAdjusted = CalculateZoneYieldMultiplierBasisPoints(
+            version.Definition.Rotation,
+            zone,
+            hotspot);
+        var eventMultiplier = EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            (activeEvents ?? []).Select(worldEvent => worldEvent.ZoneYieldMultiplierBasisPoints));
+        return EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            [hotspotAdjusted, eventMultiplier]);
+    }
+
+    public static int CalculateMaximumPossibleZoneYieldMultiplierBasisPoints(
+        EconomyContentDefinition definition,
+        ContentExchangeZoneDefinition zone)
+    {
+        var hotspot = definition.DynamicEconomyPolicy is null
+            ? definition.Rotation.DailyHotspotCount > 0 &&
+              definition.Rotation.HotspotZonePool.Contains(zone.ZoneId, StringComparer.OrdinalIgnoreCase)
+            : definition.DynamicEconomyPolicy.TimedHotspotCount > 0 &&
+              definition.DynamicEconomyPolicy.ZonePool.Any(rule => string.Equals(
+                  rule.ZoneId,
+                  zone.ZoneId,
+                  StringComparison.OrdinalIgnoreCase));
+        var hotspotAdjusted = CalculateZoneYieldMultiplierBasisPoints(
+            definition.Rotation,
+            zone,
+            hotspot);
+        var eventMultiplier = EconomyDynamicEconomyRuntime
+            .MaximumPossibleEventYieldMultiplierBasisPoints(definition.DynamicEconomyPolicy);
+        return EconomyDynamicEconomyRuntime.CombineMultipliersBasisPoints(
+            [hotspotAdjusted, eventMultiplier]);
     }
 }
 
@@ -368,6 +519,7 @@ public static class EconomyContentSchedule
         TimeZoneInfo timeZone)
     {
         var local = TimeZoneInfo.ConvertTime(now, timeZone);
+        DateTimeOffset? next = null;
         for (var dayOffset = 0; dayOffset <= 7; dayOffset++)
         {
             var date = DateOnly.FromDateTime(local.DateTime).AddDays(dayOffset);
@@ -380,12 +532,24 @@ public static class EconomyContentSchedule
                     var utc = TimeZoneInfo.ConvertTimeToUtc(
                         DateTime.SpecifyKind(candidate, DateTimeKind.Unspecified),
                         timeZone);
-                    return new DateTimeOffset(utc, TimeSpan.Zero);
+                    var candidateOffset = new DateTimeOffset(utc, TimeSpan.Zero);
+                    if (next is null || candidateOffset < next)
+                    {
+                        next = candidateOffset;
+                    }
                 }
             }
         }
-        return null;
+        return next;
     }
+
+    public static DateTimeOffset? NextOpen(
+        IEnumerable<ContentExchangeZoneDefinition> zones,
+        DateTimeOffset now,
+        TimeZoneInfo timeZone) =>
+        zones.Select(zone => NextOpen(zone, now, timeZone))
+            .Where(value => value is not null)
+            .Min();
 
     private static bool Contains(
         ContentExchangeWindow window,
@@ -400,7 +564,7 @@ public static class EconomyContentSchedule
         {
             return today == window.DayOfWeek &&
                    time >= window.OpensAt &&
-                   local.DateTime <= date.ToDateTime(window.ClosesAt).Add(grace);
+                   BeforeClose(local.DateTime, date.ToDateTime(window.ClosesAt), grace);
         }
 
         if (today == window.DayOfWeek && time >= window.OpensAt)
@@ -409,6 +573,9 @@ public static class EconomyContentSchedule
         }
         var previous = date.AddDays(-1);
         return previous.DayOfWeek == window.DayOfWeek &&
-               local.DateTime <= date.ToDateTime(window.ClosesAt).Add(grace);
+               BeforeClose(local.DateTime, date.ToDateTime(window.ClosesAt), grace);
     }
+
+    private static bool BeforeClose(DateTime local, DateTime closesAt, TimeSpan grace) =>
+        grace > TimeSpan.Zero ? local <= closesAt.Add(grace) : local < closesAt;
 }

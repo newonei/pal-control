@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Domain;
 using PalControl.ControlApi.Extraction;
 
@@ -71,6 +72,7 @@ public static class ExtractionModeEndpoints
             EconomyCircuitUpdateRequest request,
             HttpContext httpContext,
             EconomySafetyGate safetyGate,
+            AdminOperationKeyStore operationKeys,
             CancellationToken cancellationToken) =>
         {
             try
@@ -90,6 +92,14 @@ public static class ExtractionModeEndpoints
                         "ECONOMY_CIRCUIT_REASON_REQUIRED",
                         "切换经济熔断器必须填写原因。"));
                 }
+                _ = await BindAdminOperationKeyAsync(
+                    httpContext.Request,
+                    operationKeys,
+                    $"economy-circuit:{parsedFeature}",
+                    string.Join('\n',
+                        request.WritesEnabled ? "true" : "false",
+                        request.Reason.Trim()),
+                    cancellationToken);
                 AdminAuditEnrichment.SetBefore(httpContext, safetyGate.Current);
                 var state = await safetyGate.SetCircuitAsync(
                     parsedFeature,
@@ -223,6 +233,7 @@ public static class ExtractionModeEndpoints
                     businessDate = content?.Version.BusinessDate,
                     rulesVersion = content?.Version.RulesVersion,
                     rotation = content?.Rotation,
+                    dynamicEconomy = content?.DynamicEconomy,
                     items = products.Select(product => ProductDto(
                         product,
                         purchasedByProduct.GetValueOrDefault(product.ProductId),
@@ -369,6 +380,44 @@ public static class ExtractionModeEndpoints
             }
         });
 
+        group.MapPost("/runs/{runId:guid}/select", async (
+            Guid runId,
+            HttpRequest httpRequest,
+            SelectExtractionQuoteRequest request,
+            ExtractionSettlementService settlement,
+            ExtractionOperationGate operationGate,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var operationLease = operationGate.AcquireOperation();
+                if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keyValues) ||
+                    keyValues.Count != 1 ||
+                    keyValues[0] is not { Length: >= 8 } idempotencyKey ||
+                    idempotencyKey.Length > 128 ||
+                    idempotencyKey.Any(char.IsControl))
+                {
+                    return Results.BadRequest(new ApiError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "选择资源必须提供 8 到 128 个字符的 Idempotency-Key。"));
+                }
+                var result = await settlement.SelectQuoteAsync(
+                    runId,
+                    request.SourceRevision,
+                    request.UserId,
+                    idempotencyKey,
+                    request.Items?.Select(item => new ExtractionQuoteSelectionLine(
+                        item.ItemId,
+                        item.Quantity)).ToArray() ?? [],
+                    cancellationToken);
+                return Results.Ok(QuoteDto(result.Run));
+            }
+            catch (Exception exception)
+            {
+                return ToError(exception);
+            }
+        });
+
         group.MapPost("/runs/{runId:guid}/settle", async (
             Guid runId,
             HttpRequest httpRequest,
@@ -463,6 +512,7 @@ public static class ExtractionModeEndpoints
             ExtractionWalletAdjustmentRequest request,
             ExtractionModeCoordinator coordinator,
             ExtractionOperationGate operationGate,
+            AdminOperationKeyStore operationKeys,
             CancellationToken cancellationToken) =>
         {
             try
@@ -491,10 +541,35 @@ public static class ExtractionModeEndpoints
                         "currency 只能是 merchantCoin 或 weeklyTicket。",
                         StatusCodes.Status400BadRequest)
                 };
-                var context = await coordinator.GetAccountContextAsync(
-                    request.UserId,
-                    requireOnline: false,
+                var hasAccountId = request.AccountId.HasValue;
+                var hasUserId = !string.IsNullOrWhiteSpace(request.UserId);
+                if (hasAccountId == hasUserId)
+                {
+                    return Results.BadRequest(new ApiError(
+                        "INVALID_WALLET_ADJUSTMENT_TARGET",
+                        "accountId 与 userId 必须且只能提供一个。"));
+                }
+                var target = hasAccountId
+                    ? $"account:{request.AccountId!.Value:D}"
+                    : $"user:{request.UserId!.Trim()}";
+                _ = await BindAdminOperationKeyAsync(
+                    httpRequest,
+                    operationKeys,
+                    "wallet-adjustment",
+                    string.Join('\n',
+                        target,
+                        request.Currency.Trim(),
+                        request.Delta.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        request.Reason.Trim()),
                     cancellationToken);
+                var context = hasAccountId
+                    ? await coordinator.GetExistingAccountContextAsync(
+                        request.AccountId!.Value,
+                        cancellationToken)
+                    : await coordinator.GetAccountContextAsync(
+                        request.UserId!,
+                        requireOnline: false,
+                        cancellationToken);
                 var beforeBalance = currency == ExtractionCurrency.SeasonVoucher
                     ? context.Wallet.SeasonVoucher
                     : context.Wallet.MarketCoin;
@@ -551,6 +626,7 @@ public static class ExtractionModeEndpoints
             ExtractionOrderReconciliationRequest request,
             ExtractionCommerceService commerce,
             ExtractionOperationGate operationGate,
+            AdminOperationKeyStore operationKeys,
             CancellationToken cancellationToken) =>
         {
             try
@@ -581,11 +657,28 @@ public static class ExtractionModeEndpoints
                         "RECONCILIATION_CONFIRMATION_INVALID",
                         $"confirmation 必须精确填写 {expectedConfirmation}。"));
                 }
+                var operationRegistration = await BindAdminOperationKeyAsync(
+                    httpRequest,
+                    operationKeys,
+                    "order-reconciliation",
+                    string.Join('\n',
+                        orderId.ToString("D"),
+                        resolution,
+                        request.Reason.Trim(),
+                        request.Confirmation),
+                    cancellationToken);
 
                 var beforeOrder = await commerce.GetOrderAsync(orderId, cancellationToken);
                 AdminAuditEnrichment.SetBefore(
                     httpRequest.HttpContext,
                     beforeOrder is null ? null : OrderDto(beforeOrder));
+                if (operationRegistration.Replayed && beforeOrder is not null &&
+                    ((resolution == "delivered" && beforeOrder.State == ShopOrderState.Delivered) ||
+                     (resolution == "refund" && beforeOrder.State == ShopOrderState.Refunded)))
+                {
+                    AdminAuditEnrichment.SetAfter(httpRequest.HttpContext, OrderDto(beforeOrder));
+                    return Results.Ok(OrderDto(beforeOrder));
+                }
 
                 ShopOrder? order;
                 if (resolution == "delivered")
@@ -641,6 +734,7 @@ public static class ExtractionModeEndpoints
             ExtractionSettlementService settlement,
             ExtractionRunStore runStore,
             ExtractionOperationGate operationGate,
+            AdminOperationKeyStore operationKeys,
             CancellationToken cancellationToken) =>
         {
             try
@@ -661,10 +755,27 @@ public static class ExtractionModeEndpoints
                         "RECONCILIATION_CONFIRMATION_INVALID",
                         $"confirmation 必须精确填写 {expectedConfirmation}。"));
                 }
+                var operationRegistration = await BindAdminOperationKeyAsync(
+                    httpContext.Request,
+                    operationKeys,
+                    "run-reconciliation",
+                    string.Join('\n',
+                        runId.ToString("D"),
+                        resolution,
+                        request.Reason.Trim(),
+                        request.Confirmation),
+                    cancellationToken);
                 var beforeRun = await runStore.GetAsync(runId, cancellationToken);
                 AdminAuditEnrichment.SetBefore(
                     httpContext,
                     beforeRun is null ? null : RunDto(beforeRun));
+                if (operationRegistration.Replayed && beforeRun is not null &&
+                    ((resolution == "settled" && beforeRun.State == ExtractionSettlementState.Settled) ||
+                     (resolution == "failed" && beforeRun.State == ExtractionSettlementState.Failed)))
+                {
+                    AdminAuditEnrichment.SetAfter(httpContext, RunDto(beforeRun));
+                    return Results.Ok(RunDto(beforeRun));
+                }
                 var run = await settlement.ReconcileUncertainAsync(
                     runId,
                     resolution,
@@ -691,6 +802,7 @@ public static class ExtractionModeEndpoints
             RolloverMaintenanceRequest request,
             ExtractionOperationGate operationGate,
             WeeklyRolloverStateStore rolloverStore,
+            AdminOperationKeyStore operationKeys,
             Microsoft.Extensions.Options.IOptions<ExtractionModeOptions> extractionOptions,
             CancellationToken cancellationToken) =>
         {
@@ -705,6 +817,14 @@ public static class ExtractionModeEndpoints
                         $"Persistent rollover '{incomplete.OperationId:D}' must complete its " +
                         $"'{incomplete.CurrentStep}' step before maintenance can reopen."));
                 }
+                _ = await BindAdminOperationKeyAsync(
+                    httpContext.Request,
+                    operationKeys,
+                    "economy-maintenance",
+                    string.Join('\n',
+                        request.Maintenance ? "true" : "false",
+                        request.Reason.Trim()),
+                    cancellationToken);
                 AdminAuditEnrichment.SetBefore(httpContext, operationGate.Current);
                 var state = await operationGate.SetAsync(
                     request.Maintenance,
@@ -964,8 +1084,15 @@ public static class ExtractionModeEndpoints
     internal static object ProductDto(
         ShopProduct product,
         int purchased,
-        long globallyPurchased = 0) => new
+        long globallyPurchased = 0)
     {
+        var presentation = EconomyContentPresentation.ResolveProduct(
+            product.Category,
+            product.IconKey,
+            product.Rarity,
+            product.Usage);
+        return new
+        {
         productId = product.ProductId,
         sku = product.Sku,
         name = product.DisplayName,
@@ -995,8 +1122,13 @@ public static class ExtractionModeEndpoints
         featured = product.FeaturedRank is not null,
         featuredRank = product.FeaturedRank,
         contentVersionId = product.ContentVersionId,
-        contentHash = product.ContentHash
-    };
+        contentHash = product.ContentHash,
+        iconKey = presentation.IconKey,
+        rarity = presentation.Rarity.ToString(),
+        usage = presentation.Usage,
+        presentationSource = presentation.PresentationSource
+        };
+    }
 
     internal static object OrderDto(
         ShopOrder order,
@@ -1050,19 +1182,44 @@ public static class ExtractionModeEndpoints
     internal static object QuoteDto(ExtractionSettlementRun run) => new
     {
         runId = run.RunId,
+        revision = run.Revision,
         state = "quoted",
         zoneName = run.ZoneName,
-        items = run.Items.Select(item => new
+        items = run.Items.Select(item =>
         {
-            itemId = item.ItemId,
-            name = item.DisplayName,
-            quantity = item.Quantity,
-            unitValue = item.UnitValue,
-            totalValue = item.TotalValue
+            var presentation = EconomyContentPresentation.ResolveResource(
+                string.Empty,
+                item.IconKey,
+                item.Rarity,
+                item.Usage);
+            return new
+            {
+                itemId = item.ItemId,
+                name = item.DisplayName,
+                quantity = item.Quantity,
+                unitValue = item.UnitValue,
+                totalValue = item.TotalValue,
+                iconKey = presentation.IconKey,
+                rarity = presentation.Rarity.ToString(),
+                usage = presentation.Usage,
+                presentationSource = item.PresentationSource == EconomyContentPresentation.ContentSource &&
+                                     presentation.PresentationSource == EconomyContentPresentation.ContentSource
+                    ? EconomyContentPresentation.ContentSource
+                    : EconomyContentPresentation.LegacyFallbackSource
+            };
         }).ToArray(),
         itemCount = run.ItemCount,
         totalValue = run.TotalValue,
-        expiresAt = run.ExpiresAt
+        expiresAt = run.ExpiresAt,
+        contentVersionId = run.ContentVersionId,
+        contentHash = run.ContentHash,
+        businessDate = run.ContentBusinessDate,
+        rotationSeed = run.RotationSeed,
+        zoneYieldMultiplierBasisPoints = run.ZoneYieldMultiplierBasisPoints,
+        hotspot = run.Hotspot,
+        dynamicEconomy = run.DynamicEconomyEvidence,
+        sourceQuoteRunId = run.SourceQuoteRunId,
+        selectionDerived = run.SourceQuoteRunId is not null
     };
 
     internal static object RunDto(ExtractionSettlementRun run) => new
@@ -1092,6 +1249,13 @@ public static class ExtractionModeEndpoints
             ExtractionSettlementState.Cancelled
                 ? run.UpdatedAt
                 : (DateTimeOffset?)null),
+        contentVersionId = run.ContentVersionId,
+        contentHash = run.ContentHash,
+        businessDate = run.ContentBusinessDate,
+        rotationSeed = run.RotationSeed,
+        zoneYieldMultiplierBasisPoints = run.ZoneYieldMultiplierBasisPoints,
+        hotspot = run.Hotspot,
+        dynamicEconomy = run.DynamicEconomyEvidence,
         statusMessage = run.ErrorMessage,
         internalState = run.State.ToString()
     };
@@ -1167,7 +1331,10 @@ public static class ExtractionModeEndpoints
     internal static IResult ToError(Exception exception) => exception switch
     {
         ExtractionModeException modeException => Results.Json(
-            new ApiError(modeException.Code, modeException.Message),
+            new ApiError(modeException.Code, modeException.Message)
+            {
+                NextOpensAt = modeException.NextOpensAt
+            },
             statusCode: modeException.StatusCode),
         ArgumentException argumentException => Results.BadRequest(
             new ApiError("INVALID_EXTRACTION_REQUEST", argumentException.Message)),
@@ -1179,6 +1346,9 @@ public static class ExtractionModeEndpoints
         IOException ioException => Results.Json(
             new ApiError("EXTRACTION_STORE_UNAVAILABLE", ioException.Message),
             statusCode: StatusCodes.Status503ServiceUnavailable),
+        AdminOperationKeyConflictException => Results.Conflict(new ApiError(
+            "ADMIN_IDEMPOTENCY_CONFLICT",
+            "同一个管理员 Idempotency-Key 已绑定其他请求或操作者。")),
         _ => Results.Json(
             new ApiError("EXTRACTION_REQUEST_FAILED", "资源经济请求处理失败。"),
             statusCode: StatusCodes.Status500InternalServerError)
@@ -1194,6 +1364,13 @@ public static class ExtractionModeEndpoints
 
     public sealed record CreateExtractionQuoteRequest(string UserId);
 
+    public sealed record SelectExtractionQuoteItem(string ItemId, int Quantity);
+
+    public sealed record SelectExtractionQuoteRequest(
+        string UserId,
+        long SourceRevision,
+        IReadOnlyList<SelectExtractionQuoteItem>? Items);
+
     public sealed record SettleExtractionRunRequest(string UserId);
 
     public sealed record RolloverMaintenanceRequest(bool Maintenance, string Reason);
@@ -1201,10 +1378,11 @@ public static class ExtractionModeEndpoints
     public sealed record RolloverCommitRequest(string WorldId);
 
     public sealed record ExtractionWalletAdjustmentRequest(
-        string UserId,
+        string? UserId,
         string Currency,
         long Delta,
-        string Reason);
+        string Reason,
+        Guid? AccountId = null);
 
     public sealed record ExtractionOrderReconciliationRequest(
         string Resolution,
@@ -1219,6 +1397,32 @@ public static class ExtractionModeEndpoints
     public sealed record EconomyCircuitUpdateRequest(
         bool WritesEnabled,
         string Reason);
+
+    private static async Task<AdminOperationKeyRegistration> BindAdminOperationKeyAsync(
+        HttpRequest request,
+        AdminOperationKeyStore store,
+        string operationScope,
+        string canonicalRequest,
+        CancellationToken cancellationToken)
+    {
+        if (!request.Headers.TryGetValue("Idempotency-Key", out var values) ||
+            values.Count != 1 ||
+            values[0] is not { Length: >= 8 } idempotencyKey ||
+            idempotencyKey.Length > 128 ||
+            idempotencyKey.Any(char.IsControl))
+        {
+            throw new ExtractionModeException(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "高风险管理员操作必须提供 8 至 128 字符的 Idempotency-Key。",
+                StatusCodes.Status400BadRequest);
+        }
+        return await store.RegisterAsync(
+            idempotencyKey,
+            operationScope,
+            canonicalRequest,
+            AdminIdentity.RequireSubject(request.HttpContext),
+            cancellationToken);
+    }
 
     private sealed record RolloverBlockers(
         ExtractionOperationGateState GateState,

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PalControl.ControlApi.Extraction;
+using PalControl.ControlApi.Infrastructure;
 
 namespace PalControl.ControlApi.Content;
 
@@ -42,6 +43,8 @@ public static class EconomyContentCanonicalizer
                     DisplayName = Clean(product.DisplayName),
                     Description = Clean(product.Description),
                     Category = Clean(product.Category),
+                    IconKey = CleanNullable(product.IconKey)?.ToLowerInvariant(),
+                    Usage = CleanNullable(product.Usage),
                     Tags = NormalizeStrings(product.Tags),
                     ItemGrants = (product.ItemGrants ?? [])
                         .Select(grant => grant with { ItemId = Clean(grant.ItemId) })
@@ -59,6 +62,8 @@ public static class EconomyContentCanonicalizer
                     ItemId = Clean(resource.ItemId),
                     DisplayName = Clean(resource.DisplayName),
                     Category = Clean(resource.Category),
+                    IconKey = CleanNullable(resource.IconKey)?.ToLowerInvariant(),
+                    Usage = CleanNullable(resource.Usage),
                     Tags = NormalizeStrings(resource.Tags),
                     ExchangeZoneIds = NormalizeStrings(resource.ExchangeZoneIds)
                 })
@@ -70,6 +75,7 @@ public static class EconomyContentCanonicalizer
                     ZoneId = Clean(zone.ZoneId).ToLowerInvariant(),
                     DisplayName = Clean(zone.DisplayName),
                     RouteHint = Clean(zone.RouteHint),
+                    RiskHint = Clean(zone.RiskHint),
                     OpenWindows = (zone.OpenWindows ?? [])
                         .OrderBy(window => window.DayOfWeek)
                         .ThenBy(window => window.OpensAt)
@@ -97,7 +103,9 @@ public static class EconomyContentCanonicalizer
                 DailyTaskPool = NormalizeStrings(rotation.DailyTaskPool),
                 WeeklyTaskPool = NormalizeStrings(rotation.WeeklyTaskPool),
                 HotspotZonePool = NormalizeStrings(rotation.HotspotZonePool)
-            }
+            },
+            BalancePolicy = NormalizeBalancePolicy(definition.BalancePolicy),
+            DynamicEconomyPolicy = NormalizeDynamicEconomyPolicy(definition.DynamicEconomyPolicy)
         };
     }
 
@@ -114,6 +122,92 @@ public static class EconomyContentCanonicalizer
         .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
+    private static ContentEconomyBalancePolicy? NormalizeBalancePolicy(
+        ContentEconomyBalancePolicy? policy)
+    {
+        if (policy is null)
+        {
+            return null;
+        }
+        var attestation = policy.Attestation;
+        return policy with
+        {
+            PolicyVersion = Clean(policy.PolicyVersion),
+            CurrencyShadowRates = (policy.CurrencyShadowRates ?? [])
+                .OrderBy(rate => rate.Currency)
+                .ThenBy(rate => rate.ShadowUnitsPerCurrencyUnit)
+                .ToArray(),
+            ResourceShadowCosts = (policy.ResourceShadowCosts ?? [])
+                .Select(cost => cost with { ItemId = Clean(cost.ItemId) })
+                .OrderBy(cost => cost.ItemId, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(cost => cost.Currency)
+                .ThenBy(cost => cost.UnitCost)
+                .ToArray(),
+            ResourceCategoryPolicies = (policy.ResourceCategoryPolicies ?? [])
+                .Select(category => category with { Category = Clean(category.Category) })
+                .OrderBy(category => category.Category, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(category => category.TargetRecoveryBasisPoints)
+                .ThenBy(category => category.RiskBufferBasisPoints)
+                .ToArray(),
+            Transformations = (policy.Transformations ?? [])
+                .Select(transformation => transformation with
+                {
+                    TransformationId = Clean(transformation.TransformationId).ToLowerInvariant(),
+                    DisplayName = Clean(transformation.DisplayName),
+                    EvidenceNote = Clean(transformation.EvidenceNote),
+                    Inputs = (transformation.Inputs ?? [])
+                        .Select(item => item with { ItemId = Clean(item.ItemId) })
+                        .OrderBy(item => item.ItemId, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(item => item.Quantity)
+                        .ToArray(),
+                    Outputs = (transformation.Outputs ?? [])
+                        .Select(item => item with { ItemId = Clean(item.ItemId) })
+                        .OrderBy(item => item.ItemId, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(item => item.Quantity)
+                        .ToArray()
+                })
+                .OrderBy(transformation => transformation.TransformationId, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
+            Attestation = attestation is null
+                ? null
+                : attestation with
+                {
+                    EvidenceKind = Clean(attestation.EvidenceKind),
+                    CatalogRevision = Clean(attestation.CatalogRevision),
+                    AttestedBy = Clean(attestation.AttestedBy),
+                    AttestedAt = attestation.AttestedAt.ToUniversalTime(),
+                    CoveredItemIds = NormalizeStrings(attestation.CoveredItemIds)
+                }
+        };
+    }
+
+    private static ContentDynamicEconomyPolicy? NormalizeDynamicEconomyPolicy(
+        ContentDynamicEconomyPolicy? policy)
+    {
+        if (policy is null)
+        {
+            return null;
+        }
+        return policy with
+        {
+            PolicyVersion = Clean(policy.PolicyVersion),
+            ZonePool = (policy.ZonePool ?? [])
+                .Select(zone => zone with { ZoneId = Clean(zone.ZoneId).ToLowerInvariant() })
+                .OrderBy(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(zone => zone.RiskLevel)
+                .ToArray(),
+            WorldEvents = (policy.WorldEvents ?? [])
+                .Select(worldEvent => worldEvent with
+                {
+                    EventKey = Clean(worldEvent.EventKey).ToLowerInvariant(),
+                    DisplayName = Clean(worldEvent.DisplayName)
+                })
+                .OrderBy(worldEvent => worldEvent.EventKey, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(worldEvent => worldEvent.Kind)
+                .ToArray()
+        };
+    }
+
     private static string Clean(string? value) => value?.Trim() ?? "";
 
     private static string? CleanOptional(string? value)
@@ -121,6 +215,11 @@ public static class EconomyContentCanonicalizer
         var clean = Clean(value);
         return clean.Length == 0 ? null : clean;
     }
+
+    // Presentation uses null to mean a legacy document. Preserve explicitly
+    // supplied empty/control-bearing values so validation can fail closed
+    // instead of normalizing an attack into an omitted legacy field.
+    private static string? CleanNullable(string? value) => value?.Trim(' ');
 }
 
 public sealed class EconomyContentDefinitionValidator
@@ -182,14 +281,46 @@ public sealed class EconomyContentDefinitionValidator
         ValidateProducts(normalized.Products, knownItems, errors);
         var zones = ValidateZones(normalized.ExchangeZones, errors);
         var resources = ValidateResources(normalized.Resources, knownItems, zones, errors);
-        var tasks = ValidateTasks(normalized.Tasks, knownItems, resources, zones, errors);
-        ValidateDirectResaleArbitrage(
-            normalized.Products,
+        ValidateZoneResourceLineLimits(
             normalized.Resources,
             normalized.ExchangeZones,
+            errors);
+        var tasks = ValidateTasks(normalized.Tasks, knownItems, resources, zones, errors);
+        ValidateRotation(normalized.Rotation, normalized.Dependencies, tasks, zones, errors, warnings);
+        ValidateDynamicEconomyPolicy(
+            normalized.DynamicEconomyPolicy,
+            normalized.ExchangeZones,
+            zones,
+            normalized.Rotation,
             errors,
             warnings);
-        ValidateRotation(normalized.Rotation, normalized.Dependencies, tasks, zones, errors, warnings);
+        ValidateEffectiveProductPriceBounds(normalized, errors);
+        if (normalized.BalancePolicy is null)
+        {
+            Warning(warnings, "BALANCE_POLICY_NOT_CONFIGURED", "/balancePolicy",
+                "Legacy content has no attested economic shadow graph. Direct same-currency resale is checked, " +
+                "but publishing does not prove bundle, transformation or cross-currency path completeness.");
+            Warning(warnings, "PERMANENT_CURRENCY_CONTRACT_NOT_ENFORCED", "/balancePolicy",
+                "Legacy content remains readable without the modern Scheme A permanent-currency contract. " +
+                "Its MarketCoin gameplay sources, weekly bound, and recurring sinks are not publication proof.");
+            ValidateDirectResaleArbitrage(normalized, errors, warnings);
+        }
+        else
+        {
+            var permanentCurrency = EconomyPermanentCurrencyAnalyzer.Analyze(normalized, knownItems);
+            errors.AddRange(permanentCurrency.Errors.Select(issue =>
+                new ContentValidationIssue(issue.Code, issue.Path, issue.Message)));
+            warnings.AddRange(permanentCurrency.Warnings.Select(issue =>
+                new ContentValidationIssue(issue.Code, issue.Path, issue.Message)));
+            var analysis = EconomyArbitrageGraphAnalyzer.Analyze(
+                normalized,
+                normalized.BalancePolicy,
+                knownItems);
+            errors.AddRange(analysis.Errors.Select(issue =>
+                new ContentValidationIssue(issue.Code, issue.Path, issue.Message)));
+            warnings.AddRange(analysis.Warnings.Select(issue =>
+                new ContentValidationIssue(issue.Code, issue.Path, issue.Message)));
+        }
 
         return new ContentValidationResult(
             errors.Count == 0,
@@ -243,6 +374,7 @@ public sealed class EconomyContentDefinitionValidator
             Required(errors, product.DisplayName, 128, path + "/displayName", "PRODUCT_NAME_REQUIRED");
             Required(errors, product.Description, 512, path + "/description", "PRODUCT_DESCRIPTION_REQUIRED");
             Required(errors, product.Category, 64, path + "/category", "PRODUCT_CATEGORY_REQUIRED");
+            ValidatePresentation(product.IconKey, product.Rarity, product.Usage, path, errors);
             ValidateTags(product.Tags, path + "/tags", errors);
             if (product.FeaturedRank is <= 0 or > 1000)
             {
@@ -311,6 +443,11 @@ public sealed class EconomyContentDefinitionValidator
             }
             Required(errors, zone.DisplayName, 128, path + "/displayName", "ZONE_NAME_REQUIRED");
             Required(errors, zone.RouteHint, 512, path + "/routeHint", "ZONE_ROUTE_REQUIRED");
+            if (zone.RiskHint.Length > 512)
+            {
+                Error(errors, "INVALID_ZONE_RISK_HINT", path + "/riskHint",
+                    "Zone risk guidance cannot exceed 512 characters.");
+            }
             if (!double.IsFinite(zone.MapX) || !double.IsFinite(zone.MapY) ||
                 !double.IsFinite(zone.Radius) || zone.Radius is <= 0 or > 10_000)
             {
@@ -371,6 +508,7 @@ public sealed class EconomyContentDefinitionValidator
             }
             Required(errors, resource.DisplayName, 128, path + "/displayName", "RESOURCE_NAME_REQUIRED");
             Required(errors, resource.Category, 64, path + "/category", "RESOURCE_CATEGORY_REQUIRED");
+            ValidatePresentation(resource.IconKey, resource.Rarity, resource.Usage, path, errors);
             ValidateTags(resource.Tags, path + "/tags", errors);
             if (resource.UnitValue is <= 0 or > MaximumWebSafeInteger)
             {
@@ -403,6 +541,33 @@ public sealed class EconomyContentDefinitionValidator
             }
         }
         return active;
+    }
+
+    private static void ValidateZoneResourceLineLimits(
+        IReadOnlyList<ContentResourceDefinition> resources,
+        IReadOnlyList<ContentExchangeZoneDefinition> zones,
+        List<ContentValidationIssue> errors)
+    {
+        for (var zoneIndex = 0; zoneIndex < zones.Count; zoneIndex++)
+        {
+            var zone = zones[zoneIndex];
+            if (!zone.Active)
+            {
+                continue;
+            }
+            var activeResourceCount = resources.Count(resource =>
+                resource.Active && resource.ExchangeZoneIds.Contains(
+                    zone.ZoneId,
+                    StringComparer.OrdinalIgnoreCase));
+            if (activeResourceCount > ExtractionRunStore.MaximumSelectionLines)
+            {
+                Error(
+                    errors,
+                    "ZONE_RESOURCE_SELECTION_LIMIT_EXCEEDED",
+                    $"/exchangeZones/{zoneIndex}",
+                    $"An active exchange zone may expose at most {ExtractionRunStore.MaximumSelectionLines} sellable ItemIDs so the default all-selected quote remains atomically settleable; '{zone.ZoneId}' exposes {activeResourceCount}.");
+            }
+        }
     }
 
     private static Dictionary<string, ContentTaskCadence> ValidateTasks(
@@ -489,12 +654,17 @@ public sealed class EconomyContentDefinitionValidator
     /// treated as safe.
     /// </summary>
     private static void ValidateDirectResaleArbitrage(
-        IReadOnlyList<ContentProductDefinition> products,
-        IReadOnlyList<ContentResourceDefinition> resources,
-        IReadOnlyList<ContentExchangeZoneDefinition> zones,
+        EconomyContentDefinition definition,
         List<ContentValidationIssue> errors,
         List<ContentValidationIssue> warnings)
     {
+        var products = definition.Products;
+        var resources = definition.Resources;
+        var zones = definition.ExchangeZones;
+        // Product prices are capped at MaximumWebSafeInteger. Saturating resale
+        // proceeds one unit above that cap preserves the proof while keeping
+        // hostile or merely extreme draft values from overflowing validation.
+        var comparisonCap = (decimal)MaximumWebSafeInteger + 1m;
         var activeZones = zones
             .Where(zone => zone.Active && zone.OpenWindows.Any(window => window.OpensAt != window.ClosesAt))
             .GroupBy(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase)
@@ -535,6 +705,12 @@ public sealed class EconomyContentDefinitionValidator
                         $"{grant.ItemId}: resale credits {resource.Currency}, product costs {product.PriceCurrency}");
                     continue;
                 }
+                if (resource.UnitValue <= 0 || grant.Quantity <= 0)
+                {
+                    indeterminatePaths.Add(
+                        $"{grant.ItemId}: invalid unit value or grant quantity prevents resale analysis");
+                    continue;
+                }
 
                 var eligibleZones = resource.ExchangeZoneIds
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -549,29 +725,40 @@ public sealed class EconomyContentDefinitionValidator
                 }
 
                 var bestZone = eligibleZones
-                    .OrderByDescending(zone => zone.YieldMultiplierBasisPoints)
-                    .ThenBy(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase)
+                    .Select(zone => new
+                    {
+                        Zone = zone,
+                        EffectiveMultiplier = EconomyContentRuntimeService
+                            .CalculateMaximumPossibleZoneYieldMultiplierBasisPoints(definition, zone)
+                    })
+                    .OrderByDescending(candidate => candidate.EffectiveMultiplier)
+                    .ThenBy(candidate => candidate.Zone.ZoneId, StringComparer.OrdinalIgnoreCase)
                     .First();
-                var effectiveUnitValue = Math.Ceiling(
-                    (decimal)resource.UnitValue * bestZone.YieldMultiplierBasisPoints / 10_000m);
-                var lineProceeds = effectiveUnitValue * grant.Quantity;
-                comparableProceeds += lineProceeds;
+                var effectiveUnitValue = EconomyContentRuntimeService.CalculateEffectiveResourceUnitValue(
+                    resource.UnitValue,
+                    bestZone.EffectiveMultiplier);
+                var lineProceeds = effectiveUnitValue > comparisonCap / grant.Quantity
+                    ? comparisonCap
+                    : (decimal)effectiveUnitValue * grant.Quantity;
+                comparableProceeds = Math.Min(comparisonCap, comparableProceeds + lineProceeds);
                 comparablePaths.Add(
                     $"{grant.ItemId} x{grant.Quantity} @ {effectiveUnitValue:0} " +
-                    $"({bestZone.ZoneId}, {bestZone.YieldMultiplierBasisPoints}bp) = {lineProceeds:0}");
+                    $"({bestZone.Zone.ZoneId}, {bestZone.EffectiveMultiplier}bp) = {lineProceeds:0}");
             }
 
             var productPath = $"/products/{productIndex}";
-            if (comparableProceeds > product.UnitPrice)
+            var minimumPurchasePrice = EconomyContentRuntimeService
+                .CalculateMinimumPossibleEffectiveUnitPrice(definition, product);
+            if (comparableProceeds > minimumPurchasePrice)
             {
                 Error(errors, "PROVEN_DIRECT_RESALE_ARBITRAGE", productPath + "/unitPrice",
                     $"Direct resale arbitrage is proven for SKU '{product.Sku}': one purchase costs " +
-                    $"{product.UnitPrice} {product.PriceCurrency}, while directly reselling comparable grants " +
+                    $"{minimumPurchasePrice} {product.PriceCurrency} at the minimum daily/event price, while directly reselling comparable grants " +
                     $"returns {comparableProceeds:0} {product.PriceCurrency} at maximum eligible zone multipliers " +
-                    $"(profit {comparableProceeds - product.UnitPrice:0}). Path: " +
+                    $"(profit {comparableProceeds - minimumPurchasePrice:0}). Path: " +
                     string.Join("; ", comparablePaths) + ".");
             }
-            else if (comparablePaths.Count > 0 && comparableProceeds == product.UnitPrice)
+            else if (comparablePaths.Count > 0 && comparableProceeds == minimumPurchasePrice)
             {
                 Warning(warnings, "DIRECT_RESALE_BREAK_EVEN", productPath + "/unitPrice",
                     $"SKU '{product.Sku}' has a break-even direct resale path at " +
@@ -620,6 +807,17 @@ public sealed class EconomyContentDefinitionValidator
             Error(errors, "INVALID_HOTSPOT_COUNT", "/rotation/dailyHotspotCount",
                 "Daily hotspot count cannot exceed the hotspot pool.");
         }
+        if (rotation.HotspotYieldMultiplierBasisPoints is < 10_000 or > 50_000)
+        {
+            Error(errors, "INVALID_HOTSPOT_MULTIPLIER", "/rotation/hotspotYieldMultiplierBasisPoints",
+                "Hotspot yield multiplier must be between 10000 and 50000 basis points.");
+        }
+        if (rotation.DailyHotspotCount > 0 && rotation.HotspotYieldMultiplierBasisPoints <= 10_000)
+        {
+            Error(errors, "HOTSPOT_MULTIPLIER_MUST_INCREASE_YIELD",
+                "/rotation/hotspotYieldMultiplierBasisPoints",
+                "An enabled hotspot must increase the authoritative server-side yield multiplier.");
+        }
         foreach (var zoneId in rotation.HotspotZonePool)
         {
             if (!activeZones.Contains(zoneId))
@@ -637,6 +835,16 @@ public sealed class EconomyContentDefinitionValidator
         {
             Warning(warnings, "SMALL_WEEKLY_TASK_POOL", "/rotation/weeklyTaskPool",
                 "The launch target requires at least three weekly task definitions.");
+        }
+        if (rotation.HotspotZonePool.Count < 2)
+        {
+            Warning(warnings, "SMALL_HOTSPOT_ZONE_POOL", "/rotation/hotspotZonePool",
+                "A daily hotspot rotation needs at least two candidate exchange zones to move between locations.");
+        }
+        else if (rotation.DailyHotspotCount >= rotation.HotspotZonePool.Count)
+        {
+            Warning(warnings, "HOTSPOT_SET_DOES_NOT_ROTATE", "/rotation/dailyHotspotCount",
+                "Selecting the complete hotspot pool produces the same hotspot set every business date.");
         }
     }
 
@@ -664,6 +872,222 @@ public sealed class EconomyContentDefinitionValidator
         }
     }
 
+    private static void ValidateDynamicEconomyPolicy(
+        ContentDynamicEconomyPolicy? policy,
+        IReadOnlyList<ContentExchangeZoneDefinition> exchangeZones,
+        IReadOnlySet<string> activeZoneIds,
+        ContentRotationPolicy rotation,
+        List<ContentValidationIssue> errors,
+        List<ContentValidationIssue> warnings)
+    {
+        if (policy is null)
+        {
+            Warning(warnings, "DYNAMIC_ECONOMY_POLICY_NOT_CONFIGURED", "/dynamicEconomyPolicy",
+                "Legacy static zones/prices remain compatible, but no deterministic dynamic-zone, timed-hotspot, " +
+                "risk-level, or economic world-event evidence is published.");
+            return;
+        }
+
+        Required(errors, policy.PolicyVersion, 64,
+            "/dynamicEconomyPolicy/policyVersion", "DYNAMIC_ECONOMY_POLICY_VERSION_REQUIRED");
+        if (policy.ZonePool.Count is < 2 or > 100)
+        {
+            Error(errors, "INVALID_DYNAMIC_ZONE_POOL", "/dynamicEconomyPolicy/zonePool",
+                "Dynamic economy policy requires 2 to 100 candidate zones.");
+        }
+        ReportDuplicates(policy.ZonePool.Select(zone => zone.ZoneId),
+            "/dynamicEconomyPolicy/zonePool", "DUPLICATE_DYNAMIC_ZONE", errors);
+        var zonesById = exchangeZones
+            .GroupBy(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        foreach (var rule in policy.ZonePool)
+        {
+            if (!activeZoneIds.Contains(rule.ZoneId) || !zonesById.TryGetValue(rule.ZoneId, out var zone))
+            {
+                Error(errors, "INVALID_DYNAMIC_ZONE", "/dynamicEconomyPolicy/zonePool",
+                    $"Dynamic zone '{rule.ZoneId}' is missing or inactive.");
+                continue;
+            }
+            if (!Enum.IsDefined(rule.RiskLevel))
+            {
+                Error(errors, "INVALID_DYNAMIC_ZONE_RISK", "/dynamicEconomyPolicy/zonePool",
+                    $"Dynamic zone '{rule.ZoneId}' has an unsupported risk level.");
+            }
+            var scheduledDays = zone.OpenWindows
+                .Where(window => window.OpensAt != window.ClosesAt)
+                .Select(window => window.DayOfWeek)
+                .ToHashSet();
+            if (Enum.GetValues<DayOfWeek>().Any(day => !scheduledDays.Contains(day)))
+            {
+                Error(errors, "DYNAMIC_ZONE_DAILY_AVAILABILITY_NOT_PROVEN",
+                    "/dynamicEconomyPolicy/zonePool",
+                    $"Dynamic candidate '{rule.ZoneId}' lacks a non-empty static window on every weekday; " +
+                    "a deterministic daily selection could otherwise close every zone.");
+            }
+        }
+        if (policy.DailyOpenZoneCount is < 1 || policy.DailyOpenZoneCount > policy.ZonePool.Count)
+        {
+            Error(errors, "INVALID_DAILY_OPEN_ZONE_COUNT", "/dynamicEconomyPolicy/dailyOpenZoneCount",
+                "Daily open-zone count must select at least one and cannot exceed the dynamic zone pool.");
+        }
+        ValidateBusinessDayWindow(
+            policy.DynamicOpenStartsAtMinute,
+            policy.DynamicOpenDurationMinutes,
+            policy.DynamicOpenGraceSeconds,
+            "/dynamicEconomyPolicy/dynamicOpenStartsAtMinute",
+            "INVALID_DYNAMIC_OPEN_WINDOW",
+            errors);
+        if (policy.TimedHotspotCount is < 1 ||
+            policy.TimedHotspotCount > policy.DailyOpenZoneCount)
+        {
+            Error(errors, "INVALID_TIMED_HOTSPOT_COUNT", "/dynamicEconomyPolicy/timedHotspotCount",
+                "Timed hotspot count must be positive and cannot exceed the selected daily open zones.");
+        }
+        ValidateBusinessDayWindow(
+            policy.TimedHotspotStartsAtMinute,
+            policy.TimedHotspotDurationMinutes,
+            policy.TimedHotspotGraceSeconds,
+            "/dynamicEconomyPolicy/timedHotspotStartsAtMinute",
+            "INVALID_TIMED_HOTSPOT_WINDOW",
+            errors);
+        if (policy.TimedHotspotStartsAtMinute < policy.DynamicOpenStartsAtMinute ||
+            policy.TimedHotspotStartsAtMinute + policy.TimedHotspotDurationMinutes >
+            policy.DynamicOpenStartsAtMinute + policy.DynamicOpenDurationMinutes)
+        {
+            Error(errors, "HOTSPOT_OUTSIDE_DYNAMIC_OPEN_WINDOW", "/dynamicEconomyPolicy",
+                "The complete timed-hotspot window must be inside the dynamic open-zone window.");
+        }
+
+        ReportDuplicates(policy.WorldEvents.Select(worldEvent => worldEvent.EventKey),
+            "/dynamicEconomyPolicy/worldEvents", "DUPLICATE_WORLD_EVENT", errors);
+        var activeEvents = policy.WorldEvents.Where(worldEvent => worldEvent.Active).ToArray();
+        if (activeEvents.Length is < 2 or > 100 ||
+            activeEvents.Select(worldEvent => worldEvent.Kind).Distinct().Count() < 2)
+        {
+            Error(errors, "WORLD_EVENT_VARIETY_REQUIRED", "/dynamicEconomyPolicy/worldEvents",
+                "At least two active, distinct purely economic world-event kinds are required.");
+        }
+        if (policy.DailyWorldEventCount is < 1 || policy.DailyWorldEventCount > activeEvents.Length)
+        {
+            Error(errors, "INVALID_DAILY_WORLD_EVENT_COUNT", "/dynamicEconomyPolicy/dailyWorldEventCount",
+                "Daily world-event count must be positive and cannot exceed active event definitions.");
+        }
+        for (var index = 0; index < policy.WorldEvents.Count; index++)
+        {
+            var worldEvent = policy.WorldEvents[index];
+            var path = $"/dynamicEconomyPolicy/worldEvents/{index}";
+            if (!ValidKey(worldEvent.EventKey, 64) ||
+                string.IsNullOrWhiteSpace(worldEvent.DisplayName) || worldEvent.DisplayName.Length > 128 ||
+                !Enum.IsDefined(worldEvent.Kind) ||
+                worldEvent.ZoneYieldMultiplierBasisPoints is < 5_000 or > 50_000 ||
+                worldEvent.ProductPriceMultiplierBasisPoints is < 1_000 or > 20_000 ||
+                worldEvent.ZoneYieldMultiplierBasisPoints == 10_000 &&
+                worldEvent.ProductPriceMultiplierBasisPoints == 10_000)
+            {
+                Error(errors, "INVALID_WORLD_EVENT", path,
+                    "World events require bounded IDs/names and must change an authoritative yield or product-price fact.");
+            }
+            ValidateBusinessDayWindow(
+                worldEvent.StartsAtMinuteOfBusinessDay,
+                worldEvent.DurationMinutes,
+                worldEvent.GraceSeconds,
+                path + "/startsAtMinuteOfBusinessDay",
+                "INVALID_WORLD_EVENT_WINDOW",
+                errors);
+            if (worldEvent.ProductPriceMultiplierBasisPoints != 10_000 &&
+                (worldEvent.StartsAtMinuteOfBusinessDay != 0 || worldEvent.DurationMinutes != 1_440))
+            {
+                Error(errors, "PRODUCT_PRICE_EVENT_MUST_COVER_BUSINESS_DAY", path,
+                    "A product-price event must cover the complete business day because the immutable product projection is activated once per content version.");
+            }
+        }
+        if (!activeEvents.Any(worldEvent => worldEvent.ZoneYieldMultiplierBasisPoints > 10_000))
+        {
+            Error(errors, "WORLD_EVENT_YIELD_BOOST_REQUIRED", "/dynamicEconomyPolicy/worldEvents",
+                "At least one active resource-yield event is required for maximum-multiplier analysis.");
+        }
+        if (!activeEvents.Any(worldEvent => worldEvent.ProductPriceMultiplierBasisPoints < 10_000))
+        {
+            Error(errors, "WORLD_EVENT_DISCOUNT_REQUIRED", "/dynamicEconomyPolicy/worldEvents",
+                "At least one active supply-relief discount event is required for minimum-price analysis.");
+        }
+
+        var selectedYieldMultipliers = activeEvents
+            .Select(worldEvent => worldEvent.ZoneYieldMultiplierBasisPoints)
+            .OrderDescending()
+            .Take(Math.Max(0, policy.DailyWorldEventCount))
+            .ToArray();
+        var selectedPriceMultipliers = activeEvents
+            .Select(worldEvent => worldEvent.ProductPriceMultiplierBasisPoints)
+            .OrderDescending()
+            .Take(Math.Max(0, policy.DailyWorldEventCount))
+            .ToArray();
+        if (!EconomyDynamicEconomyRuntime.MultipliersFitInt32(selectedYieldMultipliers) ||
+            !EconomyDynamicEconomyRuntime.MultipliersFitInt32(selectedPriceMultipliers))
+        {
+            Error(errors, "DYNAMIC_MULTIPLIER_COMBINATION_OVERFLOW", "/dynamicEconomyPolicy/worldEvents",
+                "The maximum simultaneously selected world-event multiplier combination cannot be represented safely.");
+        }
+        foreach (var rule in policy.ZonePool)
+        {
+            if (!zonesById.TryGetValue(rule.ZoneId, out var zone))
+            {
+                continue;
+            }
+            var hotspotAdjusted = EconomyContentRuntimeService.CalculateZoneYieldMultiplierBasisPoints(
+                rotation,
+                zone,
+                hotspot: true);
+            if (!EconomyDynamicEconomyRuntime.MultipliersFitInt32(
+                    [hotspotAdjusted, .. selectedYieldMultipliers]))
+            {
+                Error(errors, "DYNAMIC_MULTIPLIER_COMBINATION_OVERFLOW",
+                    "/dynamicEconomyPolicy/worldEvents",
+                    $"Zone '{rule.ZoneId}' cannot represent its hotspot and maximum world-event yield combination safely.");
+            }
+        }
+    }
+
+    private static void ValidateEffectiveProductPriceBounds(
+        EconomyContentDefinition definition,
+        List<ContentValidationIssue> errors)
+    {
+        for (var index = 0; index < definition.Products.Count; index++)
+        {
+            var product = definition.Products[index];
+            if (!product.Active || product.UnitPrice <= 0)
+            {
+                continue;
+            }
+            var maximum = EconomyContentRuntimeService.CalculateMaximumPossibleEffectiveUnitPrice(
+                definition,
+                product);
+            if (maximum > MaximumWebSafeInteger)
+            {
+                Error(errors, "EFFECTIVE_PRODUCT_PRICE_OUT_OF_RANGE", $"/products/{index}/unitPrice",
+                    $"SKU '{product.Sku}' can reach effective price {maximum}, exceeding the web-safe integer limit after daily/event multipliers.");
+            }
+        }
+    }
+
+    private static void ValidateBusinessDayWindow(
+        int startsAtMinute,
+        int durationMinutes,
+        int graceSeconds,
+        string path,
+        string code,
+        List<ContentValidationIssue> errors)
+    {
+        if (startsAtMinute is < 0 or >= 1_440 ||
+            durationMinutes is < 1 or > 1_440 ||
+            startsAtMinute + durationMinutes > 1_440 ||
+            graceSeconds is < 0 or > 3_600)
+        {
+            Error(errors, code, path,
+                "Business-day windows require a 0..1439 start, positive duration ending within the day, and 0..3600 seconds grace.");
+        }
+    }
+
     private static void ValidateTags(
         IReadOnlyList<string> tags,
         string path,
@@ -674,6 +1098,43 @@ public sealed class EconomyContentDefinitionValidator
             Error(errors, "INVALID_TAGS", path, "Tags must contain at most 32 non-empty values of at most 64 characters.");
         }
         ReportDuplicates(tags, path, "DUPLICATE_TAG", errors);
+    }
+
+    private static void ValidatePresentation(
+        string? iconKey,
+        ContentRarity? rarity,
+        string? usage,
+        string path,
+        List<ContentValidationIssue> errors)
+    {
+        var supplied = iconKey is not null || rarity is not null || usage is not null;
+        if (!supplied)
+        {
+            // A fully omitted triple is a supported legacy document. Runtime
+            // DTOs resolve it to finite local fallback metadata without
+            // changing the document or its historical hash.
+            return;
+        }
+        if (iconKey is null || rarity is null || usage is null)
+        {
+            Error(errors, "PRESENTATION_FIELDS_INCOMPLETE", path,
+                "iconKey, rarity and usage must be supplied together or all omitted for legacy content.");
+        }
+        if (!EconomyContentPresentation.IsSafeIconKey(iconKey))
+        {
+            Error(errors, "INVALID_PRESENTATION_ICON", path + "/iconKey",
+                "iconKey must be one approved local ASCII icon identifier; URLs, paths and markup are forbidden.");
+        }
+        if (rarity is null || !Enum.IsDefined(rarity.Value))
+        {
+            Error(errors, "INVALID_PRESENTATION_RARITY", path + "/rarity",
+                "rarity must be one supported finite enum value.");
+        }
+        if (!EconomyContentPresentation.IsSafeUsage(usage))
+        {
+            Error(errors, "INVALID_PRESENTATION_USAGE", path + "/usage",
+                $"usage must contain 1 to {EconomyContentPresentation.MaximumUsageLength} non-control characters.");
+        }
     }
 
     private static void ValidateTimeZone(string timeZoneId, List<ContentValidationIssue> errors)

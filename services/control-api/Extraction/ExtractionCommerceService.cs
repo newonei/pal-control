@@ -85,6 +85,15 @@ public sealed class ExtractionCommerceService
         CancellationToken cancellationToken) =>
         _repository.FindAccountAsync(identityProvider, externalUserId, cancellationToken);
 
+    public Task<ExtractionAccount?> GetAccountAsync(
+        Guid accountId,
+        CancellationToken cancellationToken) =>
+        _repository.GetAccountAsync(accountId, cancellationToken);
+
+    public Task<IReadOnlyList<ExtractionAccount>> ListAccountsAsync(
+        CancellationToken cancellationToken) =>
+        _repository.ListAccountsAsync(cancellationToken);
+
     public Task<PlayerIdentityBindingResult> BindOrVerifyPlayerIdentityAsync(
         PlayerIdentityBindingRequest request,
         CancellationToken cancellationToken) =>

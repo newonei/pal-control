@@ -34,8 +34,8 @@ class FakePalworldHandler(BaseHTTPRequestHandler):
     rcon_commands: list[str] = []
     login_codes: dict[str, str] = {}
     pd_inventories: dict[str, dict[str, int]] = {
-        "steam_111": {"Leather": 5},
-        "steam_222": {"Leather": 7},
+        "steam_111": {"Leather": 5, "Bone": 4},
+        "steam_222": {"Leather": 7, "Bone": 3},
     }
     pd_players: list[dict[str, object]] = [
         {

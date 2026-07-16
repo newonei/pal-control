@@ -23,6 +23,9 @@ export type PlayerAuthenticationMode = {
 
 export type Currency = "merchantCoin" | "weeklyTicket";
 
+export type ContentRarity = "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary";
+export type PresentationSource = "content" | "legacy-fallback";
+
 export type Overview = {
   userId: string;
   displayName: string | null;
@@ -69,6 +72,10 @@ export type Product = {
   featuredRank: number | null;
   contentVersionId: string;
   contentHash: string;
+  iconKey: string;
+  rarity: ContentRarity;
+  usage: string;
+  presentationSource: PresentationSource;
 };
 
 export type Catalog = {
@@ -198,6 +205,198 @@ export type ReliableTaskSnapshot = {
   items: ReliableTask[];
 };
 
+export type SeasonSettlementBoard = {
+  board: "resource-value" | "task-points";
+  eligible: boolean;
+  rank: number | null;
+  reasonCode: string;
+  settledExchanges: number;
+  resourceQuantity: number;
+  resourceValue: number;
+  taskPoints: number;
+};
+
+export type SeasonSettlement = {
+  seasonId: string;
+  seasonCode: string;
+  cutoffAt: string;
+  frozenAt: string;
+  rewardState: "not-prepared" | "prepared" | "completed";
+  rules: {
+    rulesVersion: string;
+    lateSettlementGraceMinutes: number;
+    minimumSettledExchanges: number;
+    minimumResourceValue: number;
+    minimumTaskPoints: number;
+    resourceTieBreakRule: string;
+    taskTieBreakRule: string;
+  };
+  participation: {
+    participating: boolean;
+    reasonCode: string;
+    resource: SeasonSettlementBoard;
+    task: SeasonSettlementBoard;
+    items: Array<{ itemId: string; category: string; quantity: number; value: number }>;
+    categories: Array<{ category: string; quantity: number; value: number }>;
+  };
+  voucherExpiry: {
+    jobState: "not-prepared" | "prepared" | "running" | "completed";
+    itemState: "not-prepared" | "not-applicable" | "pending" | "expired";
+    scheduledAmount: number;
+    expiredAmount: number;
+    ledgerRecorded: boolean;
+    completedAt: string | null;
+  };
+  permanentRewards: Array<{
+    source: "standard" | "supplement";
+    board: "resource-value" | "task-points" | "manual";
+    rank: number | null;
+    marketCoin: number;
+    rewardKey: string;
+    decisionState: "granted" | "cancelled";
+    deliveryState: "pending" | "paid" | "cancelled";
+    reasonCode: string | null;
+    ledgerRecorded: boolean;
+    completedAt: string | null;
+  }>;
+};
+
+export type SeasonSettlementResponse = {
+  available: boolean;
+  status: "not-frozen" | "frozen";
+  settlement: SeasonSettlement | null;
+};
+
+export type PlayerNotification = {
+  notificationId: string;
+  schemaVersion: "1";
+  seasonId: string;
+  sourceType: "order-delivery" | "resource-settlement" | "season-end" | "reconciliation";
+  sourceState: "delivered" | "failed" | "partial" | "uncertain" | "refunded" |
+    "settled" | "cancelled" | "expired" | "frozen" | "reward-completed" |
+    "voucher-expired" | "completed" | "reconciliation-required";
+  severity: "success" | "info" | "warning" | "error";
+  title: string;
+  message: string;
+  occurredAt: string;
+  updatedAt: string;
+  readAt: string | null;
+  gameState: "pending" | "queued" | "sent" | "blocked" | "failed" | "uncertain" | "not-requested";
+  safetyAction: "none" | "do-not-repeat-contact-support";
+};
+
+export type PlayerNotificationFeed = {
+  schemaVersion: "1";
+  unreadCount: number;
+  hasActiveDelivery: boolean;
+  items: PlayerNotification[];
+};
+
+export type PlayerNotificationReadResult = {
+  notificationId: string;
+  readAt: string;
+  unreadCount: number;
+};
+
+export type PlayerNotificationReadAllResult = {
+  markedRead: number;
+  unreadCount: number;
+};
+
+export type TeamEconomyGoal = {
+  kind: "ResourceItems" | "ResourceValue" | "TaskPoints" | "DeliveredOrders";
+  displayName: string;
+  progress: number;
+  target: number;
+  unit: string;
+  achieved: boolean;
+  reachedAt: string | null;
+};
+
+export type TeamEconomyContribution = {
+  resourceItems: number;
+  resourceValue: number;
+  taskPoints: number;
+  deliveredOrders: number;
+  actualCurrencySpent: number;
+};
+
+export type TeamEconomyProjectionHealth = {
+  ready: boolean;
+  stale: boolean;
+  cutoffAt: string | null;
+  updatedAt: string | null;
+  sourceHash: string | null;
+  snapshotHash: string | null;
+  lastErrorCode: string | null;
+};
+
+export type TeamEconomyDashboard = {
+  enabled: boolean;
+  hasTeam: boolean;
+  teamId: string | null;
+  name: string | null;
+  status: "Active" | "Dissolved" | null;
+  isOwner: boolean;
+  memberCount: number;
+  joinedAt: string | null;
+  goals: TeamEconomyGoal[];
+  teamContribution: TeamEconomyContribution | null;
+  myContribution: TeamEconomyContribution | null;
+  transferCandidates: Array<{
+    memberHandle: string;
+    label: string;
+    joinedAt: string;
+  }>;
+  projection: TeamEconomyProjectionHealth;
+  policyNotice: string;
+};
+
+export type TeamEconomyMutation = {
+  teamId: string;
+  name: string;
+  status: "Active" | "Dissolved";
+  memberCount: number;
+  isOwner: boolean;
+  replayed: boolean;
+  updatedAt: string;
+};
+
+export type TeamEconomyInvitation = {
+  teamId: string;
+  inviteId: string;
+  token: string | null;
+  tokenShown: boolean;
+  expiresAt: string;
+  maximumUses: number;
+  remainingUses: number;
+  replayed: boolean;
+};
+
+export type TeamEconomyLeaderboardMetric =
+  "resourceValue" | "taskPoints" | "deliveredOrders";
+
+export type TeamEconomyLeaderboard = {
+  metric: "ResourceValue" | "TaskPoints" | "DeliveredOrders";
+  cutoffAt: string;
+  offset: number;
+  limit: number;
+  total: number;
+  nextCursor: string | null;
+  items: Array<{
+    rank: number;
+    teamId: string;
+    teamName: string;
+    memberCount: number;
+    value: number;
+    reachedAt: string;
+    isMyTeam: boolean;
+  }>;
+  tieBreakPolicy: string;
+  eligibilityPolicy: string;
+  projection: TeamEconomyProjectionHealth;
+};
+
 export type ExtractionZone = {
   id: string;
   displayName: string;
@@ -208,8 +407,45 @@ export type ExtractionZone = {
   worldY?: number | null;
   worldRadius?: number | null;
   routeHint?: string | null;
+  riskHint?: string | null;
   inRange?: boolean | null;
   distance?: number | null;
+  open?: boolean;
+  hotspot?: boolean;
+  yieldMultiplierBasisPoints?: number;
+  nextOpensAt?: string | null;
+  openWindows?: Array<{
+    dayOfWeek: number;
+    opensAt: string;
+    closesAt: string;
+    graceSeconds: number;
+  }> | null;
+  riskLevel?: ExtractionZoneRiskLevel | null;
+  dynamicSelectedOpen?: boolean;
+  dynamicOpenWindow?: EconomyEventWindow | null;
+  hotspotWindow?: EconomyEventWindow | null;
+  dynamicPolicyVersion?: string | null;
+  dynamicSeed?: string | null;
+  worldEvents?: EconomyWorldEvent[];
+};
+
+export type ExtractionZoneRiskLevel = "Guarded" | "Elevated" | "Severe";
+
+export type EconomyEventWindow = {
+  startsAt: string;
+  endsAt: string;
+  graceEndsAt: string;
+};
+
+export type EconomyWorldEvent = {
+  eventId: string;
+  eventKey: string;
+  displayName: string;
+  kind: "ResourceSurge" | "SupplyRelief";
+  seed: string;
+  window: EconomyEventWindow;
+  zoneYieldMultiplierBasisPoints: number;
+  productPriceMultiplierBasisPoints: number;
 };
 
 export type ExtractionPlayerPosition = {
@@ -227,6 +463,10 @@ export type ExtractionZoneList = {
   positionAvailable?: boolean;
   status?: string | null;
   statusMessage?: string | null;
+  nextOpensAt?: string | null;
+  dynamicPolicyVersion?: string | null;
+  dynamicSeed?: string | null;
+  worldEvents?: EconomyWorldEvent[];
 };
 
 type ExtractionMapPoint = { x: number; y: number };
@@ -235,6 +475,10 @@ type ExtractionZoneMapResponse = {
   status: string;
   statusMessage: string;
   sampledAt: string;
+  nextOpensAt: string | null;
+  dynamicPolicyVersion: string | null;
+  dynamicSeed: string | null;
+  worldEvents: EconomyWorldEvent[];
   player: {
     online: boolean;
     positionAvailable: boolean;
@@ -245,6 +489,7 @@ type ExtractionZoneMapResponse = {
     id: string;
     name: string;
     routeHint: string | null;
+    riskHint: string | null;
     mapPosition: ExtractionMapPoint;
     worldPosition: ExtractionMapPoint;
     radius: number;
@@ -252,11 +497,29 @@ type ExtractionZoneMapResponse = {
     distanceToCenter: number | null;
     distanceToBoundary: number | null;
     inside: boolean | null;
+    open: boolean;
+    hotspot: boolean;
+    yieldMultiplierBasisPoints: number;
+    nextOpensAt: string | null;
+    openWindows: Array<{
+      dayOfWeek: number;
+      opensAt: string;
+      closesAt: string;
+      graceSeconds: number;
+    }> | null;
+    riskLevel: ExtractionZoneRiskLevel | null;
+    dynamicSelectedOpen: boolean;
+    dynamicOpenWindow: EconomyEventWindow | null;
+    hotspotWindow: EconomyEventWindow | null;
+    dynamicPolicyVersion: string | null;
+    dynamicSeed: string | null;
+    worldEvents: EconomyWorldEvent[] | null;
   }>;
 };
 
 export type ExtractionQuote = {
   runId: string;
+  revision: number;
   state: "quoted";
   zoneName: string;
   items: Array<{
@@ -265,10 +528,16 @@ export type ExtractionQuote = {
     quantity: number;
     unitValue: number;
     totalValue: number;
+    iconKey: string;
+    rarity: ContentRarity;
+    usage: string;
+    presentationSource: PresentationSource;
   }>;
   itemCount: number;
   totalValue: number;
   expiresAt: string;
+  sourceQuoteRunId: string | null;
+  selectionDerived: boolean;
 };
 
 export class ApiClientError extends Error {
@@ -344,6 +613,119 @@ export function getReliableTasks() {
   return request<ReliableTaskSnapshot>("/me/tasks", { method: "GET" });
 }
 
+export function getLatestSeasonSettlement() {
+  return request<SeasonSettlementResponse>("/me/season-leaderboards/latest", { method: "GET" });
+}
+
+export function getSeasonSettlement(seasonId: string) {
+  return request<SeasonSettlementResponse>(
+    `/me/season-leaderboards/${encodeURIComponent(seasonId)}`,
+    { method: "GET" }
+  );
+}
+
+export function getPlayerNotifications(limit = 50) {
+  const bounded = Math.min(100, Math.max(1, Math.trunc(limit)));
+  return request<PlayerNotificationFeed>(`/me/notifications?limit=${bounded}`, { method: "GET" });
+}
+
+export function markPlayerNotificationRead(notificationId: string, csrfToken: string) {
+  return request<PlayerNotificationReadResult>(
+    `/me/notifications/${encodeURIComponent(notificationId)}/read`,
+    { method: "POST", csrfToken }
+  );
+}
+
+export function markAllPlayerNotificationsRead(csrfToken: string) {
+  return request<PlayerNotificationReadAllResult>(
+    "/me/notifications/read-all",
+    { method: "POST", csrfToken }
+  );
+}
+
+export function getTeamEconomy() {
+  return request<TeamEconomyDashboard>("/me/team-economy", { method: "GET" });
+}
+
+export function getTeamEconomyLeaderboard(
+  metric: TeamEconomyLeaderboardMetric,
+  cursor: string | null = null,
+  limit = 50
+) {
+  const query = new URLSearchParams({ limit: String(Math.min(100, Math.max(1, limit))) });
+  if (cursor) query.set("cursor", cursor);
+  return request<TeamEconomyLeaderboard>(
+    `/me/team-economy/leaderboards/${metric}?${query.toString()}`,
+    { method: "GET" }
+  );
+}
+
+export function createTeamEconomyTeam(name: string, idempotencyKey: string, csrfToken: string) {
+  return request<TeamEconomyMutation>("/me/team-economy/teams", {
+    method: "POST",
+    json: { name },
+    idempotencyKey,
+    csrfToken
+  });
+}
+
+export function rotateTeamEconomyInvitation(
+  maximumUses: number,
+  idempotencyKey: string,
+  csrfToken: string
+) {
+  return request<TeamEconomyInvitation>("/me/team-economy/invite/rotate", {
+    method: "POST",
+    json: { maximumUses },
+    idempotencyKey,
+    csrfToken
+  });
+}
+
+export function joinTeamEconomyTeam(token: string, idempotencyKey: string, csrfToken: string) {
+  return request<TeamEconomyMutation>("/me/team-economy/join", {
+    method: "POST",
+    json: { token },
+    idempotencyKey,
+    csrfToken
+  });
+}
+
+export function leaveTeamEconomyTeam(idempotencyKey: string, csrfToken: string) {
+  return request<TeamEconomyMutation>("/me/team-economy/leave", {
+    method: "POST",
+    json: {},
+    idempotencyKey,
+    csrfToken
+  });
+}
+
+export function transferTeamEconomyOwner(
+  memberHandle: string,
+  idempotencyKey: string,
+  csrfToken: string
+) {
+  return request<TeamEconomyMutation>("/me/team-economy/owner/transfer", {
+    method: "POST",
+    json: { memberHandle },
+    idempotencyKey,
+    csrfToken
+  });
+}
+
+export function dissolveTeamEconomyTeam(
+  confirmation: string,
+  idempotencyKey: string,
+  csrfToken: string
+) {
+  return request<TeamEconomyMutation>("/me/team-economy/dissolve", {
+    method: "POST",
+    json: { confirmation },
+    idempotencyKey,
+    csrfToken
+  });
+}
+
 export function claimNewPlayerActivity(
   activityKey: string,
   version: number,
@@ -381,8 +763,21 @@ export async function getExtractionZones(): Promise<ExtractionZoneList> {
         worldY: zone.worldPosition?.y ?? null,
         worldRadius: zone.worldRadius,
         routeHint: zone.routeHint,
+        riskHint: zone.riskHint,
         inRange: positionAvailable ? zone.inside : null,
-        distance: positionAvailable ? zone.distanceToCenter : null
+        distance: positionAvailable ? zone.distanceToCenter : null,
+        open: zone.open,
+        hotspot: zone.hotspot,
+        yieldMultiplierBasisPoints: zone.yieldMultiplierBasisPoints,
+        nextOpensAt: zone.nextOpensAt,
+        openWindows: zone.openWindows,
+        riskLevel: zone.riskLevel,
+        dynamicSelectedOpen: zone.dynamicSelectedOpen,
+        dynamicOpenWindow: zone.dynamicOpenWindow,
+        hotspotWindow: zone.hotspotWindow,
+        dynamicPolicyVersion: zone.dynamicPolicyVersion,
+        dynamicSeed: zone.dynamicSeed,
+        worldEvents: zone.worldEvents ?? []
       })),
       playerPosition: positionAvailable ? {
         mapX: response.player.mapPosition?.x ?? null,
@@ -394,7 +789,11 @@ export async function getExtractionZones(): Promise<ExtractionZoneList> {
       playerOnline: response.player.online,
       positionAvailable,
       status: response.status,
-      statusMessage: response.statusMessage
+      statusMessage: response.statusMessage,
+      nextOpensAt: response.nextOpensAt,
+      dynamicPolicyVersion: response.dynamicPolicyVersion,
+      dynamicSeed: response.dynamicSeed,
+      worldEvents: response.worldEvents ?? []
     };
   }
 
@@ -425,6 +824,21 @@ export function createOrder(
 export function quoteRun(csrfToken: string) {
   return request<ExtractionQuote>("/me/runs/quote", {
     method: "POST",
+    csrfToken
+  });
+}
+
+export function selectQuote(
+  runId: string,
+  sourceRevision: number,
+  items: Array<{ itemId: string; quantity: number }>,
+  idempotencyKey: string,
+  csrfToken: string
+) {
+  return request<ExtractionQuote>(`/me/runs/${encodeURIComponent(runId)}/select`, {
+    method: "POST",
+    json: { sourceRevision, items },
+    idempotencyKey,
     csrfToken
   });
 }

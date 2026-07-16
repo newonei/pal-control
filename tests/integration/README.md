@@ -6,11 +6,25 @@ Run all isolated integration tests sequentially from the repository root:
 npm run test:integration
 ```
 
-Use `npm test` to run both console-web and player-web Node tests plus the
-contract and integration suites. The smoke tests require Windows PowerShell,
-.NET 10, Python 3, and restored NuGet dependencies. They use only local fakes,
-synthetic resource catalogs and disposable temporary directories; no live
-Palworld server or ignored local game-data catalog is contacted.
+Use `npm test` to run both console-web and player-web Node tests, the player
+portal Playwright E2E suite, and the contract and integration suites. The
+smoke tests require Windows PowerShell, .NET 10, Python 3, and restored NuGet
+dependencies. They use only local fakes, synthetic resource catalogs and
+disposable temporary directories; no live Palworld server or ignored local
+game-data catalog is contacted.
+
+Install the pinned Playwright Chromium once, then run the player portal suite
+independently when working on responsive or accessibility behavior:
+
+```powershell
+npx playwright install chromium
+npm run test:player:e2e
+```
+
+It uses mocked same-origin player APIs in a real browser and covers keyboard
+navigation, dialog focus trapping/restoration, focused error guidance, a
+375x812 mobile viewport, and serious/critical WCAG A/AA Axe findings on login,
+portal, and modal states. CI installs Chromium before the unified test command.
 
 The Control API boundary smoke test starts the Release executable on a random
 loopback port. It verifies read readiness while disabled PalDefender/RCON keep
@@ -59,6 +73,20 @@ commit, restart persistence and no blind redispatch:
 .\tests\integration\native-settlement-smoke.ps1
 ```
 
+The selective-resource-sale harness uses the real SQLite run store and Native
+payload builder. It covers invalid and unsafe selections with zero side effects,
+atomic source cancellation/child creation, frozen content and dynamic evidence,
+20 exact replays, cross-account/source key conflicts, process restart response
+loss, a 100-call selection-versus-settlement race, injected persistence rollback,
+SQLite trigger evidence that derivation performs exactly one source-row update
+and one child-row insert without deleting historical runs, stale row-CAS rollback
+after an earlier insert in the same transaction, the full Native optimistic-lock
+snapshot with a selected-only consume list, and Development hash semantics:
+
+```powershell
+.\tests\integration\selective-resource-sale-smoke.ps1
+```
+
 The delivery-receipt smoke runs the production outbox and receipt store with a
 deterministic PalDefender client. It verifies persistence before dispatch,
 exact structured acknowledgements, malformed and missing readback handling,
@@ -89,13 +117,32 @@ publish and rollback failures:
 ```
 
 The economy-balance guard runs a deterministic 100-player x 7-day simulation
-and rejects direct same-currency resale arbitrage. The reliable-task smoke
-proves six version-pinned daily/weekly tasks, authoritative event gating,
-20-way replay, unique wallet/ranking rewards and restart recovery:
+and rejects attested bundle/transformation/cross-currency arbitrage. The
+permanent-currency contract proves the built-in 480 weekly MarketCoin inflow
+and 1200 outflow caps, rejects missing/unbounded sources or sinks, and exercises
+real task-reward/purchase idempotency. The reliable-task smoke proves six
+version-pinned daily/weekly tasks, authoritative event gating, 20-way replay,
+unique wallet/ranking rewards and restart recovery:
 
 ```powershell
 .\tests\integration\economy-balance-guard-smoke.ps1
+.\tests\integration\permanent-currency-contract-smoke.ps1
 .\tests\integration\reliable-tasks-smoke.ps1
+```
+
+The season-leaderboard smoke uses the real SQLite settlement, reliable-task,
+identity-ban, snapshot, reward-job and wallet-ledger stores. It verifies the
+15-minute cutoff, minimum contribution, deterministic tie rules, per-item and
+per-category aggregates, pre-freeze exclusions, post-freeze reward
+cancellation, immutable audit hashes, restart persistence, and 20 replays of
+freeze, standard payout and manual supplement without duplicate ledgers. It
+also verifies self-only latest/by-season player results, 200/not-frozen and
+stable 404 contracts, identity-override rejection, current-week rollover with
+the previous frozen result still visible, and voucher/reward job-to-ledger
+reconciliation across a process restart:
+
+```powershell
+.\tests\integration\season-leaderboard-smoke.ps1
 ```
 
 The identity-binding smoke test exercises the production SQLite repository and
@@ -115,7 +162,10 @@ initial world binding with restart persistence, published catalog evidence,
 fail-closed stale-offer rejection, evidence-bound catalog purchase,
 receipt-backed delivery, resource exchange, wallet credit, idempotent replay,
 session revocation, the adapter-neutral settlement status endpoint and its
-deprecated alias:
+deprecated alias. The resource path also rejects empty/duplicate/unknown/
+over-quantity selections, identity overrides and IDOR, then proves a selected
+`Bone:2` child quote, 20 exact replays, source cancellation, selected-only RCON
+deletion, unchanged unselected inventory and exactly-once wallet credit:
 
 ```powershell
 .\tests\integration\player-economy-security-smoke.ps1
@@ -191,4 +241,66 @@ cookies, tokens or passwords:
 
 ```powershell
 .\tests\integration\economy-observability-smoke.ps1
+```
+
+The logging-correlation harness reflects the compiled service assembly and
+requires an exact inventory of hosted workers, logger owners and external
+adapters. It also parses IL to reject raw `Exception` logger overloads, then
+injects Cookie/code/token/password/PlayerUID-bearing failures to prove that
+only correlation metadata, exception type and one-way fingerprints reach the
+logging provider:
+
+```powershell
+.\tests\integration\logging-correlation-smoke.ps1
+```
+
+The economy-analytics smoke runs the real SQLite repository with 120 synthetic
+accounts. It proves server-observed portal/catalog facts are unique across
+refreshes, successful shop and resource outcomes exclude failed/refunded and
+`uncertain` rows, product/exchange rates retain complete denominators, dual
+currencies and zone heat are recomputed, pagination and restart preserve the
+source hash, cohorts below five are suppressed, and corrupted source JSON fails
+closed with a stable code:
+
+```powershell
+.\tests\integration\economy-analytics-smoke.ps1
+```
+
+The Windows production-deployment smoke validates pinned archive hashes,
+immutable release manifests, isolated service identities, external state,
+Caddy persistent paths, repeated install and static-root drift repair,
+stopped-state backup, corrupt-snapshot rejection, target-health failure
+recovery and same-contract rollback without discarding a newer transaction. It
+rejects cross-contract binary rollback, then starts the real Release Control
+API twice with an external production-shaped configuration and uses the real
+SQLite provider to check integrity, foreign keys and an unchanged startup-
+migration fingerprint:
+
+```powershell
+.\tests\integration\windows-production-deployment-smoke.ps1
+```
+
+The SQLite economy-reconciliation smoke creates a real account, permanent and
+weekly wallet streams, delivered order/delivery, PalDefender per-item command,
+receipt/evidence, resource settlement run, unique credit and idempotency records.
+The read-only auditor recomputes every account from
+sequence-ordered ledger entries and emits privacy-safe canonical hashes for
+logical rows and every application table. The harness proves JSON formatting
+does not change hashes, then injects balance, idempotency, run-credit,
+delivery/receipt/per-item-command references and immutable SQL-column faults;
+each must produce a stable issue code plus strict baseline row differences:
+
+```powershell
+.\tests\integration\economy-reconciliation-smoke.ps1
+```
+
+The player-notification smoke uses the durable SQLite projection with four
+versioned source classes. It proves 20x replay, restart persistence, the crash
+window after durable projection but before game-channel status persistence,
+same-row season milestones, delivered/settled-only success semantics, identity
+override rejection, A/B feed/read isolation, and no game target identifier in
+the player response:
+
+```powershell
+.\tests\integration\player-notifications-smoke.ps1
 ```

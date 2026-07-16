@@ -18,13 +18,15 @@ v1 明确不提供恢复、删除、上传、在线覆盖或原始 `.sav` 字段
 开发环境默认配置位于 `services/control-api/appsettings.json`：
 
 ```json
-"SaveManagement": {
-  "BackupRoot": "../../backups/savegames",
-  "RequireRunningProcess": true,
-  "SnapshotTimeoutSeconds": 45,
-  "StabilitySampleMilliseconds": 750,
-  "StabilityRequiredSamples": 3,
-  "MinimumFreeSpaceBytes": 1073741824
+{
+  "SaveManagement": {
+    "BackupRoot": "../../backups/savegames",
+    "RequireRunningProcess": true,
+    "SnapshotTimeoutSeconds": 45,
+    "StabilitySampleMilliseconds": 750,
+    "StabilityRequiredSamples": 3,
+    "MinimumFreeSpaceBytes": 1073741824
+  }
 }
 ```
 

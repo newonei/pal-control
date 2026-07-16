@@ -1123,7 +1123,8 @@ public sealed class EconomyContinuityService
             ["paldefender-command-outbox"] =
                 ["paldefender_commands", "paldefender_command_events", "paldefender_command_migrations"],
             ["weekly-rollover-state-machine"] = ["rollover_operations", "rollover_steps"],
-            ["season-settlement-jobs"] = ["season_settlement_jobs", "season_settlement_items"]
+            ["season-settlement-jobs"] = ["season_settlement_jobs", "season_settlement_items"],
+            ["player-notifications"] = ["player_notifications", "player_notification_events"]
         };
         var components = new List<string>();
         using (var migrations = connection.CreateCommand())

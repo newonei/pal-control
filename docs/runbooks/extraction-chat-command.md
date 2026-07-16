@@ -40,7 +40,7 @@ MOD 使用 UE4SS 的 UFunction post hook 监听：
 
 同时兼容直接输入 `撤离`、`extract`。`/撤离`、`/extract` 不是普通玩家指令。
 
-命令只回复发起者，并返回：
+命令只回复发起者，并返回构建期兼容主点：
 
 - 撤离点名称：开发服撤离点；
 - 地图坐标：`X 248, Y -504`；
@@ -63,6 +63,6 @@ MOD 使用 UE4SS 的 UFunction post hook 监听：
 版本重新做反射探针和专服实测。验收时使用普通非管理员玩家分别发送 `!撤离`、`!extract`，
 确认仅发起者收到两行提示，其他玩家无私信，并核对商城余额、订单数、撤离 run 和账本均无变化。
 
-当前提示是 MOD 的构建期只读副本。修改
+当前提示是 MOD 的构建期只读副本，只能作为 `ExtractionZones[0]` 的快速路线提示；它不读取内容 current pointer，也不表示该点是今日热点。玩家门户地图才是多兑换点、开放窗口、下一开放时间、热点有效收益倍率与风险提示的权威视图。修改
 `services/control-api/appsettings.json` 的 `ExtractionMode:ExtractionZones[0]` 时，必须同时更新
-`mods/pal-control-native/Source/PalControl/Private/GameAdapter/ExtractionChatCommand.cpp` 并重新构建。
+`mods/pal-control-native/Source/PalControl/Private/GameAdapter/ExtractionChatCommand.cpp` 并重新构建；新增或轮换其他点不应硬编码进聊天回复。

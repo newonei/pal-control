@@ -110,4 +110,4 @@ Prometheus 标签只有稳定状态、队列、功能、告警码和版本信息
 npx --yes @redocly/cli lint packages/contracts/openapi/control-api.yaml
 ```
 
-黑盒测试会同时扫描 JSON 和 Prometheus 响应，拒绝 `playerIdentifier`、`playerUid`、`externalUserId`、SteamID、Cookie、Token、密码以及测试管理密钥。全服务其他后台日志的统一 correlation scope 仍应作为发布前独立审计项持续检查，不能因为本指标模块合规就推断所有旧日志已完成改造。
+黑盒测试会同时扫描 JSON 和 Prometheus 响应，拒绝 `playerIdentifier`、`playerUid`、`externalUserId`、SteamID、Cookie、Token、密码以及测试管理密钥。全服务后台日志另由编译后 worker/adapter 清单、IL 调用审计和恶意异常行为测试独立验证；参见 [日志关联与脱敏审计](logging-correlation-and-redaction.md)。指标响应黑盒扫描不能替代该审计，两类门禁都必须通过。

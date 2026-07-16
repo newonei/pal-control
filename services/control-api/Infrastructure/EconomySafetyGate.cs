@@ -862,6 +862,15 @@ public sealed class EconomySafetyGate
             {
                 previous = _state;
             }
+            var previousCircuit = feature == EconomyWriteFeature.Purchase
+                ? previous.Purchase
+                : previous.ResourceExchange;
+            if (previousCircuit.WritesEnabled == writesEnabled &&
+                string.Equals(previousCircuit.Reason, reason.Trim(), StringComparison.Ordinal) &&
+                string.Equals(previousCircuit.Actor, actor.Trim(), StringComparison.Ordinal))
+            {
+                return previous;
+            }
             var circuit = new EconomyCircuitState(
                 writesEnabled,
                 reason.Trim(),

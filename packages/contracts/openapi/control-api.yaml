@@ -54,6 +54,10 @@ tags:
       definitions with guarded draft validation, publication and rollback.
   - name: EconomyObservability
     description: Privacy-safe economy state, latency, invariant, alert, backup and circuit metrics.
+  - name: EconomyAnalytics
+    description: >-
+      Privacy-safe gameplay funnel, conversion, zone and currency aggregates
+      recomputed from authoritative SQLite facts.
   - name: AdminSecurity
     description: Administrator identity and immutable security-audit projections.
   - name: PlayerPortal
@@ -61,6 +65,15 @@ tags:
       Public player self-service endpoints. Authenticated player identity is
       derived exclusively from the HttpOnly session cookie; these operations
       never accept a userId override in the query string or business request body.
+  - name: TeamEconomy
+    description: >-
+      Same-server weekly team goals and rankings projected only from authoritative
+      settled resources, delivered orders, and reliable-task ranking rewards.
+  - name: Federation
+    description: >-
+      Read-only multi-server registry, compatibility health, and HMAC-subject
+      account aggregation. Every Palworld server retains its own authoritative
+      write plane; cross-server wallet or inventory transfer is not supported.
 paths:
   /servers/{serverId}/capabilities:
     get:
@@ -310,7 +323,8 @@ paths:
       summary: Publish a validated immutable economy-content version
       description: >-
         Requires maintenance mode, zero active player operations, and no
-        non-terminal resource quotes or settlements. The confirmation must
+        resource run that has entered consumption or an uncertain state. Pure
+        Quoted runs may remain and are invalidated by content evidence. The confirmation must
         exactly equal `PUBLISH ECONOMY CONTENT` and the business date must be
         the server's current configured business date.
       operationId: publishEconomyContentDraft
@@ -2522,6 +2536,386 @@ paths:
           $ref: "#/components/responses/PlayerPortalError"
         default:
           $ref: "#/components/responses/PlayerPortalError"
+  /player/me/season-leaderboards/latest:
+    get:
+      tags: [PlayerPortal]
+      summary: Read the authenticated player's latest frozen weekly result
+      description: >-
+        Selects the most recent frozen leaderboard for the configured server,
+        even after the active weekly world has advanced. Identity comes only
+        from the HttpOnly player session; accountId, userId, SteamID, and
+        PlayerUID query overrides are rejected. If no snapshot has ever been
+        frozen, this read returns HTTP 200 with status not-frozen.
+      operationId: getLatestPlayerSeasonSettlement
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Latest frozen self-only result, or an explicit not-frozen state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerSeasonSettlementResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/season-leaderboards/{seasonId}:
+    get:
+      tags: [PlayerPortal]
+      summary: Read the authenticated player's result for one frozen week
+      description: >-
+        Returns only the authenticated account's immutable ranking entry,
+        voucher-expiry job evidence, and permanent MarketCoin decisions
+        reconciled against authoritative wallet ledgers. It never returns
+        another account, platform subject, PlayerUID, or global leaderboard.
+      operationId: getPlayerSeasonSettlement
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - name: seasonId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Frozen self-only weekly result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerSeasonSettlementResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        "404":
+          description: The requested frozen weekly leaderboard does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/notifications:
+    get:
+      tags: [PlayerPortal]
+      summary: List the authenticated player's durable notification feed
+      description: >-
+        Returns only the account selected by the HttpOnly player session. The
+        feed contains terminal order delivery, resource settlement, season-end,
+        and reconciliation projections. It never exposes an account id,
+        platform subject, PlayerUID, game target id, or raw source event key.
+      operationId: listPlayerNotifications
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Self-only notification feed and unread activity state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerNotificationFeed"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/notifications/{notificationId}/read:
+    post:
+      tags: [PlayerPortal]
+      summary: Mark one authenticated player's notification as read
+      description: >-
+        The notification must belong to the session account. A notification id
+        belonging to another account is indistinguishable from a missing id.
+      operationId: markPlayerNotificationRead
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/NotificationId"
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+      responses:
+        "200":
+          description: Idempotent read marker and remaining unread count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerNotificationReadResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/notifications/read-all:
+    post:
+      tags: [PlayerPortal]
+      summary: Mark all authenticated player's notifications as read
+      operationId: markAllPlayerNotificationsRead
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+      responses:
+        "200":
+          description: Number of newly read notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerNotificationReadAllResult"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy:
+    get:
+      tags: [TeamEconomy]
+      summary: Get the authenticated player's current weekly team dashboard
+      description: >-
+        Account, server, and weekly-world identity come only from the HttpOnly
+        player session. A missing first projection is returned as not ready,
+        never as fabricated zero progress. No member accountId, UserId,
+        SteamID, PlayerUID, or display name is returned.
+      operationId: getPlayerTeamEconomy
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Self-only team membership, goals, contribution, and projection health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyDashboard"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/leaderboards/{metric}:
+    get:
+      tags: [TeamEconomy]
+      summary: Get one public same-server weekly team leaderboard
+      description: >-
+        Returns public team names, member counts, aggregate values and ranks.
+        Banned-account contributions and members are excluded; dissolved teams
+        are hidden. Cross-server teams and transfers are not supported.
+      operationId: getPlayerTeamEconomyLeaderboard
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - name: metric
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [resourceValue, taskPoints, deliveredOrders]
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Stable page ordered by value desc, reachedAt asc, teamId asc
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyLeaderboardPage"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/teams:
+    post:
+      tags: [TeamEconomy]
+      summary: Create a team in the authenticated weekly world
+      operationId: createPlayerTeamEconomyTeam
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyCreateRequest"
+      responses:
+        "200":
+          description: Created or durably replayed team command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyMutationResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/invite/rotate:
+    post:
+      tags: [TeamEconomy]
+      summary: Revoke old invitations and issue one new invitation
+      description: >-
+        Owner-only. The bearer token appears only in the first successful
+        response; durable idempotent replays intentionally return token null.
+        Persistence stores only a peppered HMAC digest.
+      operationId: rotatePlayerTeamEconomyInvitation
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyRotateInviteRequest"
+      responses:
+        "200":
+          description: One-time invitation metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyInviteResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/join:
+    post:
+      tags: [TeamEconomy]
+      summary: Join a same-server weekly team using an invitation
+      operationId: joinPlayerTeamEconomyTeam
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyJoinRequest"
+      responses:
+        "200":
+          description: Joined or durably replayed membership command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyMutationResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/leave:
+    post:
+      tags: [TeamEconomy]
+      summary: Leave the authenticated player's current team
+      description: Owners must transfer ownership or explicitly dissolve first.
+      operationId: leavePlayerTeamEconomyTeam
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyEmptyRequest"
+      responses:
+        "200":
+          description: Closed membership command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyMutationResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/owner/transfer:
+    post:
+      tags: [TeamEconomy]
+      summary: Transfer team ownership to an opaque active-member handle
+      operationId: transferPlayerTeamEconomyOwner
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyTransferRequest"
+      responses:
+        "200":
+          description: Ownership transfer result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyMutationResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/team-economy/dissolve:
+    post:
+      tags: [TeamEconomy]
+      summary: Dissolve the owner's current weekly team
+      description: >-
+        Requires the exact team name as confirmation. Historical projection
+        evidence remains auditable while the team is hidden from public ranking.
+      operationId: dissolvePlayerTeamEconomyTeam
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamEconomyDissolveRequest"
+      responses:
+        "200":
+          description: Dissolved team command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamEconomyMutationResponse"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
   /player/me/new-player-activities/{activityKey}/versions/{version}/claim:
     post:
       tags: [PlayerPortal]
@@ -2699,6 +3093,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionQuote"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /player/me/runs/{runId}/select:
+    post:
+      tags: [PlayerPortal]
+      summary: Atomically derive a selected child quote for the authenticated player
+      description: >-
+        Player identity, account and season are derived only from the HttpOnly
+        session. The server validates the source revision and current content
+        pointer, then cancels the source and creates exactly one selected child
+        in a single durable snapshot. Exact Idempotency-Key replays return that
+        child after process restart; a different source, account or canonical
+        selection conflicts without changing either quote.
+      operationId: selectPlayerPortalExtractionQuote
+      security:
+        - playerSessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ExtractionRunId"
+        - $ref: "#/components/parameters/PlayerPortalOrigin"
+        - $ref: "#/components/parameters/PlayerPortalCsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectPlayerPortalExtractionQuoteRequest"
+      responses:
+        "200":
+          description: Created or exactly replayed selected child quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionQuote"
+        "409":
+          $ref: "#/components/responses/PlayerPortalError"
         default:
           $ref: "#/components/responses/PlayerPortalError"
   /player/me/runs/{runId}/settle:
@@ -2900,6 +3330,106 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /economy/analytics:
+    get:
+      tags: [EconomyAnalytics]
+      summary: Recompute privacy-safe economy gameplay analytics
+      description: >-
+        Viewer-only aggregate report recomputed from authoritative SQLite
+        orders, deliveries, settlement runs, ledger rows, identity bindings,
+        content versions and unique server-observed portal/catalog facts. The
+        route is read-only: clients cannot upload analytics events. Non-zero
+        cohorts smaller than five accounts expose neither counts nor amounts,
+        and no player, account or platform identifier is returned. The default
+        window is the latest seven completed business days.
+      operationId: getEconomyAnalytics
+      parameters:
+        - name: serverId
+          in: query
+          required: false
+          description: Defaults to the configured extraction server.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: from
+          in: query
+          required: false
+          description: Inclusive start date; must be no more than 92 days before `to`.
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          description: Inclusive end date.
+          schema:
+            type: string
+            format: date
+        - name: dateBasis
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [business, utc]
+            default: business
+        - name: seasonId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: contentVersionId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          description: Shared page size for product and zone rows.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque nextCursor value returned by the preceding page.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+      responses:
+        "200":
+          description: Authoritative aggregate analytics report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyAnalyticsReport"
+        "400":
+          description: Invalid date, date basis, filter or pagination input.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: The season or content version is not owned by the selected server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: An authoritative source invariant failed; analytics fail closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /economy/metrics:
     get:
       tags: [EconomyObservability]
@@ -2957,6 +3487,7 @@ paths:
             enum: [purchase, resource-exchange]
         - $ref: "#/components/parameters/AdminTotp"
         - $ref: "#/components/parameters/AdminReason"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -2970,6 +3501,105 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EconomySafetyGateState"
+        "409":
+          description: ADMIN_IDEMPOTENCY_CONFLICT when the administrator key is reused for another actor or request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/operations/overview:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Read the global privacy-safe economy operations projection
+      description: >-
+        Returns authoritative aggregate and account-scoped operational state without
+        enumerating player routes. Account identity is exposed only as platformSubjectHash;
+        raw platformSubject and PlayerUID values are never part of this contract.
+      operationId: getEconomyOperationsOverview
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 250
+            default: 100
+        - name: refresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Current global operations projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyOperationsOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/operations/orders/{orderId}/evidence:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Read delivery evidence for one economy order
+      description: Raw platform subjects and PlayerUID values are replaced by fixed-format subject hashes.
+      operationId: getEconomyOperationOrderEvidence
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Immutable request, receipt and inventory-readback evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyOperationOrderEvidence"
+        "404":
+          description: ORDER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        default:
+          $ref: "#/components/responses/ExtractionError"
+  /extraction/admin/operations/runs/{runId}/evidence:
+    get:
+      tags: [ExtractionAdmin]
+      summary: Read quote and settlement evidence for one resource run
+      description: Native inventory ownership is exposed only as ownerSubjectHash; raw PlayerUID is omitted.
+      operationId: getEconomyOperationRunEvidence
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Frozen quote and settlement evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomyOperationRunEvidence"
+        "404":
+          description: EXTRACTION_RUN_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         default:
           $ref: "#/components/responses/ExtractionError"
   /extraction/admin/new-player-activities:
@@ -3245,6 +3875,36 @@ paths:
                 $ref: "#/components/schemas/ExtractionQuote"
         default:
           $ref: "#/components/responses/ExtractionError"
+  /extraction/runs/{runId}/select:
+    post:
+      tags: [Extraction]
+      summary: Atomically derive a selected resource quote
+      description: >-
+        Administrative compatibility endpoint. The source quote is cancelled
+        and its selected child is created in one durable run-store snapshot.
+        The request must carry the source revision, authenticated target UserId,
+        one to 64 unique quoted ItemIDs, safe quantities, and Idempotency-Key.
+      operationId: selectExtractionQuote
+      parameters:
+        - $ref: "#/components/parameters/ExtractionRunId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectExtractionQuoteRequest"
+      responses:
+        "200":
+          description: Created or exactly replayed selected child quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionQuote"
+        "409":
+          $ref: "#/components/responses/ExtractionError"
+        default:
+          $ref: "#/components/responses/ExtractionError"
   /extraction/runs/{runId}/settle:
     post:
       tags: [Extraction]
@@ -3306,6 +3966,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionWalletAdjustmentResponse"
+        "409":
+          description: ADMIN_IDEMPOTENCY_CONFLICT or a wallet-state conflict.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         default:
           $ref: "#/components/responses/ExtractionError"
   /extraction/admin/orders/{orderId}/reconcile:
@@ -3410,6 +4076,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/AdminTotp"
         - $ref: "#/components/parameters/AdminReason"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -3423,6 +4090,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtractionOperationGateState"
+        "409":
+          description: ADMIN_IDEMPOTENCY_CONFLICT when the administrator key is reused for another actor or request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         default:
           $ref: "#/components/responses/ExtractionError"
   /extraction/admin/rollover/preflight:
@@ -3900,6 +4573,115 @@ paths:
                 $ref: "#/components/schemas/SeasonSettlementJob"
         default:
           $ref: "#/components/responses/ExtractionError"
+  /internal/federation/profile:
+    post:
+      tags: [Federation]
+      summary: Resolve one irreversible federation subject on the local node
+      description: >-
+        Server-to-server read only. The request contains an HMAC-derived subject,
+        never a SteamID, PlayerUID, accountId, cookie, or user-selected URL. The
+        response reads the local authoritative account, active week, and wallet
+        without creating an account, seeding currency, or mutating an index.
+      operationId: getInternalFederationProfile
+      security:
+        - federationNodeKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FederationProfileRequest"
+      responses:
+        "200":
+          description: Local self-only profile projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationLocalProfile"
+        "400":
+          $ref: "#/components/responses/FederationError"
+        "401":
+          $ref: "#/components/responses/FederationError"
+        "413":
+          $ref: "#/components/responses/FederationError"
+        "429":
+          $ref: "#/components/responses/FederationError"
+        default:
+          $ref: "#/components/responses/FederationError"
+  /internal/federation/health:
+    get:
+      tags: [Federation]
+      summary: Read this node's registered compatibility identity
+      operationId: getInternalFederationHealth
+      security:
+        - federationNodeKey: []
+      responses:
+        "200":
+          description: Node health and compatibility evidence pointer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationNodeHealth"
+        "401":
+          $ref: "#/components/responses/FederationError"
+        "429":
+          $ref: "#/components/responses/FederationError"
+        default:
+          $ref: "#/components/responses/FederationError"
+  /player/me/federation:
+    get:
+      tags: [Federation, PlayerPortal]
+      summary: Read the authenticated player's account summary across allowlisted servers
+      description: >-
+        Identity is derived only from the HttpOnly player session. Query, body,
+        and identity headers are rejected. Each failed or incompatible node is
+        explicitly unavailable rather than being represented as a zero balance.
+        Portal switch URLs come only from operator configuration and no session
+        or federation token is appended or forwarded to another origin.
+      operationId: getPlayerFederationOverview
+      security:
+        - playerSessionCookie: []
+      responses:
+        "200":
+          description: Per-node read-only account, season, and wallet summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationAccountOverview"
+        "400":
+          $ref: "#/components/responses/PlayerPortalError"
+        "401":
+          $ref: "#/components/responses/PlayerPortalError"
+        default:
+          $ref: "#/components/responses/PlayerPortalError"
+  /admin/federation/health:
+    get:
+      tags: [Federation]
+      summary: Probe the allowlisted federation nodes without reading a player
+      operationId: getFederationHealth
+      responses:
+        "200":
+          description: Explicit health result for every configured node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationHealthResponse"
+        default:
+          $ref: "#/components/responses/FederationError"
+  /admin/federation/compatibility-matrix:
+    get:
+      tags: [Federation]
+      summary: Read the canonical versioned compatibility matrix
+      operationId: getFederationCompatibilityMatrix
+      responses:
+        "200":
+          description: Canonical matrix digest, combinations, evidence, and configured servers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationCompatibilityMatrix"
+        default:
+          $ref: "#/components/responses/FederationError"
 components:
   securitySchemes:
     adminApiKey:
@@ -3923,6 +4705,13 @@ components:
         /api/v1/player and enables Secure behind HTTPS. Authenticated player
         identity is derived exclusively from this cookie, never from a userId
         query parameter or business request body.
+    federationNodeKey:
+      type: apiKey
+      in: header
+      name: X-Pal-Control-Node-Key
+      description: >-
+        Server-to-server key loaded from environment or a protected file. It is
+        compared in constant time and is never returned in responses or audit data.
   parameters:
     AdminTotp:
       name: X-Pal-Admin-Totp
@@ -4236,6 +5025,21 @@ components:
       headers:
         Retry-After:
           description: Present on login cooldowns and player-portal traffic throttling.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    FederationError:
+      description: >-
+        Federation authentication, request-boundary, compatibility, timeout,
+        response-size, or per-node availability error. A failed node is never
+        represented as an authoritative zero balance.
+      headers:
+        Retry-After:
+          description: Present when the bounded internal read rate is exceeded.
           schema:
             type: integer
             minimum: 1
@@ -6816,6 +7620,63 @@ components:
         y:
           type: number
           format: double
+    EconomyZoneRiskLevel:
+      type: string
+      enum: [Guarded, Elevated, Severe]
+    EconomyEventWindowEvidence:
+      type: object
+      additionalProperties: false
+      required: [startsAt, endsAt, graceEndsAt]
+      properties:
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        graceEndsAt:
+          type: string
+          format: date-time
+    EconomyWorldEventEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - eventKey
+        - displayName
+        - kind
+        - seed
+        - window
+        - zoneYieldMultiplierBasisPoints
+        - productPriceMultiplierBasisPoints
+      properties:
+        eventId:
+          type: string
+          pattern: "^[a-f0-9]{32}$"
+        eventKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        kind:
+          type: string
+          enum: [ResourceSurge, SupplyRelief]
+        seed:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        window:
+          $ref: "#/components/schemas/EconomyEventWindowEvidence"
+        zoneYieldMultiplierBasisPoints:
+          type: integer
+          minimum: 1000
+          maximum: 250000
+        productPriceMultiplierBasisPoints:
+          type: integer
+          minimum: 1000
+          maximum: 250000
     PlayerExtractionCoordinateTransform:
       type: object
       additionalProperties: false
@@ -6890,6 +7751,7 @@ components:
         - id
         - name
         - routeHint
+        - riskHint
         - mapPosition
         - worldPosition
         - radius
@@ -6899,6 +7761,18 @@ components:
         - distanceToBoundary
         - worldDistanceToBoundary
         - inside
+        - open
+        - hotspot
+        - yieldMultiplierBasisPoints
+        - nextOpensAt
+        - openWindows
+        - riskLevel
+        - dynamicSelectedOpen
+        - dynamicOpenWindow
+        - hotspotWindow
+        - dynamicPolicyVersion
+        - dynamicSeed
+        - worldEvents
       properties:
         id:
           type: string
@@ -6911,6 +7785,9 @@ components:
         routeHint:
           type: string
           minLength: 1
+          maxLength: 512
+        riskHint:
+          type: string
           maxLength: 512
         mapPosition:
           $ref: "#/components/schemas/PlayerExtractionMapPoint"
@@ -6944,6 +7821,51 @@ components:
           minimum: 0
         inside:
           type: [boolean, "null"]
+        open:
+          type: boolean
+          description: Whether the zone accepts new quotes at sampledAt. Closing grace is never included here.
+        hotspot:
+          type: boolean
+          description: Whether this zone is selected by the deterministic business-date hotspot rotation.
+        yieldMultiplierBasisPoints:
+          type: integer
+          minimum: 1000
+          maximum: 250000
+          description: Effective server-side multiplier after applying the hotspot multiplier when selected.
+        nextOpensAt:
+          type: [string, "null"]
+          format: date-time
+        openWindows:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyContentExchangeWindow"
+        riskLevel:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyZoneRiskLevel"
+            - type: "null"
+        dynamicSelectedOpen:
+          type: boolean
+          description: Deterministic business-date selection fact; display layers never change it.
+        dynamicOpenWindow:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyEventWindowEvidence"
+            - type: "null"
+        hotspotWindow:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyEventWindowEvidence"
+            - type: "null"
+        dynamicPolicyVersion:
+          type: [string, "null"]
+          maxLength: 128
+        dynamicSeed:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        worldEvents:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/EconomyWorldEventEvidence"
+            - type: "null"
     PlayerExtractionZoneMap:
       type: object
       additionalProperties: false
@@ -6951,6 +7873,10 @@ components:
         - status
         - statusMessage
         - sampledAt
+        - nextOpensAt
+        - dynamicPolicyVersion
+        - dynamicSeed
+        - worldEvents
         - positionSource
         - coordinateTransform
         - player
@@ -6964,6 +7890,20 @@ components:
         sampledAt:
           type: string
           format: date-time
+        nextOpensAt:
+          type: [string, "null"]
+          format: date-time
+          description: Earliest opening among all active zones when every zone is closed; otherwise null.
+        dynamicPolicyVersion:
+          type: [string, "null"]
+          maxLength: 128
+        dynamicSeed:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        worldEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyWorldEventEvidence"
         positionSource:
           type: string
           const: paldefender-map-location
@@ -7213,6 +8153,374 @@ components:
           minimum: 1
         requiredForWrites: { type: boolean }
         fresh: { type: boolean }
+    EconomyAnalyticsCount:
+      type: object
+      additionalProperties: false
+      required: [value, suppressed]
+      properties:
+        value:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        suppressed:
+          type: boolean
+    EconomyAnalyticsRate:
+      type: object
+      additionalProperties: false
+      required: [numerator, denominator, basisPoints, suppressed, denominatorComplete]
+      properties:
+        numerator:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        denominator:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        basisPoints:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 10000
+        suppressed:
+          type: boolean
+        denominatorComplete:
+          type: boolean
+    EconomyAnalyticsWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to, dateBasis, stable, stableThrough, timeZoneId]
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        dateBasis:
+          type: string
+          enum: [business, utc]
+        stable:
+          type: boolean
+          description: False when the selected interval includes the current date.
+        stableThrough:
+          type: string
+          format: date
+        timeZoneId:
+          type: string
+    EconomyAnalyticsPrivacy:
+      type: object
+      additionalProperties: false
+      required: [minimumCohortSize, suppressionRule, containsPlayerIdentifiers]
+      properties:
+        minimumCohortSize:
+          type: integer
+          const: 5
+        suppressionRule:
+          type: string
+        containsPlayerIdentifiers:
+          type: boolean
+          const: false
+    EconomyAnalyticsSource:
+      type: object
+      additionalProperties: false
+      required: [kind, schemaVersion, asOf, recomputationHash, tables, rowsRead, complete]
+      properties:
+        kind:
+          type: string
+          const: sqlite-authoritative-recomputation
+        schemaVersion:
+          type: integer
+          const: 1
+        asOf:
+          type: string
+          format: date-time
+        recomputationHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        tables:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        rowsRead:
+          type: integer
+          format: int64
+          minimum: 0
+        complete:
+          type: boolean
+    EconomyAnalyticsFunnelStage:
+      type: object
+      additionalProperties: false
+      required: [key, label, accounts, facts, successOnly, source]
+      properties:
+        key:
+          type: string
+          enum:
+            - accounts
+            - authenticated
+            - catalog-viewed
+            - order-created
+            - order-delivered
+            - resource-quoted
+            - resource-settled
+        label:
+          type: string
+        accounts:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        facts:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        successOnly:
+          type: boolean
+        source:
+          type: string
+    EconomyAnalyticsProductMetric:
+      type: object
+      additionalProperties: false
+      required: [sku, catalogViewers, deliveredBuyers, deliveredQuantity, purchaseRate]
+      properties:
+        sku:
+          type: string
+        catalogViewers:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        deliveredBuyers:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        deliveredQuantity:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        purchaseRate:
+          $ref: "#/components/schemas/EconomyAnalyticsRate"
+    EconomyAnalyticsExchangeSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - quotingAccounts
+        - settledAccounts
+        - quotedRuns
+        - settledRuns
+        - uncertainRuns
+        - settledValue
+        - conversionRate
+      properties:
+        quotingAccounts:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        settledAccounts:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        quotedRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        settledRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        uncertainRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        settledValue:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        conversionRate:
+          $ref: "#/components/schemas/EconomyAnalyticsRate"
+    EconomyAnalyticsZoneMetric:
+      type: object
+      additionalProperties: false
+      required: [zoneId, accounts, quotedRuns, settledRuns, uncertainRuns, settledValue, suppressed]
+      properties:
+        zoneId:
+          type: string
+        accounts:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        quotedRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        settledRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        uncertainRuns:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        settledValue:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        suppressed:
+          type: boolean
+    EconomyAnalyticsCurrencyHealth:
+      type: object
+      additionalProperties: false
+      required:
+        - currency
+        - accounts
+        - inflow
+        - outflow
+        - net
+        - balanceP50
+        - balanceP95
+        - minimumBalance
+        - maximumBalance
+        - suppressed
+      properties:
+        currency:
+          type: string
+          enum: [merchantCoin, weeklyTicket]
+        accounts:
+          $ref: "#/components/schemas/EconomyAnalyticsCount"
+        inflow:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        outflow:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        net:
+          type: [integer, "null"]
+          format: int64
+        balanceP50:
+          type: [integer, "null"]
+          format: int64
+        balanceP95:
+          type: [integer, "null"]
+          format: int64
+        minimumBalance:
+          type: [integer, "null"]
+          format: int64
+        maximumBalance:
+          type: [integer, "null"]
+          format: int64
+        suppressed:
+          type: boolean
+    EconomyAnalyticsUncertainHealth:
+      type: object
+      additionalProperties: false
+      required: [orders, deliveries, resourceSettlements, suppressed]
+      properties:
+        orders:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        deliveries:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        resourceSettlements:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        suppressed:
+          type: boolean
+    EconomyAnalyticsAlert:
+      type: object
+      additionalProperties: false
+      required: [code, severity, message]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]+$"
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        message:
+          type: string
+    EconomyAnalyticsPage:
+      type: object
+      additionalProperties: false
+      required: [limit, offset, totalProducts, totalZones, nextCursor]
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        totalProducts:
+          type: integer
+          minimum: 0
+        totalZones:
+          type: integer
+          minimum: 0
+        nextCursor:
+          type: [string, "null"]
+          pattern: "^[0-9]+$"
+    EconomyAnalyticsReport:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - serverId
+        - seasonId
+        - contentVersionId
+        - window
+        - privacy
+        - source
+        - funnel
+        - products
+        - resourceExchange
+        - zones
+        - currencies
+        - uncertain
+        - alerts
+        - page
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        serverId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        seasonId:
+          type: [string, "null"]
+          format: uuid
+        contentVersionId:
+          type: [string, "null"]
+          format: uuid
+        window:
+          $ref: "#/components/schemas/EconomyAnalyticsWindow"
+        privacy:
+          $ref: "#/components/schemas/EconomyAnalyticsPrivacy"
+        source:
+          $ref: "#/components/schemas/EconomyAnalyticsSource"
+        funnel:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            $ref: "#/components/schemas/EconomyAnalyticsFunnelStage"
+        products:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyAnalyticsProductMetric"
+        resourceExchange:
+          $ref: "#/components/schemas/EconomyAnalyticsExchangeSummary"
+        zones:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyAnalyticsZoneMetric"
+        currencies:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/EconomyAnalyticsCurrencyHealth"
+        uncertain:
+          $ref: "#/components/schemas/EconomyAnalyticsUncertainHealth"
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/EconomyAnalyticsAlert"
+        page:
+          $ref: "#/components/schemas/EconomyAnalyticsPage"
     EconomyObservabilityAlert:
       type: object
       additionalProperties: false
@@ -7347,6 +8655,292 @@ components:
         collectionErrorCode:
           type: [string, "null"]
           pattern: "^[A-Z][A-Z0-9_]+$"
+    EconomyOperationsAccount:
+      type: object
+      additionalProperties: false
+      required: [accountId, displayName, platform, platformSubjectHash]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        displayName:
+          type: string
+        platform:
+          type: string
+        platformSubjectHash:
+          type: string
+          pattern: "^sha256:[0-9a-f]{16}$"
+          description: One-way truncated subject fingerprint; never the raw platformSubject.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    EconomyOperationsOrder:
+      type: object
+      additionalProperties: false
+      required:
+        - orderId
+        - accountId
+        - seasonId
+        - serverId
+        - account
+        - deliveryId
+        - deliveryAttempt
+        - productId
+        - sku
+        - productName
+        - quantity
+        - currency
+        - totalAmount
+        - state
+        - outcome
+        - receiptResultId
+        - contentVersionId
+        - contentHash
+        - worldId
+        - createdAt
+        - updatedAt
+        - requiresReconciliation
+      properties:
+        orderId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        seasonId: { type: string, format: uuid }
+        serverId: { type: string }
+        account:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyOperationsAccount"
+            - type: "null"
+        deliveryId: { type: string, format: uuid }
+        deliveryAttempt: { type: integer, minimum: 0 }
+        productId: { type: string, format: uuid }
+        sku: { type: string }
+        productName: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        currency:
+          $ref: "#/components/schemas/ExtractionCurrency"
+        totalAmount: { type: integer, format: int64, minimum: 0 }
+        state:
+          type: string
+          enum: [PendingDelivery, Dispatching, Delivered, DeliveryFailed, DeliveryUncertain, Refunded]
+        outcome:
+          type: [string, "null"]
+          enum: [Succeeded, Failed, Partial, Uncertain, null]
+        receiptResultId:
+          type: [string, "null"]
+          format: uuid
+        contentVersionId:
+          type: [string, "null"]
+          format: uuid
+        contentHash:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+        worldId: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        requiresReconciliation: { type: boolean }
+    EconomyOperationsRun:
+      type: object
+      additionalProperties: false
+      required:
+        - runId
+        - accountId
+        - seasonId
+        - account
+        - zoneId
+        - zoneName
+        - state
+        - itemCount
+        - totalValue
+        - revision
+        - attemptCount
+        - errorCode
+        - errorMessage
+        - contentVersionId
+        - contentHash
+        - quoteSnapshotHash
+        - settlementRequestHash
+        - quotedAt
+        - expiresAt
+        - updatedAt
+        - settledAt
+        - requiresReconciliation
+      properties:
+        runId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        seasonId: { type: string, format: uuid }
+        account:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyOperationsAccount"
+            - type: "null"
+        zoneId: { type: string }
+        zoneName: { type: string }
+        state:
+          type: string
+          enum: [Quoted, Consuming, Removed, Credited, Settled, Failed, Uncertain, Expired, Cancelled]
+        itemCount: { type: integer, minimum: 0 }
+        totalValue: { type: integer, format: int64, minimum: 0 }
+        revision: { type: integer, format: int64, minimum: 0 }
+        attemptCount: { type: integer, minimum: 0 }
+        errorCode: { type: [string, "null"] }
+        errorMessage: { type: [string, "null"] }
+        contentVersionId: { type: [string, "null"], format: uuid }
+        contentHash: { type: [string, "null"], pattern: "^[0-9a-f]{64}$" }
+        quoteSnapshotHash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        settlementRequestHash: { type: [string, "null"], pattern: "^[0-9a-f]{64}$" }
+        quotedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        settledAt: { type: [string, "null"], format: date-time }
+        requiresReconciliation: { type: boolean }
+    EconomyOperationsOverview:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - generatedAt
+        - gameplayMode
+        - world
+        - content
+        - gate
+        - queues
+        - backups
+        - alerts
+        - accounts
+        - orders
+        - runs
+        - rollover
+        - audit
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        generatedAt: { type: string, format: date-time }
+        gameplayMode: { type: string, const: weekly-resource-economy }
+        world:
+          type: object
+          additionalProperties: false
+          required: [serverId, season, save]
+          properties:
+            serverId: { type: string }
+            season:
+              type: [object, "null"]
+              additionalProperties: true
+            save:
+              $ref: "#/components/schemas/SaveStatus"
+        content:
+          type: [object, "null"]
+          additionalProperties: true
+        gate:
+          type: object
+          additionalProperties: true
+        queues:
+          type: object
+          additionalProperties: false
+          required: [delivery, settlement, outbox, uncertain]
+          properties:
+            delivery: { $ref: "#/components/schemas/EconomyQueueObservability" }
+            settlement: { $ref: "#/components/schemas/EconomyQueueObservability" }
+            outbox: { $ref: "#/components/schemas/EconomyQueueObservability" }
+            uncertain: { $ref: "#/components/schemas/EconomyUncertainObservability" }
+        backups:
+          type: object
+          additionalProperties: false
+          required: [game, economy]
+          properties:
+            game: { $ref: "#/components/schemas/EconomyBackupAgeObservability" }
+            economy: { $ref: "#/components/schemas/EconomyBackupAgeObservability" }
+        alerts:
+          type: array
+          items: { $ref: "#/components/schemas/EconomyObservabilityAlert" }
+        accounts:
+          type: array
+          items: { $ref: "#/components/schemas/EconomyOperationsAccount" }
+        orders:
+          type: array
+          items: { $ref: "#/components/schemas/EconomyOperationsOrder" }
+        runs:
+          type: array
+          items: { $ref: "#/components/schemas/EconomyOperationsRun" }
+        rollover:
+          oneOf:
+            - $ref: "#/components/schemas/WeeklyRolloverOperation"
+            - type: "null"
+        audit:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    EconomyOperationDeliveryEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - deliveryId
+        - idempotencyKey
+        - requestHash
+        - resultId
+        - serverId
+        - playerSubjectHash
+        - worldId
+        - gameVersion
+        - adapterVersion
+        - commandVersion
+        - items
+        - createdAt
+      properties:
+        schemaVersion: { type: integer }
+        deliveryId: { type: string, format: uuid }
+        idempotencyKey: { type: string }
+        requestHash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        resultId: { type: string, format: uuid }
+        serverId: { type: string }
+        playerSubjectHash: { type: string, pattern: "^sha256:[0-9a-f]{16}$" }
+        worldId: { type: string }
+        gameVersion: { type: string }
+        adapterVersion: { type: string }
+        commandVersion: { type: string }
+        acknowledgedAt: { type: [string, "null"], format: date-time }
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        outcome: { type: string }
+        createdAt: { type: string, format: date-time }
+    EconomyOperationOrderEvidence:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, generatedAt, order, request, receipt, inventoryEvidence]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        generatedAt: { type: string, format: date-time }
+        order: { $ref: "#/components/schemas/EconomyOperationsOrder" }
+        request:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyOperationDeliveryEnvelope"
+            - type: "null"
+        receipt:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyOperationDeliveryEnvelope"
+            - type: "null"
+        inventoryEvidence:
+          type: [object, "null"]
+          additionalProperties: true
+    EconomyOperationRunEvidence:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, generatedAt, run, quote, settlement]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        generatedAt: { type: string, format: date-time }
+        run: { $ref: "#/components/schemas/EconomyOperationsRun" }
+        quote:
+          type: object
+          additionalProperties: true
+          description: Frozen quote evidence; Native owner identity appears only as ownerSubjectHash.
+        settlement:
+          type: object
+          additionalProperties: true
+          description: Settlement keys, hashes, receipt, lease timing and reconciliation actor; no player identity.
     ExtractionWriteCapabilities:
       type: object
       additionalProperties: false
@@ -7723,6 +9317,33 @@ components:
     EconomyContentCurrency:
       type: string
       enum: [MarketCoin, SeasonVoucher]
+    EconomyContentRarity:
+      type: string
+      enum: [Common, Uncommon, Rare, Epic, Legendary]
+    EconomyContentIconKey:
+      type: string
+      maxLength: 32
+      enum:
+        - supply
+        - capture
+        - medical
+        - ammo
+        - weapon
+        - building
+        - farming
+        - material-basic
+        - mineral
+        - biological
+        - processed
+        - ancient
+        - industrial
+        - valuable
+        - special
+        - advanced
+      description: Trusted local code-native SVG identifier; never a URL, path, or client-supplied asset.
+    EconomyPresentationSource:
+      type: string
+      enum: [content, legacy-fallback]
     EconomyContentDependencies:
       type: object
       additionalProperties: false
@@ -7760,6 +9381,10 @@ components:
     EconomyContentProductDefinition:
       type: object
       additionalProperties: false
+      dependentRequired:
+        iconKey: [rarity, usage]
+        rarity: [iconKey, usage]
+        usage: [iconKey, rarity]
       required:
         - sku
         - displayName
@@ -7829,9 +9454,26 @@ components:
         availableUntil:
           type: [string, "null"]
           format: date-time
+        iconKey:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentIconKey"
+            - type: "null"
+        rarity:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentRarity"
+            - type: "null"
+        usage:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 160
+          description: Plain-text Chinese usage guidance. Markup, URLs, paths and control characters are rejected.
     EconomyContentResourceDefinition:
       type: object
       additionalProperties: false
+      dependentRequired:
+        iconKey: [rarity, usage]
+        rarity: [iconKey, usage]
+        usage: [iconKey, rarity]
       required: [itemId, displayName, category, tags, currency, unitValue, exchangeZoneIds, active]
       properties:
         itemId:
@@ -7869,6 +9511,19 @@ components:
             maxLength: 128
         active:
           type: boolean
+        iconKey:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentIconKey"
+            - type: "null"
+        rarity:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentRarity"
+            - type: "null"
+        usage:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 160
+          description: Plain-text Chinese usage guidance. Markup, URLs, paths and control characters are rejected.
     EconomyContentExchangeWindow:
       type: object
       additionalProperties: false
@@ -7912,6 +9567,9 @@ components:
           minLength: 1
           maxLength: 128
         routeHint:
+          type: string
+          maxLength: 512
+        riskHint:
           type: string
           maxLength: 512
         mapX:
@@ -8112,6 +9770,718 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ReliableTaskItem"
+    TeamEconomyCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 32
+    TeamEconomyRotateInviteRequest:
+      type: object
+      additionalProperties: false
+      required: [maximumUses]
+      properties:
+        maximumUses:
+          type: integer
+          minimum: 1
+          maximum: 100
+    TeamEconomyJoinRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 48
+          maxLength: 256
+          writeOnly: true
+    TeamEconomyEmptyRequest:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
+    TeamEconomyTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [memberHandle]
+      properties:
+        memberHandle:
+          type: string
+          pattern: "^[0-9a-f]{24}$"
+          description: Team-scoped opaque handle; not an account or game identity.
+    TeamEconomyDissolveRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          minLength: 2
+          maxLength: 32
+    TeamEconomyMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [teamId, name, status, memberCount, isOwner, replayed, updatedAt]
+      properties:
+        teamId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 2
+          maxLength: 32
+        status:
+          type: string
+          enum: [Active, Dissolved]
+        memberCount:
+          type: integer
+          minimum: 0
+        isOwner:
+          type: boolean
+        replayed:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+    TeamEconomyInviteResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - teamId
+        - inviteId
+        - token
+        - tokenShown
+        - expiresAt
+        - maximumUses
+        - remainingUses
+        - replayed
+      properties:
+        teamId:
+          type: string
+          format: uuid
+        inviteId:
+          type: string
+          format: uuid
+        token:
+          type: [string, "null"]
+          readOnly: true
+          description: Present only in the first successful rotation response; never persisted in plaintext.
+        tokenShown:
+          type: boolean
+        expiresAt:
+          type: string
+          format: date-time
+        maximumUses:
+          type: integer
+          minimum: 1
+          maximum: 100
+        remainingUses:
+          type: integer
+          minimum: 0
+        replayed:
+          type: boolean
+    TeamEconomyContribution:
+      type: object
+      additionalProperties: false
+      required: [resourceItems, resourceValue, taskPoints, deliveredOrders, actualCurrencySpent]
+      properties:
+        resourceItems:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        resourceValue:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        taskPoints:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        deliveredOrders:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        actualCurrencySpent:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    TeamEconomyGoalProgress:
+      type: object
+      additionalProperties: false
+      required: [kind, displayName, progress, target, unit, achieved, reachedAt]
+      properties:
+        kind:
+          type: string
+          enum: [ResourceItems, ResourceValue, TaskPoints, DeliveredOrders]
+        displayName:
+          type: string
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        target:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        unit:
+          type: string
+        achieved:
+          type: boolean
+        reachedAt:
+          type: [string, "null"]
+          format: date-time
+    TeamEconomyProjectionHealth:
+      type: object
+      additionalProperties: false
+      required: [ready, stale, cutoffAt, updatedAt, sourceHash, snapshotHash, lastErrorCode]
+      properties:
+        ready:
+          type: boolean
+        stale:
+          type: boolean
+        cutoffAt:
+          type: [string, "null"]
+          format: date-time
+        updatedAt:
+          type: [string, "null"]
+          format: date-time
+        sourceHash:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+        snapshotHash:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+        lastErrorCode:
+          type: [string, "null"]
+    TeamEconomyTransferCandidate:
+      type: object
+      additionalProperties: false
+      required: [memberHandle, label, joinedAt]
+      properties:
+        memberHandle:
+          type: string
+          pattern: "^[0-9a-f]{24}$"
+        label:
+          type: string
+          description: Generic ordinal label, never a player display name.
+        joinedAt:
+          type: string
+          format: date-time
+    TeamEconomyDashboard:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - hasTeam
+        - teamId
+        - name
+        - status
+        - isOwner
+        - memberCount
+        - joinedAt
+        - goals
+        - teamContribution
+        - myContribution
+        - transferCandidates
+        - projection
+        - policyNotice
+      properties:
+        enabled:
+          type: boolean
+        hasTeam:
+          type: boolean
+        teamId:
+          type: [string, "null"]
+          format: uuid
+        name:
+          type: [string, "null"]
+        status:
+          type: [string, "null"]
+          enum: [Active, Dissolved, null]
+        isOwner:
+          type: boolean
+        memberCount:
+          type: integer
+          minimum: 0
+        joinedAt:
+          type: [string, "null"]
+          format: date-time
+        goals:
+          type: array
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/TeamEconomyGoalProgress"
+        teamContribution:
+          oneOf:
+            - $ref: "#/components/schemas/TeamEconomyContribution"
+            - type: "null"
+        myContribution:
+          oneOf:
+            - $ref: "#/components/schemas/TeamEconomyContribution"
+            - type: "null"
+        transferCandidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/TeamEconomyTransferCandidate"
+        projection:
+          $ref: "#/components/schemas/TeamEconomyProjectionHealth"
+        policyNotice:
+          type: string
+    TeamEconomyLeaderboardEntry:
+      type: object
+      additionalProperties: false
+      required: [rank, teamId, teamName, memberCount, value, reachedAt, isMyTeam]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        teamId:
+          type: string
+          format: uuid
+        teamName:
+          type: string
+          minLength: 2
+          maxLength: 32
+        memberCount:
+          type: integer
+          minimum: 1
+        value:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        reachedAt:
+          type: string
+          format: date-time
+        isMyTeam:
+          type: boolean
+    TeamEconomyLeaderboardPage:
+      type: object
+      additionalProperties: false
+      required:
+        - metric
+        - cutoffAt
+        - offset
+        - limit
+        - total
+        - nextCursor
+        - items
+        - tieBreakPolicy
+        - eligibilityPolicy
+        - projection
+      properties:
+        metric:
+          type: string
+          enum: [ResourceValue, TaskPoints, DeliveredOrders]
+        cutoffAt:
+          type: string
+          format: date-time
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+        nextCursor:
+          type: [string, "null"]
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TeamEconomyLeaderboardEntry"
+        tieBreakPolicy:
+          type: string
+        eligibilityPolicy:
+          type: string
+        projection:
+          $ref: "#/components/schemas/TeamEconomyProjectionHealth"
+    PlayerNotificationFeed:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, unreadCount, hasActiveDelivery, items]
+      properties:
+        schemaVersion:
+          type: string
+          const: "1"
+        unreadCount:
+          type: integer
+          minimum: 0
+        hasActiveDelivery:
+          type: boolean
+          description: True only while a game-notification projection is pending or queued.
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PlayerNotificationFeedItem"
+    PlayerNotificationFeedItem:
+      type: object
+      additionalProperties: false
+      required:
+        - notificationId
+        - schemaVersion
+        - seasonId
+        - sourceType
+        - sourceState
+        - severity
+        - title
+        - message
+        - occurredAt
+        - updatedAt
+        - readAt
+        - gameState
+        - safetyAction
+      properties:
+        notificationId:
+          type: string
+          format: uuid
+        schemaVersion:
+          type: string
+          const: "1"
+        seasonId:
+          type: string
+          format: uuid
+        sourceType:
+          type: string
+          enum: [order-delivery, resource-settlement, season-end, reconciliation]
+        sourceState:
+          type: string
+          enum:
+            - delivered
+            - failed
+            - partial
+            - uncertain
+            - refunded
+            - settled
+            - cancelled
+            - expired
+            - frozen
+            - reward-completed
+            - voucher-expired
+            - completed
+            - reconciliation-required
+        severity:
+          type: string
+          enum: [success, info, warning, error]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+        occurredAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        readAt:
+          type: [string, "null"]
+          format: date-time
+        gameState:
+          type: string
+          enum: [pending, queued, sent, blocked, failed, uncertain, not-requested]
+        safetyAction:
+          type: string
+          enum: [none, do-not-repeat-contact-support]
+    PlayerNotificationReadResult:
+      type: object
+      additionalProperties: false
+      required: [notificationId, readAt, unreadCount]
+      properties:
+        notificationId:
+          type: string
+          format: uuid
+        readAt:
+          type: string
+          format: date-time
+        unreadCount:
+          type: integer
+          minimum: 0
+    PlayerNotificationReadAllResult:
+      type: object
+      additionalProperties: false
+      required: [markedRead, unreadCount]
+      properties:
+        markedRead:
+          type: integer
+          minimum: 0
+        unreadCount:
+          type: integer
+          const: 0
+    PlayerSeasonSettlementResponse:
+      type: object
+      additionalProperties: false
+      required: [available, status, settlement]
+      properties:
+        available:
+          type: boolean
+        status:
+          type: string
+          enum: [not-frozen, frozen]
+        settlement:
+          oneOf:
+            - $ref: "#/components/schemas/PlayerSeasonSettlement"
+            - type: "null"
+    PlayerSeasonSettlement:
+      type: object
+      additionalProperties: false
+      required:
+        - seasonId
+        - seasonCode
+        - cutoffAt
+        - frozenAt
+        - rewardState
+        - rules
+        - participation
+        - voucherExpiry
+        - permanentRewards
+      properties:
+        seasonId:
+          type: string
+          format: uuid
+        seasonCode:
+          type: string
+          minLength: 1
+        cutoffAt:
+          type: string
+          format: date-time
+        frozenAt:
+          type: string
+          format: date-time
+        rewardState:
+          type: string
+          enum: [not-prepared, prepared, completed]
+        rules:
+          $ref: "#/components/schemas/PlayerSeasonSettlementRules"
+        participation:
+          $ref: "#/components/schemas/PlayerSeasonParticipation"
+        voucherExpiry:
+          $ref: "#/components/schemas/PlayerSeasonVoucherExpiry"
+        permanentRewards:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerPermanentReward"
+    PlayerSeasonSettlementRules:
+      type: object
+      additionalProperties: false
+      required:
+        - rulesVersion
+        - lateSettlementGraceMinutes
+        - minimumSettledExchanges
+        - minimumResourceValue
+        - minimumTaskPoints
+        - resourceTieBreakRule
+        - taskTieBreakRule
+      properties:
+        rulesVersion:
+          type: string
+          minLength: 1
+        lateSettlementGraceMinutes:
+          type: integer
+          minimum: 0
+        minimumSettledExchanges:
+          type: integer
+          minimum: 0
+        minimumResourceValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        minimumTaskPoints:
+          type: integer
+          minimum: 0
+        resourceTieBreakRule:
+          type: string
+          minLength: 1
+        taskTieBreakRule:
+          type: string
+          minLength: 1
+    PlayerSeasonParticipation:
+      type: object
+      additionalProperties: false
+      required: [participating, reasonCode, resource, task, items, categories]
+      properties:
+        participating:
+          type: boolean
+        reasonCode:
+          type: string
+          minLength: 1
+        resource:
+          $ref: "#/components/schemas/PlayerSeasonBoardResult"
+        task:
+          $ref: "#/components/schemas/PlayerSeasonBoardResult"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerSeasonResourceAggregate"
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlayerSeasonCategoryAggregate"
+    PlayerSeasonBoardResult:
+      type: object
+      additionalProperties: false
+      required:
+        - board
+        - eligible
+        - rank
+        - reasonCode
+        - settledExchanges
+        - resourceQuantity
+        - resourceValue
+        - taskPoints
+      properties:
+        board:
+          type: string
+          enum: [resource-value, task-points]
+        eligible:
+          type: boolean
+        rank:
+          type: [integer, "null"]
+          minimum: 1
+        reasonCode:
+          type: string
+          minLength: 1
+        settledExchanges:
+          type: integer
+          minimum: 0
+        resourceQuantity:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        resourceValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        taskPoints:
+          type: integer
+          minimum: 0
+    PlayerSeasonResourceAggregate:
+      type: object
+      additionalProperties: false
+      required: [itemId, category, quantity, value]
+      properties:
+        itemId:
+          type: string
+          minLength: 1
+        category:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        value:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+    PlayerSeasonCategoryAggregate:
+      type: object
+      additionalProperties: false
+      required: [category, quantity, value]
+      properties:
+        category:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        value:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+    PlayerSeasonVoucherExpiry:
+      type: object
+      additionalProperties: false
+      required:
+        - jobState
+        - itemState
+        - scheduledAmount
+        - expiredAmount
+        - ledgerRecorded
+        - completedAt
+      properties:
+        jobState:
+          type: string
+          enum: [not-prepared, prepared, running, completed]
+        itemState:
+          type: string
+          enum: [not-prepared, not-applicable, pending, expired]
+        scheduledAmount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        expiredAmount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        ledgerRecorded:
+          type: boolean
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+    PlayerPermanentReward:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - board
+        - rank
+        - marketCoin
+        - rewardKey
+        - decisionState
+        - deliveryState
+        - reasonCode
+        - ledgerRecorded
+        - completedAt
+      properties:
+        source:
+          type: string
+          enum: [standard, supplement]
+        board:
+          type: string
+          enum: [resource-value, task-points, manual]
+        rank:
+          type: [integer, "null"]
+          minimum: 1
+        marketCoin:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        rewardKey:
+          type: string
+          minLength: 1
+        decisionState:
+          type: string
+          enum: [granted, cancelled]
+        deliveryState:
+          type: string
+          enum: [pending, paid, cancelled]
+        reasonCode:
+          type: [string, "null"]
+        ledgerRecorded:
+          type: boolean
+        completedAt:
+          type: [string, "null"]
+          format: date-time
     EconomyContentRotationPolicy:
       type: object
       additionalProperties: false
@@ -8158,6 +10528,186 @@ components:
         dailyHotspotCount:
           type: integer
           minimum: 0
+        hotspotYieldMultiplierBasisPoints:
+          type: integer
+          minimum: 10000
+          maximum: 50000
+          default: 12000
+          description: Multiplies the selected hotspot zone's base yield on the authoritative server.
+    EconomyContentCurrencyShadowRate:
+      type: object
+      additionalProperties: false
+      required: [currency, shadowUnitsPerCurrencyUnit]
+      properties:
+        currency:
+          $ref: "#/components/schemas/EconomyContentCurrency"
+        shadowUnitsPerCurrencyUnit:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000000
+    EconomyContentResourceShadowCost:
+      type: object
+      additionalProperties: false
+      required: [itemId, currency, unitCost]
+      properties:
+        itemId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        currency:
+          $ref: "#/components/schemas/EconomyContentCurrency"
+        unitCost:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+    EconomyContentResourceCategoryPolicy:
+      type: object
+      additionalProperties: false
+      required: [category, targetRecoveryBasisPoints, riskBufferBasisPoints]
+      properties:
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        targetRecoveryBasisPoints:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        riskBufferBasisPoints:
+          type: integer
+          minimum: 0
+          maximum: 9999
+    EconomyContentItemTransformation:
+      type: object
+      additionalProperties: false
+      required:
+        - transformationId
+        - displayName
+        - inputs
+        - outputs
+        - feeCurrency
+        - feeAmount
+        - active
+        - evidenceNote
+      properties:
+        transformationId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        inputs:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EconomyContentItemGrant"
+        outputs:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EconomyContentItemGrant"
+        feeCurrency:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentCurrency"
+            - type: "null"
+        feeAmount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        active:
+          type: boolean
+        evidenceNote:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Operator evidence note explicitly distinguishing the shadow edge from an actual game recipe.
+    EconomyContentGraphAttestation:
+      type: object
+      additionalProperties: false
+      required:
+        - evidenceKind
+        - catalogRevision
+        - attestedBy
+        - attestedAt
+        - reachableGraphComplete
+        - coveredItemIds
+      properties:
+        evidenceKind:
+          type: string
+          const: operator-audited-economic-shadow-graph
+        catalogRevision:
+          type: string
+          minLength: 1
+          maxLength: 128
+        attestedBy:
+          type: string
+          minLength: 1
+          maxLength: 128
+        attestedAt:
+          type: string
+          format: date-time
+        reachableGraphComplete:
+          type: boolean
+          const: true
+        coveredItemIds:
+          type: array
+          minItems: 1
+          maxItems: 20000
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+    EconomyContentBalancePolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - policyVersion
+        - currencyShadowRates
+        - resourceShadowCosts
+        - resourceCategoryPolicies
+        - transformations
+        - stateLimitPerProduct
+        - attestation
+      properties:
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        currencyShadowRates:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/EconomyContentCurrencyShadowRate"
+        resourceShadowCosts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EconomyContentResourceShadowCost"
+        resourceCategoryPolicies:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EconomyContentResourceCategoryPolicy"
+        transformations:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/EconomyContentItemTransformation"
+        stateLimitPerProduct:
+          type: integer
+          minimum: 100
+          maximum: 100000
+        attestation:
+          $ref: "#/components/schemas/EconomyContentGraphAttestation"
     EconomyContentDefinition:
       type: object
       additionalProperties: false
@@ -8217,6 +10767,11 @@ components:
             $ref: "#/components/schemas/EconomyContentTaskDefinition"
         rotation:
           $ref: "#/components/schemas/EconomyContentRotationPolicy"
+        balancePolicy:
+          oneOf:
+            - $ref: "#/components/schemas/EconomyContentBalancePolicy"
+            - type: "null"
+          description: Optional for legacy content. When present it must be a complete attested operator economic shadow DAG; it is not a game-recipe claim.
     EconomyContentValidationIssue:
       type: object
       additionalProperties: false
@@ -8594,6 +11149,10 @@ components:
         - featuredRank
         - contentVersionId
         - contentHash
+        - iconKey
+        - rarity
+        - usage
+        - presentationSource
       properties:
         productId:
           type: string
@@ -8653,6 +11212,16 @@ components:
         contentHash:
           type: [string, "null"]
           pattern: "^[a-f0-9]{64}$"
+        iconKey:
+          $ref: "#/components/schemas/EconomyContentIconKey"
+        rarity:
+          $ref: "#/components/schemas/EconomyContentRarity"
+        usage:
+          type: string
+          minLength: 1
+          maxLength: 160
+        presentationSource:
+          $ref: "#/components/schemas/EconomyPresentationSource"
     ExtractionCatalog:
       type: object
       additionalProperties: false
@@ -8870,7 +11439,7 @@ components:
     ExtractionQuoteItem:
       type: object
       additionalProperties: false
-      required: [itemId, name, quantity, unitValue, totalValue]
+      required: [itemId, name, quantity, unitValue, totalValue, iconKey, rarity, usage, presentationSource]
       properties:
         itemId:
           type: string
@@ -8888,14 +11457,45 @@ components:
           format: int64
           minimum: 1
           maximum: 9007199254740991
+        iconKey:
+          $ref: "#/components/schemas/EconomyContentIconKey"
+        rarity:
+          $ref: "#/components/schemas/EconomyContentRarity"
+        usage:
+          type: string
+          minLength: 1
+          maxLength: 160
+        presentationSource:
+          $ref: "#/components/schemas/EconomyPresentationSource"
     ExtractionQuote:
       type: object
       additionalProperties: false
-      required: [runId, state, zoneName, items, itemCount, totalValue, expiresAt]
+      required:
+        - runId
+        - revision
+        - state
+        - zoneName
+        - items
+        - itemCount
+        - totalValue
+        - expiresAt
+        - contentVersionId
+        - contentHash
+        - businessDate
+        - rotationSeed
+        - zoneYieldMultiplierBasisPoints
+        - hotspot
+        - dynamicEconomy
+        - sourceQuoteRunId
+        - selectionDerived
       properties:
         runId:
           type: string
           format: uuid
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
         state:
           type: string
           const: quoted
@@ -8917,6 +11517,78 @@ components:
         expiresAt:
           type: string
           format: date-time
+        contentVersionId:
+          type: [string, "null"]
+          format: uuid
+        contentHash:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        businessDate:
+          type: [string, "null"]
+          format: date
+        rotationSeed:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        zoneYieldMultiplierBasisPoints:
+          type: integer
+          minimum: 1
+        hotspot:
+          type: boolean
+        dynamicEconomy:
+          type: [object, "null"]
+          additionalProperties: true
+          description: Frozen deterministic zone risk, hotspot window and economic world-event evidence.
+        sourceQuoteRunId:
+          type: [string, "null"]
+          format: uuid
+        selectionDerived:
+          type: boolean
+    SelectExtractionQuoteItem:
+      type: object
+      additionalProperties: false
+      required: [itemId, quantity]
+      properties:
+        itemId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 999999
+    SelectPlayerPortalExtractionQuoteRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceRevision, items]
+      properties:
+        sourceRevision:
+          type: integer
+          format: int64
+          minimum: 1
+        items:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/SelectExtractionQuoteItem"
+    SelectExtractionQuoteRequest:
+      type: object
+      additionalProperties: false
+      required: [userId, sourceRevision, items]
+      properties:
+        userId:
+          $ref: "#/components/schemas/ExtractionUserId"
+        sourceRevision:
+          type: integer
+          format: int64
+          minimum: 1
+        items:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/SelectExtractionQuoteItem"
     SettleExtractionRunRequest:
       type: object
       additionalProperties: false
@@ -8927,10 +11599,30 @@ components:
     ExtractionWalletAdjustmentRequest:
       type: object
       additionalProperties: false
-      required: [userId, currency, delta, reason]
+      required: [currency, delta, reason]
+      description: Exactly one non-null target, userId or accountId, is required.
+      oneOf:
+        - required: [userId]
+          properties:
+            userId:
+              $ref: "#/components/schemas/ExtractionUserId"
+            accountId:
+              type: "null"
+        - required: [accountId]
+          properties:
+            userId:
+              type: "null"
+            accountId:
+              type: string
+              format: uuid
       properties:
         userId:
-          $ref: "#/components/schemas/ExtractionUserId"
+          oneOf:
+            - $ref: "#/components/schemas/ExtractionUserId"
+            - type: "null"
+        accountId:
+          type: [string, "null"]
+          format: uuid
         currency:
           $ref: "#/components/schemas/ExtractionCurrency"
         delta:
@@ -9472,6 +12164,358 @@ components:
           items:
             type: object
             additionalProperties: true
+    FederationProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [subjectToken]
+      properties:
+        subjectToken:
+          type: string
+          pattern: "^fed1_[A-Za-z0-9_-]{43}$"
+          description: Irreversible shared-HMAC subject; never a raw platform identifier.
+    FederationSeasonProfile:
+      type: object
+      additionalProperties: false
+      required: [code, displayName, startsAt, endsAt, state]
+      properties:
+        code:
+          type: string
+        displayName:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [draft, scheduled, active, closed, archived]
+    FederationBalanceProfile:
+      type: object
+      additionalProperties: false
+      required: [marketCoin, seasonVoucher]
+      properties:
+        marketCoin:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Permanent currency on this node; it cannot be transferred by federation.
+        seasonVoucher:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Current-node weekly currency; it cannot be transferred by federation.
+    FederationCompatibilityProfile:
+      type: object
+      additionalProperties: false
+      required:
+        - combinationId
+        - matrixVersion
+        - matrixSha256
+        - status
+        - gameVersion
+        - steamBuild
+        - palDefenderVersion
+        - ue4ssCommit
+        - nativeProtocolVersion
+        - nativeModVersion
+        - bridgeAvailability
+        - capabilities
+        - verifiedAt
+      properties:
+        combinationId:
+          type: string
+          pattern: "^[a-z][a-z0-9.-]{2,95}$"
+        matrixVersion:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        matrixSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        status:
+          type: string
+          enum: [stable, experimental, quarantined]
+        gameVersion:
+          type: string
+          pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"
+        steamBuild:
+          type: string
+          pattern: "^(unknown|[0-9]{6,12})$"
+        palDefenderVersion:
+          type: string
+        ue4ssCommit:
+          type: string
+          pattern: "^(unknown|[a-f0-9]{40})$"
+        nativeProtocolVersion:
+          type: string
+        nativeModVersion:
+          type: string
+        bridgeAvailability:
+          type: string
+          enum: [available, unavailable, unknown]
+        capabilities:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+        verifiedAt:
+          type: string
+          format: date-time
+    FederationLocalProfile:
+      type: object
+      additionalProperties: false
+      required:
+        - serverId
+        - accountExists
+        - accountDisplayName
+        - season
+        - balances
+        - balancesAvailable
+        - unavailableReason
+        - compatibility
+        - observedAt
+      properties:
+        serverId:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{1,31}$"
+        accountExists:
+          type: boolean
+        accountDisplayName:
+          type: [string, "null"]
+        season:
+          oneOf:
+            - $ref: "#/components/schemas/FederationSeasonProfile"
+            - type: "null"
+        balances:
+          oneOf:
+            - $ref: "#/components/schemas/FederationBalanceProfile"
+            - type: "null"
+        balancesAvailable:
+          type: boolean
+        unavailableReason:
+          type: [string, "null"]
+        compatibility:
+          $ref: "#/components/schemas/FederationCompatibilityProfile"
+        observedAt:
+          type: string
+          format: date-time
+    FederationNodeSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - serverId
+        - displayName
+        - portalUrl
+        - local
+        - availability
+        - accountExists
+        - accountDisplayName
+        - season
+        - balances
+        - balancesAvailable
+        - compatibility
+        - switchAvailable
+        - errorCode
+        - observedAt
+      properties:
+        serverId:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{1,31}$"
+        displayName:
+          type: string
+        portalUrl:
+          type: string
+          format: uri
+          description: Operator allowlisted URL; no session or subject is appended.
+        local:
+          type: boolean
+        availability:
+          type: string
+          enum: [available, unavailable, incompatible]
+        accountExists:
+          type: [boolean, "null"]
+        accountDisplayName:
+          type: [string, "null"]
+        season:
+          oneOf:
+            - $ref: "#/components/schemas/FederationSeasonProfile"
+            - type: "null"
+        balances:
+          oneOf:
+            - $ref: "#/components/schemas/FederationBalanceProfile"
+            - type: "null"
+        balancesAvailable:
+          type: boolean
+        compatibility:
+          oneOf:
+            - $ref: "#/components/schemas/FederationCompatibilityProfile"
+            - type: "null"
+        switchAvailable:
+          type: boolean
+        errorCode:
+          type: [string, "null"]
+        observedAt:
+          type: string
+          format: date-time
+    FederationAccountOverview:
+      type: object
+      additionalProperties: false
+      required: [localServerId, matrixVersion, matrixSha256, servers, observedAt]
+      properties:
+        localServerId:
+          type: string
+        matrixVersion:
+          type: string
+        matrixSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        servers:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/FederationNodeSummary"
+        observedAt:
+          type: string
+          format: date-time
+    FederationNodeHealth:
+      type: object
+      additionalProperties: false
+      required: [serverId, availability, compatibility, errorCode, observedAt]
+      properties:
+        serverId:
+          type: string
+        availability:
+          type: string
+          enum: [available, unavailable, incompatible]
+        compatibility:
+          oneOf:
+            - $ref: "#/components/schemas/FederationCompatibilityProfile"
+            - type: "null"
+        errorCode:
+          type: [string, "null"]
+        observedAt:
+          type: string
+          format: date-time
+    FederationHealthResponse:
+      type: object
+      additionalProperties: false
+      required: [enabled, localServerId, matrixVersion, matrixSha256, nodes]
+      properties:
+        enabled:
+          type: boolean
+        localServerId:
+          type: string
+        matrixVersion:
+          type: string
+        matrixSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        nodes:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/FederationNodeHealth"
+    FederationCompatibilityEvidence:
+      type: object
+      additionalProperties: false
+      required: [kind, source, observedAt, summary, artifactSha256]
+      properties:
+        kind:
+          type: string
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        summary:
+          type: string
+        artifactSha256:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+    FederationCompatibilityCombination:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - gameVersion
+        - steamBuild
+        - palDefenderVersion
+        - ue4ssCommit
+        - nativeProtocolVersion
+        - nativeModVersion
+        - bridgeAvailability
+        - capabilities
+        - status
+        - verifiedAt
+        - evidence
+        - notes
+        - configuredServers
+      properties:
+        id:
+          type: string
+        gameVersion:
+          type: string
+        steamBuild:
+          type: string
+        palDefenderVersion:
+          type: string
+        ue4ssCommit:
+          type: string
+        nativeProtocolVersion:
+          type: string
+        nativeModVersion:
+          type: string
+        bridgeAvailability:
+          type: string
+          enum: [available, unavailable, unknown]
+        capabilities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+        status:
+          type: string
+          enum: [stable, experimental, quarantined]
+        verifiedAt:
+          type: string
+          format: date-time
+        evidence:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/FederationCompatibilityEvidence"
+        notes:
+          type: string
+        configuredServers:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+    FederationCompatibilityMatrix:
+      type: object
+      additionalProperties: false
+      required: [matrixVersion, matrixSha256, generatedAt, combinations]
+      properties:
+        matrixVersion:
+          type: string
+        matrixSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        generatedAt:
+          type: string
+          format: date-time
+        combinations:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/FederationCompatibilityCombination"
     ApiError:
       type: object
       required: [code, message]
@@ -9482,5 +12526,9 @@ components:
           type: string
         traceId:
           type: [string, "null"]
+        nextOpensAt:
+          type: [string, "null"]
+          format: date-time
+          description: Earliest safe retry time for EXTRACTION_ZONE_CLOSED when a schedule provides one.
 security:
   - adminApiKey: []

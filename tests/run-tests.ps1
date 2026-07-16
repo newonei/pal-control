@@ -20,19 +20,28 @@ $contractTests = @(
     "tests\contract\steam-openid-contract.ps1",
     "tests\contract\new-player-activity-contract.ps1",
     "tests\contract\economy-observability-contract.ps1",
+    "tests\contract\economy-analytics-contract.ps1",
+    "tests\contract\federation-contract.ps1",
+    "tests\contract\team-economy-contract.ps1",
     "tests\contract\windows-configure-preservation-contract.ps1"
 )
 $integrationTests = @(
     "tests\integration\settlement-saga-smoke.ps1",
     "tests\integration\native-settlement-smoke.ps1",
+    "tests\integration\selective-resource-sale-smoke.ps1",
     "tests\integration\delivery-receipts-smoke.ps1",
     "tests\integration\economy-invariants-smoke.ps1",
     "tests\integration\content-definitions-smoke.ps1",
     "tests\integration\content-projection-atomicity-smoke.ps1",
     "tests\integration\economy-balance-guard-smoke.ps1",
+    "tests\integration\permanent-currency-contract-smoke.ps1",
     "tests\integration\reliable-tasks-smoke.ps1",
+    "tests\integration\season-leaderboard-smoke.ps1",
+    "tests\integration\player-notifications-smoke.ps1",
+    "tests\integration\team-economy-smoke.ps1",
     "tests\integration\identity-binding-smoke.ps1",
     "tests\integration\admin-auth-smoke.ps1",
+    "tests\integration\admin-operation-keys-smoke.ps1",
     "tests\integration\control-api-boundary-smoke.ps1",
     "tests\integration\player-economy-security-smoke.ps1",
     "tests\integration\announcement-publish-smoke.ps1",
@@ -41,7 +50,12 @@ $integrationTests = @(
     "tests\integration\save-backup-smoke.ps1",
     "tests\integration\continuity-rollover-smoke.ps1",
     "tests\integration\new-player-activity-smoke.ps1",
-    "tests\integration\economy-observability-smoke.ps1"
+    "tests\integration\economy-observability-smoke.ps1",
+    "tests\integration\logging-correlation-smoke.ps1",
+    "tests\integration\economy-reconciliation-smoke.ps1",
+    "tests\integration\economy-analytics-smoke.ps1",
+    "tests\integration\federation-smoke.ps1",
+    "tests\integration\windows-production-deployment-smoke.ps1"
 )
 $selectedTests = switch ($Suite) {
     "Contract" { $contractTests }
@@ -50,8 +64,9 @@ $selectedTests = switch ($Suite) {
 }
 
 # Keep `npm test` and direct suite runs reproducible in a completely clean
-# clone. Several harnesses intentionally build with --no-restore after this
-# single bootstrap, while CI also builds every project independently.
+# clone. Harness scripts may skip a second restore after this bootstrap, but
+# they must still build their own executable instead of relying on stale bin/
+# output or the separate CI pre-build step.
 $dotnetProjects = @(
     Join-Path $repositoryRoot "services\control-api\PalControl.ControlApi.csproj"
 ) + @(
@@ -69,6 +84,18 @@ foreach ($project in $dotnetProjects) {
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet restore failed with exit code ${LASTEXITCODE}: $project"
     }
+}
+
+$nonSelfContainedTests = @($selectedTests | Where-Object {
+    Select-String `
+        -LiteralPath (Join-Path $repositoryRoot $_) `
+        -SimpleMatch "--no-build" `
+        -Quiet
+})
+if ($nonSelfContainedTests.Count -gt 0) {
+    throw (
+        "Clean-clone test scripts must not rely on pre-existing build output: " +
+        ($nonSelfContainedTests -join ", "))
 }
 
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()

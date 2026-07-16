@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using PalControl.ControlApi.Content;
 
 namespace PalControl.ControlApi.Extraction;
 
@@ -180,7 +181,10 @@ public sealed record ShopProduct(
     int? FeaturedRank = null,
     long? GlobalStock = null,
     Guid? ContentVersionId = null,
-    string? ContentHash = null);
+    string? ContentHash = null,
+    string? IconKey = null,
+    ContentRarity? Rarity = null,
+    string? Usage = null);
 
 public sealed record ShopProductDefinition(
     string Sku,
@@ -198,7 +202,10 @@ public sealed record ShopProductDefinition(
     int? FeaturedRank = null,
     long? GlobalStock = null,
     Guid? ContentVersionId = null,
-    string? ContentHash = null);
+    string? ContentHash = null,
+    string? IconKey = null,
+    ContentRarity? Rarity = null,
+    string? Usage = null);
 
 /// <summary>
 /// Commits one immutable content version's complete shop projection together

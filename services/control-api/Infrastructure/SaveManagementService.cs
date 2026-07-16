@@ -133,7 +133,7 @@ public sealed class SaveManagementService
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            _logger.LogError(exception, "Save status inspection failed.");
+            _logger.LogSafeError(exception, "Save status inspection failed.");
             return EmptyStatus(
                 serverId,
                 "SAVE_STATUS_UNAVAILABLE",
@@ -666,7 +666,7 @@ public sealed class SaveManagementService
             catch (Exception exception) when (
                 exception is IOException or UnauthorizedAccessException or JsonException)
             {
-                _logger.LogWarning(
+                _logger.LogSafeWarning(
                     exception,
                     "Ignoring an unreadable managed backup manifest for backup {BackupId}.",
                     directory.Name);
@@ -750,7 +750,7 @@ public sealed class SaveManagementService
                     IOException or
                     UnauthorizedAccessException)
                 {
-                    _logger.LogDebug(exception, "Could not inspect one PalServer process path.");
+                    _logger.LogSafeDebug(exception, "Could not inspect one PalServer process path.");
                 }
             }
         }

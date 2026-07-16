@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getSession, logout, PlayerSession } from "./api";
 import { Login } from "./Login";
 import { Portal } from "./Portal";
+import { clearSelectiveSaleJournal } from "./selectiveSale";
 
 const csrfStorageKey = "pal-player-csrf";
 
@@ -43,6 +44,7 @@ export function App() {
     setCsrfToken(null);
     setSessionNotice(notice);
     sessionStorage.removeItem(csrfStorageKey);
+    clearSelectiveSaleJournal();
   }
 
   async function signOut() {

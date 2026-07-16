@@ -48,7 +48,12 @@ public static class SchemeADefaultScenario
             Task("weekly-orders", ContentTaskCadence.Weekly, 60),
             Task("weekly-resource", ContentTaskCadence.Weekly, 60)
         };
-        return new EconomyContentDefinition(
+        var rotation = new ContentRotationPolicy(
+            "scheme-a-v1", 1, "scheme-a-simulation-v1",
+            tasks.Where(task => task.Cadence == ContentTaskCadence.Daily).Select(task => task.TaskKey).ToArray(), 3,
+            tasks.Where(task => task.Cadence == ContentTaskCadence.Weekly).Select(task => task.TaskKey).ToArray(), 3,
+            ["harbor", "ridge"], 1);
+        var definition = new EconomyContentDefinition(
             1,
             "scheme-a-simulation",
             "Scheme A reproducible balance scenario",
@@ -59,11 +64,18 @@ public static class SchemeADefaultScenario
             resources,
             zones,
             tasks,
-            new ContentRotationPolicy(
-                "scheme-a-v1", 1, "scheme-a-simulation-v1",
-                tasks.Where(task => task.Cadence == ContentTaskCadence.Daily).Select(task => task.TaskKey).ToArray(), 3,
-                tasks.Where(task => task.Cadence == ContentTaskCadence.Weekly).Select(task => task.TaskKey).ToArray(), 3,
-                ["harbor", "ridge"], 1));
+            rotation);
+        return definition with
+        {
+            BalancePolicy = EconomyContentDefaults.CreateBalancePolicy(
+                definition.Dependencies.ResourceCatalogRevision,
+                products,
+                resources,
+                zones,
+                rotation),
+            DynamicEconomyPolicy = EconomyContentDefaults.CreateDynamicEconomyPolicy(
+                zones.Select(zone => zone.ZoneId).ToArray())
+        };
     }
 
     private static ContentProductDefinition Product(

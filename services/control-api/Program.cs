@@ -15,10 +15,23 @@ using PalControl.ControlApi.Extraction;
 using PalControl.ControlApi.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddWindowsService(options =>
+{
+    options.ServiceName = "PalControl.ControlApi";
+});
 builder.Configuration.AddJsonFile(
     "appsettings.Local.json",
     optional: true,
     reloadOnChange: true);
+var externalConfigurationPath = Environment.GetEnvironmentVariable(
+    "PAL_CONTROL_CONFIG_PATH");
+if (!string.IsNullOrWhiteSpace(externalConfigurationPath))
+{
+    builder.Configuration.AddJsonFile(
+        Path.GetFullPath(externalConfigurationPath),
+        optional: false,
+        reloadOnChange: true);
+}
 builder.Configuration.AddEnvironmentVariables();
 builder.Configuration.AddCommandLine(args);
 
@@ -96,6 +109,12 @@ builder.Services.AddOptions<ExtractionPersistenceOptions>()
         static options => options.IsValid(out _),
         "Extraction persistence directory must be valid.")
     .ValidateOnStart();
+builder.Services.AddOptions<TeamEconomyOptions>()
+    .Bind(builder.Configuration.GetSection("TeamEconomy"))
+    .Validate(
+        static options => options.IsValid(out _),
+        "Enabled team economy requires a protected invitation pepper and valid projection, invitation, leaderboard, and goal limits.")
+    .ValidateOnStart();
 builder.Services.AddOptions<ExtractionRconOptions>()
     .Bind(builder.Configuration.GetSection("ExtractionMode:Rcon"))
     .Validate(
@@ -138,6 +157,7 @@ builder.Services.AddSingleton<IPlayerIdentityBindingStore>(services =>
 builder.Services.AddSingleton<IExtractionSettlementPersistence>(services =>
     services.GetRequiredService<SqliteExtractionRepository>());
 builder.Services.AddSingleton<ExtractionCommerceService>();
+builder.Services.AddSingleton<EconomyAnalyticsStore>();
 builder.Services.AddSingleton<SqliteEconomyContentStore>();
 builder.Services.AddSingleton<IEconomyContentStore>(services =>
     services.GetRequiredService<SqliteEconomyContentStore>());
@@ -151,6 +171,8 @@ builder.Services.AddSingleton<ExtractionDeliveryEvidenceStore>();
 builder.Services.AddSingleton<ExtractionDeliveryReceiptStore>();
 builder.Services.AddSingleton<PalDefenderItemGrantAdapter>();
 builder.Services.AddSingleton<ExtractionRunStore>();
+builder.Services.AddSingleton<TeamEconomyStore>();
+builder.Services.AddHostedService<TeamEconomyProjectionWorker>();
 builder.Services.AddSingleton<IExtractionNativeInventoryAdapter, ExtractionNativeInventoryAdapter>();
 builder.Services.AddSingleton<ExtractionSettlementService>();
 builder.Services.AddSingleton<IExtractionSettlementExecutor>(services =>
@@ -163,10 +185,62 @@ builder.Services.AddSingleton<EconomyContinuityService>();
 builder.Services.AddSingleton<WeeklyRolloverStateStore>();
 builder.Services.AddSingleton<SeasonSettlementJobStore>();
 builder.Services.AddSingleton<SeasonSettlementJobService>();
+builder.Services.AddSingleton<SeasonLeaderboardStore>();
+builder.Services.AddSingleton<SeasonLeaderboardService>();
+builder.Services.AddSingleton<PlayerSeasonSettlementService>();
+builder.Services.AddOptions<PlayerNotificationOptions>()
+    .Bind(builder.Configuration.GetSection("PlayerNotifications"));
+builder.Services.AddSingleton<PlayerNotificationStore>();
+builder.Services.AddSingleton<IPlayerGameNotificationDispatcher, PlayerGameNotificationDispatcher>();
+builder.Services.AddSingleton<PlayerNotificationProjectionService>();
+builder.Services.AddHostedService<PlayerNotificationProjectionWorker>();
 builder.Services.AddSingleton<IEconomySafetyDependencyProbe, EconomySafetyDependencyProbe>();
 builder.Services.AddSingleton<EconomySafetyGate>();
 builder.Services.AddSingleton<IExtractionRconAdapter, ExtractionRconAdapter>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddOptions<FederationOptions>()
+    .Bind(builder.Configuration.GetSection("Federation"))
+    .Validate(
+        options => !options.Enabled || string.Equals(
+            options.LocalServerId,
+            builder.Configuration["ExtractionMode:ServerId"],
+            StringComparison.Ordinal),
+        "Federation LocalServerId must equal the authoritative ExtractionMode ServerId.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<
+    Microsoft.Extensions.Options.IValidateOptions<FederationOptions>,
+    FederationOptionsValidator>();
+builder.Services.AddSingleton(services =>
+{
+    var options = services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<FederationOptions>>()
+        .Value;
+    var environment = services.GetRequiredService<IWebHostEnvironment>();
+    return new CompatibilityMatrixStore(FederationOptionsValidator.ValidateCore(
+        options,
+        environment.ContentRootPath,
+        environment.IsDevelopment()));
+});
+builder.Services.AddSingleton<FederationIdentityProtector>();
+builder.Services.AddSingleton<FederationInternalAuthenticator>();
+builder.Services.AddSingleton<FederationInternalRequestGuard>();
+builder.Services.AddSingleton<FederationLocalProfileService>();
+builder.Services.AddHttpClient("FederationNodes", client =>
+{
+    // Per-request linked cancellation enforces the configured federation
+    // timeout. A global HttpClient timeout would blur caller cancellation.
+    client.Timeout = Timeout.InfiniteTimeSpan;
+    client.MaxResponseContentBufferSize = 256 * 1024;
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    AllowAutoRedirect = false,
+    AutomaticDecompression = System.Net.DecompressionMethods.None,
+    UseCookies = false
+}).RedactLoggedHeaders(_ => true);
+builder.Services.AddSingleton<FederationNodeClient>();
+builder.Services.AddSingleton<IFederationNodeTransport>(services =>
+    services.GetRequiredService<FederationNodeClient>());
+builder.Services.AddSingleton<FederationAggregationService>();
 var adminAuthenticationSection = builder.Configuration.GetSection(
     "Security:AdminAuthentication");
 builder.Services.AddOptions<AdminAuthenticationOptions>(
@@ -215,6 +289,7 @@ builder.Services.AddSingleton<IAuthorizationHandler, AdminApiAccessAuthorization
 builder.Services.AddSingleton<IAuthorizationHandler, AdminTotpAuthorizationHandler>();
 builder.Services.AddSingleton<IAuthorizationHandler, AdminReasonAuthorizationHandler>();
 builder.Services.AddSingleton<AdminAuditStore>();
+builder.Services.AddSingleton<AdminOperationKeyStore>();
 builder.Services.AddOptions<PlayerPortalOptions>()
     .Bind(builder.Configuration.GetSection("PlayerPortal"))
     .Validate(
@@ -318,6 +393,10 @@ var app = builder.Build();
 // proxy routes must expose /api/v1/player only, never the extraction admin,
 // PalDefender, save-management, official REST, RCON, or native bridge routes.
 app.UseForwardedHeaders();
+// All HTTP work carries a validated correlation ID before exception handling,
+// security, audit, static-file, or application middleware. The scope omits
+// request paths because route values may contain player IDs or one-time codes.
+app.UseMiddleware<ControlPlaneCorrelationMiddleware>();
 app.UseExceptionHandler();
 // Release packages place the built operator console in wwwroot and the
 // optional player portal in wwwroot/player. Development builds can omit the
@@ -406,13 +485,19 @@ var api = app.MapGroup("/api/v1")
     .RequireAuthorization(AdminPolicies.ApiAccess);
 api.MapPalDefenderEndpoints();
 api.MapExtractionModeEndpoints();
+api.MapEconomyOperationsEndpoints();
 api.MapPlayerPortalEndpoints().AllowAnonymous();
 api.MapPlayerIdentitySecurityEndpoints();
 api.MapEconomyContinuityEndpoints();
+api.MapSeasonLeaderboardEndpoints();
+api.MapPlayerNotificationEndpoints();
+api.MapTeamEconomyEndpoints();
 api.MapEconomyObservabilityEndpoints();
+api.MapEconomyAnalyticsEndpoints();
 api.MapNewPlayerActivityAdminEndpoints();
 api.MapEconomyContentEndpoints();
 api.MapReliableTaskEndpoints();
+api.MapFederationEndpoints();
 
 api.MapGet("/admin/session", (HttpContext context) => Results.Ok(new
 {
@@ -2599,7 +2684,8 @@ app.Run();
 
 static bool IsOperatorOnlyApi(PathString path) =>
     path.StartsWithSegments("/api/v1") &&
-    !path.StartsWithSegments("/api/v1/player");
+    !path.StartsWithSegments("/api/v1/player") &&
+    !path.StartsWithSegments("/api/v1/internal/federation");
 
 static bool IsLoopback(IPAddress? address) =>
     address is not null && IPAddress.IsLoopback(address);

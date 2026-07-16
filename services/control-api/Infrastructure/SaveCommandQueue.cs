@@ -51,7 +51,14 @@ public sealed class SaveCommandQueue : BackgroundService
             FileShare.None,
             1,
             FileOptions.WriteThrough);
-        LoadEvents();
+        using (ControlPlaneLog.BeginOperation(
+                   _logger,
+                   nameof(SaveCommandQueue),
+                   "persistence.load",
+                   "save-command-audit"))
+        {
+            LoadEvents();
+        }
         EnsureWritable();
     }
 
@@ -169,6 +176,12 @@ public sealed class SaveCommandQueue : BackgroundService
                 continue;
             }
 
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(SaveCommandQueue),
+                "save.execute",
+                next.CommandId,
+                next.ServerId);
             try
             {
                 await ProcessAsync(next.CommandId, stoppingToken);
@@ -179,7 +192,7 @@ public sealed class SaveCommandQueue : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(exception, "Unhandled save command worker failure for {CommandId}.", next.CommandId);
+                _logger.LogSafeError(exception, "Unhandled save command worker failure for {CommandId}.", next.CommandId);
                 await TransitionAsync(
                     next.CommandId,
                     "failed",
@@ -210,6 +223,12 @@ public sealed class SaveCommandQueue : BackgroundService
 
         foreach (var command in interrupted)
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(SaveCommandQueue),
+                "save.reconcile",
+                command.CommandId,
+                command.ServerId);
             if (command.Type is "create-backup" && command.BackupId is { } createdBackupId)
             {
                 try
@@ -239,7 +258,7 @@ public sealed class SaveCommandQueue : BackgroundService
                 catch (Exception exception) when (
                     exception is IOException or UnauthorizedAccessException or JsonException)
                 {
-                    _logger.LogWarning(
+                    _logger.LogSafeWarning(
                         exception,
                         "Could not reconcile interrupted managed backup {BackupId}.",
                         createdBackupId);
@@ -353,7 +372,7 @@ public sealed class SaveCommandQueue : BackgroundService
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
         {
-            _logger.LogError(exception, "Save command {CommandId} failed during local I/O.", command.CommandId);
+            _logger.LogSafeError(exception, "Save command {CommandId} failed during local I/O.", command.CommandId);
             await TransitionAsync(
                 command.CommandId,
                 "failed",

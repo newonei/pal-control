@@ -919,12 +919,12 @@ public sealed partial class SqliteExtractionRepository :
         }
     }
 
-    public async Task PersistSettlementRunsAsync(
-        IReadOnlyCollection<ExtractionSettlementRun> runs,
+    public async Task PersistSettlementRunWritesAsync(
+        IReadOnlyCollection<ExtractionSettlementRunWrite> writes,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(runs);
-        ValidateSettlementRuns(runs);
+        ArgumentNullException.ThrowIfNull(writes);
+        ValidateSettlementRunWrites(writes);
         cancellationToken.ThrowIfCancellationRequested();
         await _gate.WaitAsync(cancellationToken);
         try
@@ -933,19 +933,28 @@ public sealed partial class SqliteExtractionRepository :
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(CancellationToken.None);
             await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
-            await using (var clear = connection.CreateCommand())
+            foreach (var write in writes.OrderBy(write => write.Run.QuotedAt))
             {
-                clear.Transaction = (SqliteTransaction)transaction;
-                clear.CommandText = "DELETE FROM extraction_settlement_runs;";
-                await clear.ExecuteNonQueryAsync(CancellationToken.None);
-            }
-            foreach (var run in runs.OrderBy(run => run.QuotedAt))
-            {
-                await using var insert = CreateSettlementRunInsertCommand(connection, transaction, run);
-                await insert.ExecuteNonQueryAsync(CancellationToken.None);
+                if (write.Expected is null)
+                {
+                    await using var insert = CreateSettlementRunInsertCommand(
+                        connection,
+                        transaction,
+                        write.Run);
+                    await insert.ExecuteNonQueryAsync(CancellationToken.None);
+                }
+                else
+                {
+                    await UpdateSettlementRunAsync(
+                        connection,
+                        transaction,
+                        write.Expected,
+                        write.Run,
+                        CancellationToken.None);
+                }
             }
             await transaction.CommitAsync(CancellationToken.None);
-            if (runs.Count > 0)
+            if (writes.Count > 0)
             {
                 EnsureAuthoritativeMarker();
             }
@@ -1221,7 +1230,10 @@ public sealed partial class SqliteExtractionRepository :
                 normalized.FeaturedRank,
                 normalized.GlobalStock,
                 normalized.ContentVersionId,
-                normalized.ContentHash);
+                normalized.ContentHash,
+                normalized.IconKey,
+                normalized.Rarity,
+                normalized.Usage);
             await AppendAndApplyAsync(NewEvent("product.upserted", now, product: product), cancellationToken);
             return CloneProduct(product);
         }
@@ -1329,7 +1341,10 @@ public sealed partial class SqliteExtractionRepository :
                         retired.FeaturedRank,
                         retired.GlobalStock,
                         activation.VersionId,
-                        contentHash),
+                        contentHash,
+                        retired.IconKey,
+                        retired.Rarity,
+                        retired.Usage),
                     actor,
                     now));
             }
@@ -2470,6 +2485,17 @@ public sealed partial class SqliteExtractionRepository :
         {
             throw new ArgumentException("A product cannot contain more than 20 tags.", nameof(definition));
         }
+        var presentationSupplied = definition.IconKey is not null ||
+            definition.Rarity is not null || definition.Usage is not null;
+        if (presentationSupplied &&
+            (!EconomyContentPresentation.IsSafeIconKey(definition.IconKey) ||
+             definition.Rarity is null || !Enum.IsDefined(definition.Rarity.Value) ||
+             !EconomyContentPresentation.IsSafeUsage(definition.Usage)))
+        {
+            throw new ArgumentException(
+                "Product presentation must be a complete approved iconKey/rarity/usage triple.",
+                nameof(definition));
+        }
         return definition with
         {
             Sku = NormalizeSku(definition.Sku),
@@ -2481,7 +2507,9 @@ public sealed partial class SqliteExtractionRepository :
                 .ToArray(),
             Category = category,
             Tags = tags,
-            ContentHash = contentHash
+            ContentHash = contentHash,
+            IconKey = definition.IconKey?.Trim(' ').ToLowerInvariant(),
+            Usage = definition.Usage?.Trim(' ')
         };
     }
 
@@ -2664,7 +2692,10 @@ public sealed partial class SqliteExtractionRepository :
             definition.FeaturedRank,
             definition.GlobalStock,
             definition.ContentVersionId,
-            definition.ContentHash);
+            definition.ContentHash,
+            definition.IconKey,
+            definition.Rarity,
+            definition.Usage);
         return existing is not null && ProductProjectionMatches(existing, candidate)
             ? CloneProduct(existing)
             : candidate;
@@ -2687,7 +2718,10 @@ public sealed partial class SqliteExtractionRepository :
         left.FeaturedRank == right.FeaturedRank &&
         left.GlobalStock == right.GlobalStock &&
         left.ContentVersionId == right.ContentVersionId &&
-        string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal);
+        string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal) &&
+        left.IconKey == right.IconKey &&
+        left.Rarity == right.Rarity &&
+        left.Usage == right.Usage;
 
     private static async Task VerifyContentProjectionTargetAsync(
         SqliteConnection connection,
@@ -3323,11 +3357,17 @@ public sealed partial class SqliteExtractionRepository :
                 payload = $payload
             WHERE run_id = $runId
               AND revision = $expectedRevision
-              AND state = $expectedState;
+              AND state = $expectedState
+              AND account_id = $expectedAccountId
+              AND season_id = $expectedSeasonId
+              AND user_id = $expectedUserId;
             """;
         AddSettlementRunParameters(command, updated);
         command.Parameters.AddWithValue("$expectedRevision", expected.Revision);
         command.Parameters.AddWithValue("$expectedState", expected.State.ToString());
+        command.Parameters.AddWithValue("$expectedAccountId", expected.AccountId.ToString("D"));
+        command.Parameters.AddWithValue("$expectedSeasonId", expected.SeasonId.ToString("D"));
+        command.Parameters.AddWithValue("$expectedUserId", expected.UserId);
         var changed = await command.ExecuteNonQueryAsync(cancellationToken);
         if (changed != 1)
         {
@@ -3443,6 +3483,45 @@ public sealed partial class SqliteExtractionRepository :
         }
     }
 
+    private static void ValidateSettlementRunWrites(
+        IEnumerable<ExtractionSettlementRunWrite> writes)
+    {
+        var runIds = new HashSet<Guid>();
+        foreach (var write in writes)
+        {
+            if (write is null || write.Run is null)
+            {
+                throw new InvalidDataException(
+                    "The extraction settlement run write set contains a null write or run.");
+            }
+
+            ValidateSettlementRuns([write.Run]);
+            if (!runIds.Add(write.Run.RunId))
+            {
+                throw new InvalidDataException(
+                    "The extraction settlement run write set contains duplicate run ids.");
+            }
+            if (write.Expected is null)
+            {
+                continue;
+            }
+
+            ValidateSettlementRuns([write.Expected]);
+            if (write.Expected.RunId != write.Run.RunId ||
+                write.Expected.AccountId != write.Run.AccountId ||
+                write.Expected.SeasonId != write.Run.SeasonId ||
+                !string.Equals(
+                    write.Expected.UserId,
+                    write.Run.UserId,
+                    StringComparison.Ordinal) ||
+                write.Run.Revision < write.Expected.Revision)
+            {
+                throw new InvalidDataException(
+                    $"Extraction settlement run '{write.Run.RunId}' has an invalid row-level update identity or revision.");
+            }
+        }
+    }
+
     private static void EnsureMatchingCreditRun(
         ExtractionSettlementRun expected,
         ExtractionSettlementRun persisted)
@@ -3463,7 +3542,15 @@ public sealed partial class SqliteExtractionRepository :
         Items = run.Items.ToArray(),
         PreDeleteTotals = run.PreDeleteTotals is null
             ? null
-            : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, long>(run.PreDeleteTotals, StringComparer.OrdinalIgnoreCase),
+        DynamicEconomyEvidence = run.DynamicEconomyEvidence is null
+            ? null
+            : run.DynamicEconomyEvidence with
+            {
+                WorldEvents = run.DynamicEconomyEvidence.WorldEvents
+                    .Select(worldEvent => worldEvent with { })
+                    .ToArray()
+            }
     };
 
     private void MigrateLegacyEventsIfNeeded()

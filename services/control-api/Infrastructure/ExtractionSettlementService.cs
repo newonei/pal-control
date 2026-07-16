@@ -49,6 +49,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
     private readonly EconomyContentRuntimeService? _content;
     private readonly ReliableTaskRuntimeService? _reliableTasks;
     private readonly TimeZoneInfo _timeZone;
+    private readonly TimeProvider _timeProvider;
 
     public ExtractionSettlementService(
         ExtractionModeCoordinator coordinator,
@@ -65,7 +66,8 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         IOptions<EconomySafetyOptions>? safetyOptions = null,
         IConfiguration? configuration = null,
         EconomyContentRuntimeService? content = null,
-        ReliableTaskRuntimeService? reliableTasks = null)
+        ReliableTaskRuntimeService? reliableTasks = null,
+        TimeProvider? timeProvider = null)
     {
         _coordinator = coordinator;
         _commerce = commerce;
@@ -80,6 +82,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         _content = content;
         _reliableTasks = reliableTasks;
         _timeZone = _options.ResolveTimeZone();
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _useDevelopmentRconSettlement = DevelopmentRconSettlementPolicy.IsAllowed(
             environment,
             configuration,
@@ -94,6 +97,95 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
     public string SettlementAdapter => _useDevelopmentRconSettlement
         ? "development-rcon"
         : "native";
+
+    internal static void RequireCurrentQuoteContent(
+        ExtractionSettlementRun quote,
+        EconomyContentVersion currentVersion)
+    {
+        if (!EconomyContentEvidence.MatchesCurrent(
+                quote.ContentVersionId,
+                quote.ContentHash,
+                currentVersion))
+        {
+            throw new ExtractionModeException(
+                "QUOTE_CONTENT_CHANGED",
+                "报价对应的本周经济内容已经切换，请重新扫描。",
+                StatusCodes.Status409Conflict);
+        }
+    }
+
+    internal static void RequireCurrentQuoteDynamicEvidence(
+        ExtractionSettlementRun quote,
+        EconomyRuntimeContent current)
+    {
+        var actual = quote.DynamicEconomyEvidence;
+        var dynamic = current.DynamicEconomy;
+        if (dynamic is null)
+        {
+            if (actual is not null)
+            {
+                throw new ExtractionModeException(
+                    "QUOTE_EVENT_CHANGED",
+                    "报价包含的动态经济事件已不再属于当前内容，请重新扫描。",
+                    StatusCodes.Status409Conflict);
+            }
+            return;
+        }
+        var zone = dynamic.Zones.FirstOrDefault(candidate => string.Equals(
+            candidate.ZoneId,
+            quote.ZoneId,
+            StringComparison.OrdinalIgnoreCase));
+        if (actual is null || zone is null ||
+            !string.Equals(actual.PolicyVersion, dynamic.PolicyVersion, StringComparison.Ordinal) ||
+            !string.Equals(actual.Seed, dynamic.Seed, StringComparison.Ordinal) ||
+            actual.RiskLevel != zone.RiskLevel ||
+            actual.OpenWindow != zone.OpenWindow ||
+            actual.HotspotWindow != zone.HotspotWindow ||
+            !actual.WorldEvents.SequenceEqual(dynamic.WorldEvents))
+        {
+            throw new ExtractionModeException(
+                actual is null ? "QUOTE_EVENT_EVIDENCE_MISSING" : "QUOTE_EVENT_CHANGED",
+                "报价缺少或不匹配当前确定性动态区、热点与世界事件证据，请重新扫描。",
+                StatusCodes.Status409Conflict);
+        }
+    }
+
+    internal static DateTimeOffset CalculateDynamicQuoteExpiry(
+        DateTimeOffset quotedAt,
+        DateTimeOffset configuredExpiry,
+        EconomyDynamicZoneEvidence dynamicZone,
+        bool hotspotAtQuote,
+        IReadOnlyList<EconomyWorldEventEvidence> selectedWorldEvents,
+        IReadOnlyList<EconomyWorldEventEvidence> activeWorldEvents)
+    {
+        var expiresAt = Min(configuredExpiry, dynamicZone.OpenWindow.GraceEndsAt);
+        if (dynamicZone.HotspotWindow is { } hotspotWindow)
+        {
+            expiresAt = hotspotAtQuote
+                ? Min(expiresAt, hotspotWindow.GraceEndsAt)
+                : quotedAt < hotspotWindow.StartsAt
+                    ? Min(expiresAt, hotspotWindow.StartsAt)
+                    : expiresAt;
+        }
+
+        var activeEventIds = activeWorldEvents.Select(worldEvent => worldEvent.EventId)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var worldEvent in selectedWorldEvents)
+        {
+            if (activeEventIds.Contains(worldEvent.EventId))
+            {
+                expiresAt = Min(expiresAt, worldEvent.Window.GraceEndsAt);
+            }
+            else if (quotedAt < worldEvent.Window.StartsAt)
+            {
+                // Do not let a pre-event quote carry yesterday's/base rate
+                // into a newly active event. Quotes captured while active may
+                // settle through the event's explicit grace window.
+                expiresAt = Min(expiresAt, worldEvent.Window.StartsAt);
+            }
+        }
+        return expiresAt;
+    }
 
     public async Task<RconOperationResult> ProbeSettlementAsync(CancellationToken cancellationToken)
     {
@@ -180,6 +272,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         var runtimeContent = _content is null
             ? null
             : await _content.GetCurrentAsync(cancellationToken);
+        var quotedAt = _timeProvider.GetUtcNow();
         var zone = await RequireStableExtractionZoneAsync(
             userId,
             runtimeContent,
@@ -212,6 +305,9 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 item => new RuntimeResource(
                     item.Value.DisplayName,
                     item.Value.UnitValue,
+                    null,
+                    null,
+                    null,
                     null),
                 StringComparer.OrdinalIgnoreCase)
             : runtimeContent.Resources.Values
@@ -223,7 +319,10 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                     resource => new RuntimeResource(
                         resource.DisplayName,
                         resource.UnitValue,
-                        resource.Category),
+                        resource.Category,
+                        resource.IconKey,
+                        resource.Rarity,
+                        resource.Usage),
                     StringComparer.OrdinalIgnoreCase);
         var lines = inventory.Totals
             .Where(item => item.Value > 0 && sellableResources.ContainsKey(item.Key))
@@ -241,15 +340,24 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                         StatusCodes.Status422UnprocessableEntity);
                 }
                 var definition = sellableResources[item.Key];
-                var effectiveUnitValue = Math.Max(
-                    1,
-                    checked((definition.UnitValue * zone.YieldMultiplierBasisPoints + 9_999) / 10_000));
+                var presentation = EconomyContentPresentation.ResolveResource(
+                    definition.Category ?? string.Empty,
+                    definition.IconKey,
+                    definition.Rarity,
+                    definition.Usage);
+                var effectiveUnitValue = EconomyContentRuntimeService.CalculateEffectiveResourceUnitValue(
+                    definition.UnitValue,
+                    zone.YieldMultiplierBasisPoints);
                 return new ExtractionLootLine(
                     item.Key,
                     definition.DisplayName,
                     (int)item.Value,
                     effectiveUnitValue,
-                    checked(item.Value * effectiveUnitValue));
+                    checked(item.Value * effectiveUnitValue),
+                    presentation.IconKey,
+                    presentation.Rarity,
+                    presentation.Usage,
+                    presentation.PresentationSource);
             })
             .ToArray();
         if (lines.Length == 0)
@@ -267,6 +375,25 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 "本次可售资源总数超过 Native 原子扣物的安全上限。",
                 StatusCodes.Status422UnprocessableEntity);
         }
+        var expiresAt = quotedAt.AddSeconds(_options.ExtractionQuoteSeconds);
+        EconomyDynamicQuoteEvidence? dynamicEvidence = null;
+        if (zone.DynamicZone is { } dynamicZone && runtimeContent?.DynamicEconomy is { } dynamicEconomy)
+        {
+            dynamicEvidence = new EconomyDynamicQuoteEvidence(
+                dynamicEconomy.PolicyVersion,
+                dynamicEconomy.Seed,
+                dynamicZone.RiskLevel,
+                dynamicZone.OpenWindow,
+                dynamicZone.HotspotWindow,
+                dynamicEconomy.WorldEvents);
+            expiresAt = CalculateDynamicQuoteExpiry(
+                quotedAt,
+                expiresAt,
+                dynamicZone,
+                zone.Hotspot,
+                dynamicEconomy.WorldEvents,
+                zone.ActiveWorldEvents);
+        }
         return await _runs.CreateQuoteAsync(
             context.Account.AccountId,
             context.Season.SeasonId,
@@ -277,12 +404,84 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
             nativeSnapshot?.SnapshotHash ?? HashSnapshot(
                 inventory.Totals,
                 lines.Select(line => line.ItemId)),
-            DateTimeOffset.UtcNow.AddSeconds(_options.ExtractionQuoteSeconds),
+            expiresAt,
             cancellationToken,
             nativeSnapshot,
             runtimeContent,
             zone.YieldMultiplierBasisPoints,
-            zone.Hotspot);
+            zone.Hotspot,
+            dynamicEvidence);
+    }
+
+    public async Task<ExtractionQuoteSelectionResult> SelectQuoteAsync(
+        Guid sourceRunId,
+        long sourceRevision,
+        string userId,
+        string idempotencyKey,
+        IReadOnlyList<ExtractionQuoteSelectionLine> selection,
+        CancellationToken cancellationToken)
+    {
+        var context = await _coordinator.GetAccountContextAsync(
+            userId,
+            requireOnline: true,
+            cancellationToken);
+        using var safetyLease = await _economySafety.AcquireAsync(
+            EconomyWriteFeature.ResourceExchange,
+            EconomySafetyContext.FromAccount(context),
+            queue: null,
+            cancellationToken);
+        await _coordinator.EnsureSeasonMatchesActiveWorldAsync(context.Season, cancellationToken);
+        var source = await _runs.GetAsync(sourceRunId, cancellationToken)
+            ?? throw new ExtractionModeException(
+                "EXTRACTION_RUN_NOT_FOUND",
+                "原资源兑换报价不存在。",
+                StatusCodes.Status404NotFound);
+        if (source.AccountId != context.Account.AccountId ||
+            !string.Equals(
+                source.UserId,
+                context.Account.ExternalUserId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_RUN_OWNER_MISMATCH",
+                "原资源兑换报价不属于当前玩家。",
+                StatusCodes.Status403Forbidden);
+        }
+        if (source.SeasonId != context.Season.SeasonId)
+        {
+            throw new ExtractionModeException(
+                "EXTRACTION_RUN_SEASON_MISMATCH",
+                "原资源兑换报价不属于当前周世界。",
+                StatusCodes.Status409Conflict);
+        }
+
+        var runtimeContent = _content is null
+            ? null
+            : await _content.GetCurrentAsync(cancellationToken);
+        if (runtimeContent is not null)
+        {
+            RequireCurrentQuoteContent(source, runtimeContent.Version);
+            RequireCurrentQuoteDynamicEvidence(source, runtimeContent);
+        }
+        var result = await _runs.CreateSelectedQuoteAsync(
+            sourceRunId,
+            sourceRevision,
+            context.Account.AccountId,
+            context.Season.SeasonId,
+            context.Account.ExternalUserId,
+            idempotencyKey,
+            selection,
+            runtimeContent?.Version.VersionId,
+            runtimeContent?.Version.ContentHash,
+            cancellationToken);
+        if (result.IdempotencyConflict)
+        {
+            throw new ExtractionModeException(
+                "IDEMPOTENCY_CONFLICT",
+                "该 Idempotency-Key 已绑定其他玩家、原报价或资源选择。",
+                StatusCodes.Status409Conflict);
+        }
+        return result;
     }
 
     public async Task<ExtractionSettlementRun> ExecuteSettlementAsync(
@@ -331,16 +530,10 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         var runtimeContent = _content is null
             ? null
             : await _content.GetCurrentAsync(cancellationToken);
-        if (runtimeContent is not null &&
-            !EconomyContentEvidence.MatchesCurrent(
-                existing.ContentVersionId,
-                existing.ContentHash,
-                runtimeContent.Version))
+        if (runtimeContent is not null)
         {
-            throw new ExtractionModeException(
-                "QUOTE_CONTENT_CHANGED",
-                "报价对应的本周经济内容已经切换，请重新扫描。",
-                StatusCodes.Status409Conflict);
+            RequireCurrentQuoteContent(existing, runtimeContent.Version);
+            RequireCurrentQuoteDynamicEvidence(existing, runtimeContent);
         }
         _ = await RequireStableExtractionZoneAsync(
             userId,
@@ -620,7 +813,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
             ? null
             : await _content.EnsureCurrentForBusinessDateAsync(cancellationToken);
         var player = await _coordinator.TryGetPlayerLocationAsync(userId, cancellationToken);
-        var sampledAt = DateTimeOffset.UtcNow;
+        var sampledAt = _timeProvider.GetUtcNow();
 
         var hasLivePosition = player is
         {
@@ -658,6 +851,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                     zone.Id,
                     zone.DisplayName,
                     zone.RouteHint,
+                    zone.RiskHint,
                     center,
                     worldCenter,
                     zone.Radius,
@@ -670,8 +864,22 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                     zone.Open,
                     zone.Hotspot,
                     zone.YieldMultiplierBasisPoints,
-                    zone.NextOpensAt);
+                    zone.NextOpensAt,
+                    zone.OpenWindows,
+                    zone.DynamicZone?.RiskLevel,
+                    zone.DynamicZone?.SelectedOpen ?? true,
+                    zone.DynamicZone?.OpenWindow,
+                    zone.DynamicZone?.HotspotWindow,
+                    runtimeContent?.DynamicEconomy?.PolicyVersion,
+                    runtimeContent?.DynamicEconomy?.Seed,
+                    zone.ActiveWorldEvents);
             })
+            .ToArray();
+
+        var activeWorldEvents = runtimeZones
+            .SelectMany(zone => zone.ActiveWorldEvents)
+            .DistinctBy(worldEvent => worldEvent.EventId, StringComparer.Ordinal)
+            .OrderBy(worldEvent => worldEvent.EventId, StringComparer.Ordinal)
             .ToArray();
 
         var nearestZone = playerMapPosition is null
@@ -706,7 +914,15 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
             playerMapPosition is null ? null : activeZone is not null,
             activeZone?.Id,
             nearestZone?.Id,
-            zoneDistances);
+            zoneDistances,
+            runtimeZones.All(zone => !zone.Open)
+                ? runtimeZones.Select(zone => zone.NextOpensAt)
+                    .Where(value => value is not null)
+                    .Min()
+                : null,
+            runtimeContent?.DynamicEconomy?.PolicyVersion,
+            runtimeContent?.DynamicEconomy?.Seed,
+            activeWorldEvents);
     }
 
     public async Task<ExtractionSettlementRun> ReconcileAsync(
@@ -780,7 +996,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         // dropping or consuming items, so recovery must never infer a credit
         // from that observation. Only a durable Removed record may auto-credit.
         var stateChangedAt = claimed.StateChangedAt ?? claimed.UpdatedAt;
-        if (DateTimeOffset.UtcNow - stateChangedAt >= TimeSpan.FromSeconds(60))
+        if (_timeProvider.GetUtcNow() - stateChangedAt >= TimeSpan.FromSeconds(60))
         {
             var uncertain = await _runs.TryMarkUncertainAsync(
                 claimed.RunId,
@@ -841,7 +1057,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         }
         catch (Exception exception)
         {
-            _logger.LogError(
+            _logger.LogSafeError(
                 exception,
                 "Resource settlement {RunId} could not persist its lease heartbeat; cancelling the critical section.",
                 run.RunId);
@@ -881,7 +1097,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 code,
                 message,
                 finalizationTimeout.Token);
-            _logger.LogWarning(
+            _logger.LogSafeWarning(
                 cause,
                 "Resource settlement {RunId} left its critical section in state {State}; automatic credit is disabled unless Removed was already durable.",
                 startedRun.RunId,
@@ -890,7 +1106,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         }
         catch (Exception finalizationException)
         {
-            _logger.LogError(
+            _logger.LogSafeError(
                 finalizationException,
                 "Could not persist the uncertain outcome for resource settlement {RunId}; lease recovery will retry conservatively.",
                 startedRun.RunId);
@@ -942,7 +1158,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 // The wallet credit and settlement state are already durable.
                 // Never roll them back or report an ambiguous economy outcome
                 // because the independent task projection is temporarily down.
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Reliable tasks could not project settled resource exchange {RunId}.",
                     settled.Run.RunId);
@@ -1062,7 +1278,7 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         catch (Exception exception) when (receiptPersisted)
         {
             await StopLeaseHeartbeatAsync(heartbeatStop, heartbeatTask);
-            _logger.LogWarning(
+            _logger.LogSafeWarning(
                 exception,
                 "Native consume receipt for extraction run {RunId} is durable; recovery will resume finalization without dispatching another consume command.",
                 start.Run.RunId);
@@ -1180,18 +1396,25 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         bool includeScheduleGrace,
         CancellationToken cancellationToken)
     {
-        var zones = GetRuntimeZones(content, DateTimeOffset.UtcNow, includeScheduleGrace)
-            .Where(zone => zone.Open && (expectedZoneId is null || string.Equals(
+        var candidateZones = GetRuntimeZones(content, _timeProvider.GetUtcNow(), includeScheduleGrace)
+            .Where(zone => expectedZoneId is null || string.Equals(
                 zone.Id,
                 expectedZoneId,
-                StringComparison.OrdinalIgnoreCase)))
+                StringComparison.OrdinalIgnoreCase))
             .ToArray();
+        var zones = candidateZones.Where(zone => zone.Open).ToArray();
         if (zones.Length == 0)
         {
+            var nextOpensAt = candidateZones.Select(zone => zone.NextOpensAt)
+                .Where(value => value is not null)
+                .Min();
             throw new ExtractionModeException(
                 "EXTRACTION_ZONE_CLOSED",
-                "当前报价对应的资源回收区域未开放，请在开放时间重新扫描。",
-                StatusCodes.Status409Conflict);
+                nextOpensAt is null
+                    ? "当前报价对应的资源回收区域未开放，且没有可用的下一开放时间。"
+                    : $"当前报价对应的资源回收区域未开放；下一开放时间为 {nextOpensAt:O}。",
+                StatusCodes.Status409Conflict,
+                nextOpensAt);
         }
         var first = await _coordinator.GetLivePlayerAsync(userId, cancellationToken);
         var firstZone = FindZone(first, zones) ?? throw new ExtractionModeException(
@@ -1238,32 +1461,69 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
                 zone.Id,
                 zone.DisplayName,
                 zone.RouteHint,
+                zone.RiskHint,
                 zone.MapX,
                 zone.MapY,
                 zone.Radius,
                 10_000,
                 true,
                 false,
-                null)).ToArray();
+                null,
+                [])).ToArray();
         }
         return content.ExchangeZones.Select(zone =>
         {
-            var open = EconomyContentSchedule.IsOpen(
+            var staticOpen = EconomyContentSchedule.IsOpen(
                 zone,
                 now,
                 _timeZone,
                 includeScheduleGrace);
+            var dynamicZone = content.DynamicEconomy?.Zones.FirstOrDefault(candidate =>
+                string.Equals(candidate.ZoneId, zone.ZoneId, StringComparison.OrdinalIgnoreCase));
+            var dynamicOpen = content.DynamicEconomy is null ||
+                              EconomyDynamicEconomyRuntime.IsZoneOpen(
+                                  content.DynamicEconomy,
+                                  zone.ZoneId,
+                                  now,
+                                  includeScheduleGrace);
+            var open = staticOpen && dynamicOpen;
+            var hotspot = content.DynamicEconomy is null
+                ? content.HotspotZoneIds.Contains(zone.ZoneId)
+                : EconomyDynamicEconomyRuntime.IsHotspot(
+                    content.DynamicEconomy,
+                    zone.ZoneId,
+                    now,
+                    includeScheduleGrace);
+            var activeEvents = content.DynamicEconomy is null
+                ? []
+                : EconomyDynamicEconomyRuntime.ActiveEvents(
+                    content.DynamicEconomy,
+                    now,
+                    includeScheduleGrace);
+            var effectiveMultiplier = EconomyContentRuntimeService.CalculateRuntimeZoneYieldMultiplierBasisPoints(
+                content.Version,
+                zone,
+                hotspot,
+                activeEvents);
             return new RuntimeZone(
                 zone.ZoneId,
                 zone.DisplayName,
                 zone.RouteHint,
+                zone.RiskHint,
                 zone.MapX,
                 zone.MapY,
                 zone.Radius,
-                zone.YieldMultiplierBasisPoints,
+                effectiveMultiplier,
                 open,
-                content.HotspotZoneIds.Contains(zone.ZoneId),
-                open ? null : EconomyContentSchedule.NextOpen(zone, now, _timeZone));
+                hotspot,
+                open ? null : EconomyDynamicEconomyRuntime.NextZoneOpen(
+                    content.Version,
+                    zone,
+                    now,
+                    _timeZone),
+                zone.OpenWindows,
+                dynamicZone,
+                activeEvents);
         }).ToArray();
     }
 
@@ -1293,6 +1553,9 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
         }
         return new InventorySnapshot(totals);
     }
+
+    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) =>
+        left <= right ? left : right;
 
     private static void CollectItemTotals(JsonNode node, IDictionary<string, long> totals)
     {
@@ -1368,18 +1631,32 @@ public sealed class ExtractionSettlementService : IExtractionSettlementExecutor
     }
 
     private sealed record LootDefinition(string DisplayName, long UnitValue);
-    private sealed record RuntimeResource(string DisplayName, long UnitValue, string? Category);
+    private sealed record RuntimeResource(
+        string DisplayName,
+        long UnitValue,
+        string? Category,
+        string? IconKey,
+        ContentRarity? Rarity,
+        string? Usage);
     private sealed record RuntimeZone(
         string Id,
         string DisplayName,
         string RouteHint,
+        string RiskHint,
         double MapX,
         double MapY,
         double Radius,
         int YieldMultiplierBasisPoints,
         bool Open,
         bool Hotspot,
-        DateTimeOffset? NextOpensAt);
+        DateTimeOffset? NextOpensAt,
+        IReadOnlyList<ContentExchangeWindow> OpenWindows,
+        EconomyDynamicZoneEvidence? DynamicZone = null,
+        IReadOnlyList<EconomyWorldEventEvidence>? ActiveWorldEventsValue = null)
+    {
+        public IReadOnlyList<EconomyWorldEventEvidence> ActiveWorldEvents =>
+            ActiveWorldEventsValue ?? [];
+    }
     private sealed record InventorySnapshot(IReadOnlyDictionary<string, long> Totals);
 }
 
@@ -1389,6 +1666,7 @@ public sealed record PlayerExtractionZone(
     string Id,
     string Name,
     string RouteHint,
+    string RiskHint,
     ExtractionMapPoint MapPosition,
     ExtractionMapPoint WorldPosition,
     double Radius,
@@ -1401,7 +1679,15 @@ public sealed record PlayerExtractionZone(
     bool Open = true,
     bool Hotspot = false,
     int YieldMultiplierBasisPoints = 10_000,
-    DateTimeOffset? NextOpensAt = null);
+    DateTimeOffset? NextOpensAt = null,
+    IReadOnlyList<ContentExchangeWindow>? OpenWindows = null,
+    ContentZoneRiskLevel? RiskLevel = null,
+    bool DynamicSelectedOpen = true,
+    EconomyEventWindowEvidence? DynamicOpenWindow = null,
+    EconomyEventWindowEvidence? HotspotWindow = null,
+    string? DynamicPolicyVersion = null,
+    string? DynamicSeed = null,
+    IReadOnlyList<EconomyWorldEventEvidence>? WorldEvents = null);
 
 public sealed record PlayerExtractionZoneSnapshot(
     string Status,
@@ -1413,7 +1699,11 @@ public sealed record PlayerExtractionZoneSnapshot(
     bool? InsideAnyZone,
     string? ActiveZoneId,
     string? NearestZoneId,
-    IReadOnlyList<PlayerExtractionZone> Zones);
+    IReadOnlyList<PlayerExtractionZone> Zones,
+    DateTimeOffset? NextOpensAt = null,
+    string? DynamicPolicyVersion = null,
+    string? DynamicSeed = null,
+    IReadOnlyList<EconomyWorldEventEvidence>? WorldEvents = null);
 
 public static class ExtractionCoordinateTransform
 {
@@ -1449,6 +1739,11 @@ public sealed class ExtractionSettlementRecoveryWorker : BackgroundService
                 var runs = await _settlement.ListRecoverableAsync(25, stoppingToken);
                 foreach (var run in runs)
                 {
+                    using var scope = ControlPlaneLog.BeginWorker(
+                        _logger,
+                        nameof(ExtractionSettlementRecoveryWorker),
+                        "settlement.reconcile",
+                        run.RunId);
                     try
                     {
                         _ = await _settlement.ReconcileAsync(run, stoppingToken);
@@ -1459,7 +1754,7 @@ public sealed class ExtractionSettlementRecoveryWorker : BackgroundService
                     }
                     catch (Exception exception)
                     {
-                        _logger.LogError(
+                        _logger.LogSafeError(
                             exception,
                             "Extraction settlement recovery failed for run {RunId} revision {Revision}.",
                             run.RunId,
@@ -1473,7 +1768,11 @@ public sealed class ExtractionSettlementRecoveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(exception, "Extraction settlement recovery failed.");
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(ExtractionSettlementRecoveryWorker),
+                    "settlement.scan.failure");
+                _logger.LogSafeError(exception, "Extraction settlement recovery failed.");
             }
             await Task.Delay(2_000, stoppingToken);
         }

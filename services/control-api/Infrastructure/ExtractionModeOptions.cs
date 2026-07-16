@@ -147,6 +147,8 @@ public sealed class ExtractionZoneOptions
     public string DisplayName { get; init; } = "开发服资源回收点";
     public string RouteHint { get; init; } =
         "打开游戏地图前往坐标 (248, -504)，进入中心半径 100 的区域；到达后回到玩家商城扫描并出售白名单资源。";
+    public string RiskHint { get; init; } =
+        "公开兑换点可能有野生帕鲁与其他玩家活动；仅携带本次准备出售的资源。";
     public double MapX { get; init; } = 248;
     public double MapY { get; init; } = -504;
     public double Radius { get; init; } = 100;
@@ -158,6 +160,8 @@ public sealed class ExtractionZoneOptions
         DisplayName.Length <= 128 &&
         !string.IsNullOrWhiteSpace(RouteHint) &&
         RouteHint.Length <= 512 &&
+        !string.IsNullOrWhiteSpace(RiskHint) &&
+        RiskHint.Length <= 512 &&
         double.IsFinite(MapX) &&
         double.IsFinite(MapY) &&
         double.IsFinite(Radius) &&

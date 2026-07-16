@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace PalControl.ControlApi.Domain;
 
 public sealed record ServerCapabilities(
@@ -154,4 +156,8 @@ public sealed record AcceptedCommand(
     DateTimeOffset AcceptedAt,
     string StatusUrl);
 
-public sealed record ApiError(string Code, string Message, string? TraceId = null);
+public sealed record ApiError(string Code, string Message, string? TraceId = null)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? NextOpensAt { get; init; }
+}

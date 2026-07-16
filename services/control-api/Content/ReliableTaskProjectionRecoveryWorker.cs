@@ -50,7 +50,11 @@ public sealed class ReliableTaskProjectionRecoveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(exception, "Reliable task projection recovery scan failed.");
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(ReliableTaskProjectionRecoveryWorker),
+                    "projection.scan.failure");
+                _logger.LogSafeError(exception, "Reliable task projection recovery scan failed.");
             }
             await Task.Delay(ScanInterval, stoppingToken);
         }
@@ -62,6 +66,12 @@ public sealed class ReliableTaskProjectionRecoveryWorker : BackgroundService
         var runs = await _runs.ListAsync(null, null, 1000, cancellationToken);
         foreach (var run in runs.Where(run => run.State == ExtractionSettlementState.Settled))
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(ReliableTaskProjectionRecoveryWorker),
+                "projection.settlement",
+                run.RunId,
+                _options.ServerId);
             if (await _tasks.HasResourceSettlementEventAsync(run.RunId, cancellationToken))
             {
                 continue;
@@ -79,7 +89,7 @@ public sealed class ReliableTaskProjectionRecoveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogWarning(
+                _logger.LogSafeWarning(
                     exception,
                     "Could not recover reliable task event for settlement {RunId}; it will be retried.",
                     run.RunId);
@@ -89,6 +99,12 @@ public sealed class ReliableTaskProjectionRecoveryWorker : BackgroundService
         var orders = await _commerce.ListOrdersAsync(null, null, 1000, cancellationToken);
         foreach (var order in orders.Where(order => order.State == ShopOrderState.Delivered))
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(ReliableTaskProjectionRecoveryWorker),
+                "projection.order",
+                order.OrderId,
+                _options.ServerId);
             if (await _tasks.HasDeliveredOrderEventAsync(order.OrderId, cancellationToken))
             {
                 continue;
@@ -106,7 +122,7 @@ public sealed class ReliableTaskProjectionRecoveryWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogWarning(
+                _logger.LogSafeWarning(
                     exception,
                     "Could not recover reliable task event for delivered order {OrderId}; it will be retried.",
                     order.OrderId);

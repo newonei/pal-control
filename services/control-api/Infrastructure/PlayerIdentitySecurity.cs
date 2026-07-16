@@ -477,6 +477,14 @@ public sealed class PlayerIdentitySecurityService(
         }
     }
 
+    internal bool IsVolatileBanned(string normalizedSubject)
+    {
+        lock (_sync)
+        {
+            return _volatileBans.Contains(normalizedSubject);
+        }
+    }
+
     public PlayerPortalSessionCreation? CreateSessionIfAllowed(
         string normalizedSubject,
         string? playerUid,

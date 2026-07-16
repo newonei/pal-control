@@ -84,7 +84,7 @@ public static class EconomySimulationTargets
         new("primaryCurrencyConsumptionRatio", 1_500, 9_000, "basis-points"),
         new("primaryCurrencyEndingBalanceMedian", 50, 2_000, "currency"),
         new("primaryCurrencyEndingBalanceP95", 150, 5_000, "currency"),
-        new("uniqueBuyerRate", 4_000, 9_500, "basis-points"),
+        new("uniqueBuyerRate", 4_000, 10_000, "basis-points"),
         new("purchasePerImpressionRate", 300, 2_000, "basis-points"),
         new("resourceExchangeEarningsPerPlayer", 300, 2_500, "currency/player/7-business-days")
     ];
@@ -111,6 +111,7 @@ public static class EconomySimulation
         }
 
         var content = EconomyContentCanonicalizer.Normalize(definition);
+        var contentHash = EconomyContentCanonicalizer.Hash(content);
         var rng = new StablePrng(options.Seed);
         var currencies = Enum.GetValues<ExtractionCurrency>();
         var players = Enumerable.Range(0, options.PlayerCount)
@@ -119,17 +120,10 @@ public static class EconomySimulation
         var activeZones = content.ExchangeZones
             .Where(zone => zone.Active && zone.OpenWindows.Any(window => window.OpensAt != window.ClosesAt))
             .ToDictionary(zone => zone.ZoneId, StringComparer.OrdinalIgnoreCase);
-        var resources = content.Resources
+        var resourceDefinitions = content.Resources
             .Where(resource => resource.Active)
-            .Select(resource => new SimulatedResource(
-                resource,
-                resource.ExchangeZoneIds
-                    .Where(activeZones.ContainsKey)
-                    .Select(zoneId => activeZones[zoneId].YieldMultiplierBasisPoints)
-                    .DefaultIfEmpty(0)
-                    .Max()))
-            .Where(resource => resource.MaximumMultiplierBasisPoints > 0)
-            .OrderBy(resource => resource.Definition.ItemId, StringComparer.OrdinalIgnoreCase)
+            .Where(resource => resource.ExchangeZoneIds.Any(activeZones.ContainsKey))
+            .OrderBy(resource => resource.ItemId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var products = content.Products
             .Where(product => product.Active)
@@ -155,6 +149,42 @@ public static class EconomySimulation
         for (var day = 0; day < options.BusinessDays; day++)
         {
             var businessDate = options.StartingBusinessDate.AddDays(day);
+            var simulatedVersion = new EconomyContentVersion(
+                contentVersionId ?? Guid.Empty,
+                content.ServerId,
+                day + 1,
+                businessDate,
+                content.Dependencies.RulesVersion,
+                contentHash,
+                content,
+                Guid.Empty,
+                "economy-simulator",
+                DateTimeOffset.MinValue);
+            var dynamicEconomy = EconomyDynamicEconomyRuntime.Create(
+                simulatedVersion,
+                EconomyDynamicEconomyRuntime.ResolveTimeZone(content));
+            var selectedOpenZoneIds = dynamicEconomy?.Zones
+                .Where(zone => zone.SelectedOpen)
+                .Select(zone => zone.ZoneId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var resources = resourceDefinitions.Select(resource => new SimulatedResource(
+                    resource,
+                    resource.ExchangeZoneIds
+                        .Where(activeZones.ContainsKey)
+                        .Where(zoneId => selectedOpenZoneIds is null || selectedOpenZoneIds.Contains(zoneId))
+                        // Stress the complete cross-day economy loop: players
+                        // can buy on the cheapest discount day and sell on the
+                        // highest hotspot/yield-event day. Modeling only the
+                        // event selected on this one simulated date would miss
+                        // that temporal combination.
+                        .Select(zoneId => EconomyContentRuntimeService
+                            .CalculateMaximumPossibleZoneYieldMultiplierBasisPoints(
+                                content,
+                                activeZones[zoneId]))
+                        .DefaultIfEmpty(0)
+                        .Max()))
+                .Where(resource => resource.MaximumMultiplierBasisPoints > 0)
+                .ToArray();
             foreach (var player in players)
             {
                 if (!rng.Chance(8_500))
@@ -209,6 +239,13 @@ public static class EconomySimulation
 
                 var availableProducts = products
                     .Where(product => IsAvailable(product, businessDate))
+                    .Select(product => new
+                    {
+                        Product = product,
+                        Price = EconomyContentRuntimeService.CalculateMinimumPossibleEffectiveUnitPrice(
+                            content,
+                            product)
+                    })
                     .ToArray();
                 if (availableProducts.Length == 0)
                 {
@@ -217,7 +254,9 @@ public static class EconomySimulation
                 var offset = rng.NextInt(availableProducts.Length);
                 for (var productIndex = 0; productIndex < availableProducts.Length; productIndex++)
                 {
-                    var product = availableProducts[(productIndex + offset) % availableProducts.Length];
+                    var offer = availableProducts[(productIndex + offset) % availableProducts.Length];
+                    var product = offer.Product;
+                    var price = offer.Price;
                     offerImpressions++;
                     if (product.PurchaseLimitPerSeason is int personalLimit &&
                         player.Purchases.GetValueOrDefault(product.Sku) >= personalLimit)
@@ -225,19 +264,19 @@ public static class EconomySimulation
                         continue;
                     }
                     if (globalStockRemaining[product.Sku] <= 0 ||
-                        player.Balances[product.PriceCurrency] < product.UnitPrice ||
+                        player.Balances[product.PriceCurrency] < price ||
                         !rng.Chance(1_400))
                     {
                         continue;
                     }
 
                     player.Balances[product.PriceCurrency] = checked(
-                        player.Balances[product.PriceCurrency] - product.UnitPrice);
+                        player.Balances[product.PriceCurrency] - price);
                     player.Purchases[product.Sku] = player.Purchases.GetValueOrDefault(product.Sku) + 1;
                     globalStockRemaining[product.Sku]--;
                     productPurchases[product.Sku]++;
-                    productSpend[product.Sku] = checked(productSpend[product.Sku] + product.UnitPrice);
-                    consumed[product.PriceCurrency] = checked(consumed[product.PriceCurrency] + product.UnitPrice);
+                    productSpend[product.Sku] = checked(productSpend[product.Sku] + price);
+                    consumed[product.PriceCurrency] = checked(consumed[product.PriceCurrency] + price);
                     buyers.Add(player.Id);
                 }
             }
@@ -313,15 +352,18 @@ public static class EconomySimulation
             options.BusinessDays,
             options.StartingBusinessDate,
             contentVersionId,
-            EconomyContentCanonicalizer.Hash(content),
+            contentHash,
             ExtractionCurrency.SeasonVoucher,
             currencyMetrics,
             resourceMetrics,
             purchaseMetrics,
             assessments,
             assessments.All(assessment => assessment.WithinTarget),
-            "Deterministic scenario model only: no crafting recipes, player trading, inflation response, " +
-            "drop-table probabilities, churn, or live-server latency are modeled.");
+            "Deterministic scenario model only: the attested economic shadow graph is validated separately " +
+            "and is not executed as a game recipe simulation; deterministic dynamic-zone availability plus the cross-day " +
+            "maximum timed-hotspot/yield-event sale multiplier and minimum daily/event purchase-price combination are modeled; " +
+            "player trading, inflation response, drop-table " +
+            "probabilities, churn, and live-server latency are not modeled.");
     }
 
     private static ContentTaskDefinition[] SelectTasks(

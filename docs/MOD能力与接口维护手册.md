@@ -1,7 +1,7 @@
 # Pal Control MOD 能力与接口维护手册
 
 > 适用项目：幻兽商域 Palworld Windows Dedicated Server 控制台
-> 文档基线日期：2026-07-15
+> 文档基线日期：2026-07-16
 > Control API 协议：HTTP JSON + SSE
 > Native Bridge 协议：Named Pipe `1.0`
 
@@ -12,24 +12,26 @@
 | 项目 | 当前值 | 说明 |
 | --- | --- | --- |
 | 服务器名称 | `幻兽商域` | 来自官方 REST `/info` |
-| 游戏版本 | `v1.0.0.100427` | Native 适配目标版本 |
-| 当前进程已加载 MOD | `0.3.0-dev.36` | Bridge 只读探针已于 2026-07-15 验证 |
+| 当前游戏版本 | `v1.0.1.100619` | 2026-07-16 从官方 REST `/info` 回读 |
+| Native 已批准目标版本 | `v1.0.0.100427` | 低于当前游戏版本，必须重新适配与验收后才能更新 |
+| 当前进程 Native Bridge | 未连接 | 服务更新到 Steam build `24181105` 后，兼容性守卫隔离了旧 UE4SS loader；官方 REST 可达且无人在线，但 Named Pipe 连接超时 |
+| 最近已验证加载版本 | `0.3.0-dev.36` | UE4SS 日志记录 2026-07-15 11:07 的上一次进程已加载并建立 Bridge；之后的进程必须重新探针 |
 | 源码声明版本 | `0.3.0-dev.36` | 含受限静态槽清空的实验性 `inventory.consume` 与只读公开撤离点聊天查询 |
 | 服务器磁盘 DLL | `0.3.0-dev.36` | SHA-256 `6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A` |
 | `Info.template.json` | `0.3.0-dev.36` | 与当前源码和运行 DLL 版本一致；尚未据此发布 Workshop 包 |
 | Native 协议 | `1.0` | 长度前缀 UTF-8 JSON |
-| Control API | `http://127.0.0.1:5180` | 仅回环地址 |
-| Web 控制台 | `http://127.0.0.1:5174` | 当前主开发端口 |
-| 玩家商城 | `http://127.0.0.1:5175` | 独立玩家入口；公网必须经 HTTPS 反向代理 |
+| Control API | `http://127.0.0.1:5180` | 生产目标仅监听回环；当前运行状态以 readiness 为准 |
+| Web 控制台 | `http://127.0.0.1:5174` | 本地开发端口，不代表进程持续运行 |
+| 玩家商城 | `http://127.0.0.1:5175` | 本地开发端口；公网必须经 HTTPS 反向代理 |
 | 官方 REST | `http://127.0.0.1:8212/v1/api/` | 通过防火墙阻止远程访问 |
 | 游戏端口 | UDP `8211` | 可做公网映射 |
 | Query 端口 | UDP `27015` | 可做公网映射 |
 | RCON | 启用（仅供本机控制链路） | `RCONEnabled=True`；Windows 防火墙阻断 TCP `25575` 外部入站 |
-| Native Pipe | `\\.\pipe\pal-control.local.v1` | 仅本机进程访问 |
+| Native Pipe | `\\.\pipe\pal-control.local.v1` | 仅本机进程访问；本次快照未连接 |
 
 ### 当前开发模式约定
 
-1. 当前运行服、磁盘 DLL、源码和模板均为 `0.3.0-dev.36`；Bridge 已验证连接、完整槽元数据可读且不再声明 `inventory.consume.partial-stack-only`。Palworld 保留 `/` 给管理员命令，不能向普通玩家宣传 `/撤离`。`inventory.consume.experimental` 尚未经过“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收，仍不得用于公开经济入账。
+1. 磁盘 DLL、源码和模板均为 `0.3.0-dev.36`，DLL SHA-256 与锁文件一致；上一次 `v1.0.0.100427` 进程曾验证 Bridge、完整槽元数据及 capability。当前服务已更新到 `v1.0.1.100619`，兼容性守卫正确隔离旧 UE4SS loader，绝不能为了“连上 Pipe”直接恢复旧 loader。必须先针对新游戏版本重新完成 ABI/schema 适配、构建和只读探针，再进入写能力验收。Palworld 保留 `/` 给管理员命令，不能向普通玩家宣传 `/撤离`。`inventory.consume.experimental` 尚未经过“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收，仍不得用于公开经济入账。
 2. 即使处于开发模式，PalServer 重启也必须先确认无人在线，再通过官方 REST 保存和正常关服；禁止为替换 DLL 强杀进程。
 3. 客户端浮层只读探针已验证 `PalGameStateInGame:BroadcastServerNotice` 的参数区为 16 字节、FunctionFlags 为 `0x24CC0`，`publishClientOverlay=true`。
 
@@ -344,13 +346,15 @@ Invoke-RestMethod `
 确认预演后，把 `dryRun` 改为 `false` 并换一个新的 `Idempotency-Key`。其他操作将 `patch` 换成以下之一：
 
 ```json
-{ "grantStatusPoints": 5 }
-{ "grantTechnologyPoints": 10 }
-{ "grantAncientTechnologyPoints": 2 }
-{
-  "allocateStatusId": "StatusName_AddMaxHP",
-  "allocateStatusPoints": 1
-}
+[
+  { "grantStatusPoints": 5 },
+  { "grantTechnologyPoints": 10 },
+  { "grantAncientTechnologyPoints": 2 },
+  {
+    "allocateStatusId": "StatusName_AddMaxHP",
+    "allocateStatusPoints": 1
+  }
+]
 ```
 
 允许分配的属性 ID：
@@ -1014,7 +1018,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 产品已由 ADR-0001 固定为方案 A：当前周世界允许容器中的任意白名单资源都可出售，不建立逐局行动、死亡结算或战利品来源归因。
 - 每周世界档、每日 `04:00` 业务日版本与 90%–110% 确定性轮换价；永久商域币和当前周战备券分账。
 - 单进程 `extraction-commerce.db` 承载账户、赛季、钱包、账本、商品、限购、订单、resource settlement、PalDefender command outbox、版本化内容、可靠任务、管理审计与换档调度。旧经济/PalDefender JSONL 仅一次性事务导入，成功后改名保留；公告、通知和 save side state 仍使用非经济 JSONL。
-- 内置方案 A 内容在当前授权目录中可激活 10 个商品和 51 个可售资源候选、1 个默认兑换区、3 个日任务和 3 个周任务。草稿/diff/严格校验、不可变版本、current pointer 与完整商品投影同事务激活、发布/回滚、显式分类/标签/推荐位、个人/全服库存和旧 offer 拒绝已有自动化；第二个真实兑换区仍未完成。
+- 内置方案 A 内容在当前授权目录中可激活 10 个商品和 51 个可售资源候选、2 个本地候选兑换区、3 个日任务和 3 个周任务。草稿/diff/严格校验、不可变版本、current pointer 与完整商品投影同事务激活、发布/回滚、双点确定性热点、显式分类/标签/推荐位、个人/全服库存和旧 offer 拒绝已有自动化；候选点 2 的真实 Palworld 坐标验收仍未完成。
 - 可靠任务只接受已持久化成功兑换、指定 ItemID/价值、成功订单和指定货币消费；事件、钱包奖励和积分奖励跨重启唯一。击杀、采集、热点进入、死亡和 PvP 未开放。
 - 商城以逐物品结构化 receipt 归因发货；同一 `serverId + idempotencyKey` 跨重启返回同一结果，partial/`uncertain` 不重发，dead-letter 会告警并自动关闭购买。扣款/订单与 command accepted 虽在同库，仍是由持久 delivery/receipt 衔接的两个事务，不能宣称一次原子提交。
 - 资源报价在配置圆形区域连续采样两次，读取 `Items/Food/DropSlot` 的完整 Native 槽元数据，为全部白名单资源生成 30 秒整单快照。
@@ -1024,7 +1028,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 维护闸门会同时拒绝新订单、报价和结算；readiness 会阻止存在派发中、`uncertain`、dead-letter、过期备份、版本/世界漂移或未终结 settlement 时换档。
 - [`Invoke-WeeklyRollover.ps1`](../extraction-mode/scripts/Invoke-WeeklyRollover.ps1) 默认只读生成计划；显式 `-Execute` 时由服务端持久化的 operation/step key 驱动双备份、优雅停服、冻结目标 `DedicatedServerName`、启动探针、赛季 worldId 提交和恢复。脚本结构性拒绝移动或删除旧世界。
 
-自动化已经覆盖身份、商城、SQLite outbox、Native 结算、版本化内容、可靠任务、100 玩家 × 7 日仿真、故障边界、备份和换档客户端。完整制作/转换反套利、真实多区/多人/周档仍未覆盖。早期真实联调仅证明商城同键重放、新兵补给到账，以及 5 个 `Leather` 经旧 RCON 路径删除后余额唯一增加；该历史记录不能替代当前 Native 持久化、正式域名 Steam 回调或连续 3 次真实周换档验收。
+自动化已经覆盖身份、商城、SQLite outbox、Native 结算、版本化内容、可靠任务、attested 运营经济影子 DAG、100 玩家 × 7 日仿真、故障边界、备份和换档客户端。影子转换明确不是实际 Palworld 配方；模型外配方/玩家交易以及真实多区、多人和连续周档仍未覆盖。早期真实联调仅证明商城同键重放、新兵补给到账，以及 5 个 `Leather` 经旧 RCON 路径删除后余额唯一增加；该历史记录不能替代当前 Native 持久化、正式域名 Steam 回调或连续 3 次真实周换档验收。
 
 ## 21. 玩家自助商城能力快照（2026-07-15）
 
@@ -1035,7 +1039,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 验证码有效 5 分钟、最多尝试 5 次，只在内存中保存 HMAC 摘要；用户与 IP 双重限流且缓存有硬上限。
 - 验证成功后使用 12 小时随机 `HttpOnly`、`SameSite=Strict` Cookie；服务重启会要求重新登录。
 - 所有 `/api/v1/player/me/*` 身份只来自会话，不接受浏览器指定玩家；全部 POST 校验严格 Origin，业务写操作额外校验 CSRF，购买与结算继续要求幂等键。
-- 兼容路径 `GET /api/v1/player/me/extraction-zones` 返回内容定义兑换点以及当前会话玩家自己的在线位置、开放/热点状态、路线、收益倍率、下一开放时间、中心/边界距离和范围状态；离线或位置不可用时仍可查看区域，不返回其他玩家位置。
+- 兼容路径 `GET /api/v1/player/me/extraction-zones` 返回内容定义兑换点以及当前会话玩家自己的在线位置、开放/热点状态、开放窗口、路线、风险提示、服务端有效收益倍率、逐区下一开放时间和全关时的最早 `nextOpensAt`、中心/边界距离和范围状态；离线或位置不可用时仍可查看区域，不返回其他玩家位置。
 - `apps/player-web` 只包含本人钱包、商城、活动、可靠任务、5 步引导、订单、流水、资源兑换点地图和兑换记录，不加载玩家目录或任何管理员组件。地图每 5 秒更新；处理中订单/兑换在页面可见时每 3 秒有界轮询并在终态停止，报价倒计时到期后 fail-closed。
 - Native MOD 监听原生 `BroadcastChatMessage`，普通玩家输入兼容别名 `!撤离` 或 `!extract`（兼容直接输入 `撤离`、`extract`）时只通过可靠 `ClientMessage` 向发起者回复两行资源兑换点情报；`/` 前缀会在该 Hook 之前进入管理员命令解析器；详细验收见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
 - 公网 Caddy 只反代 `/api/v1/player/*`；其他 `/api` 直接返回 404。`5174`、`5180`、`8212`、`17993`、`25575` 继续禁止公网映射。

@@ -4,16 +4,253 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using PalControl.ControlApi.Content;
 using PalControl.ControlApi.Extraction;
 using PalControl.ControlApi.Infrastructure;
 
 var cancellationToken = CancellationToken.None;
 await VerifyStableCapabilityAndFullSnapshotAsync(cancellationToken);
+await VerifyContentSwitchFailsBeforeNativeDispatchAsync(cancellationToken);
+await VerifyDynamicQuoteEvidenceAndWindowSemanticsAsync(cancellationToken);
 await VerifyConsumeEvidenceClassificationAsync(cancellationToken);
 await VerifyDurableIdempotencyAndReceiptAsync(cancellationToken);
 await VerifyPersistenceFaultBoundariesAsync(cancellationToken);
 VerifyProductionNeverSelectsRcon();
-Console.WriteLine("PASS: Native quote snapshot, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
+Console.WriteLine("PASS: Native quote snapshot, content/event-switch pre-dispatch rejection, dynamic event/hotspot quote grace, durable dynamic evidence, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
+
+static async Task VerifyContentSwitchFailsBeforeNativeDispatchAsync(
+    CancellationToken cancellationToken)
+{
+    var playerUid = Guid.NewGuid().ToString("N");
+    var snapshot = Snapshot(playerUid);
+    var transport = new FakeNativeBridgeTransport();
+    var adapter = new ExtractionNativeInventoryAdapter(StableState(), transport);
+    var line = new ExtractionLootLine("Leather", "皮革", 5, 2, 10);
+    var contentA = Guid.NewGuid();
+    var contentB = Guid.NewGuid();
+    var hashA = new string('a', 64);
+    var hashB = new string('b', 64);
+    var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+    var quote = new ExtractionSettlementRun(
+        Guid.NewGuid(),
+        Guid.NewGuid(),
+        Guid.NewGuid(),
+        "steam_native-content-switch",
+        "zone-1",
+        "回收点",
+        ExtractionSettlementState.Quoted,
+        [line],
+        5,
+        10,
+        snapshot.SnapshotHash,
+        null,
+        null,
+        null,
+        null,
+        now,
+        now.AddMinutes(2),
+        now,
+        null)
+    {
+        ContentVersionId = contentA,
+        ContentHash = hashA,
+        NativeInventorySnapshot = snapshot
+    };
+    var currentVersion = new EconomyContentVersion(
+        contentB,
+        "local",
+        2,
+        new DateOnly(2026, 7, 16),
+        EconomyContentRuntimeService.SupportedRulesVersion,
+        hashB,
+        null!,
+        Guid.NewGuid(),
+        "test",
+        now);
+
+    ExtractionModeException? rejected = null;
+    try
+    {
+        ExtractionSettlementService.RequireCurrentQuoteContent(quote, currentVersion);
+        var payload = adapter.CreateConsumePayload(snapshot, quote.Items);
+        var requestHash = adapter.ComputeRequestHash(quote.RunId, "local", payload);
+        transport.Results.Enqueue(Result("succeeded", SuccessJson(actualConsumed: 5)));
+        _ = await adapter.ConsumeAsync(
+            "local",
+            payload,
+            requestHash,
+            "content-switch-native-key",
+            cancellationToken);
+    }
+    catch (ExtractionModeException exception)
+    {
+        rejected = exception;
+    }
+
+    Assert(rejected?.Code == "QUOTE_CONTENT_CHANGED" && rejected.StatusCode == 409,
+        "A content-A quote did not fail closed after the current pointer moved to content B.");
+    Assert(transport.Calls.Count == 0,
+        "Native inventory.consume was dispatched for a stale content quote.");
+    Assert(quote.State == ExtractionSettlementState.Quoted &&
+           quote.SettlementIdempotencyKey is null &&
+           quote.SettlementRequestHash is null &&
+           quote.NativeConsumeReceipt is null &&
+           quote.AttemptCount == 0,
+        "The pre-dispatch content guard mutated the quoted run.");
+}
+
+static async Task VerifyDynamicQuoteEvidenceAndWindowSemanticsAsync(
+    CancellationToken cancellationToken)
+{
+    var start = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+    var openWindow = new EconomyEventWindowEvidence(start, start.AddHours(1), start.AddHours(1).AddMinutes(1));
+    var hotspotWindow = new EconomyEventWindowEvidence(
+        start.AddMinutes(10),
+        start.AddMinutes(20),
+        start.AddMinutes(21));
+    var worldEvent = new EconomyWorldEventEvidence(
+        new string('e', 32),
+        "resource-surge",
+        "Resource surge",
+        ContentWorldEventKind.ResourceSurge,
+        new string('f', 64),
+        new EconomyEventWindowEvidence(
+            start.AddMinutes(30),
+            start.AddMinutes(40),
+            start.AddMinutes(42)),
+        11_500,
+        10_000);
+    var dynamicZone = new EconomyDynamicZoneEvidence(
+        "zone-1",
+        ContentZoneRiskLevel.Elevated,
+        true,
+        openWindow,
+        true,
+        hotspotWindow);
+
+    Assert(ExtractionSettlementService.CalculateDynamicQuoteExpiry(
+               start.AddMinutes(5),
+               start.AddHours(2),
+               dynamicZone,
+               hotspotAtQuote: false,
+               [worldEvent],
+               []) == hotspotWindow.StartsAt,
+        "A pre-hotspot quote crossed the hotspot activation boundary with its old multiplier.");
+    Assert(ExtractionSettlementService.CalculateDynamicQuoteExpiry(
+               start.AddMinutes(15),
+               start.AddHours(2),
+               dynamicZone,
+               hotspotAtQuote: true,
+               [worldEvent],
+               []) == hotspotWindow.GraceEndsAt,
+        "An active-hotspot quote did not retain exactly its configured grace window.");
+    Assert(ExtractionSettlementService.CalculateDynamicQuoteExpiry(
+               start.AddMinutes(35),
+               start.AddHours(2),
+               dynamicZone,
+               hotspotAtQuote: false,
+               [worldEvent],
+               [worldEvent]) == worldEvent.Window.GraceEndsAt,
+        "An active economic-event quote did not retain exactly its configured grace window.");
+
+    var evidence = new EconomyDynamicQuoteEvidence(
+        "dynamic-v1",
+        new string('a', 64),
+        dynamicZone.RiskLevel,
+        dynamicZone.OpenWindow,
+        dynamicZone.HotspotWindow,
+        [worldEvent]);
+    var directory = Path.Combine(Path.GetTempPath(), $"pal-control-dynamic-quote-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    Guid runId;
+    try
+    {
+        using (var fixture = CreateStore(directory))
+        {
+            var quote = await fixture.Store.CreateQuoteAsync(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                "steam_dynamic-player",
+                "zone-1",
+                "Dynamic zone",
+                [new ExtractionLootLine("Leather", "Leather", 5, 3, 15)],
+                new string('b', 64),
+                DateTimeOffset.UtcNow.AddMinutes(2),
+                cancellationToken,
+                dynamicEconomyEvidence: evidence,
+                zoneYieldMultiplierBasisPoints: 15_000,
+                hotspot: true);
+            runId = quote.RunId;
+            var currentDynamic = new EconomyDynamicEconomyEvidence(
+                evidence.PolicyVersion,
+                evidence.Seed,
+                new DateOnly(2026, 7, 16),
+                [dynamicZone],
+                [worldEvent]);
+            var versionId = Guid.NewGuid();
+            var currentRuntime = new EconomyRuntimeContent(
+                new EconomyContentVersion(
+                    versionId,
+                    "local",
+                    1,
+                    currentDynamic.BusinessDate,
+                    EconomyContentRuntimeService.SupportedRulesVersion,
+                    new string('c', 64),
+                    null!,
+                    Guid.NewGuid(),
+                    "test",
+                    start),
+                new EconomyContentRotationIdentity(
+                    "local",
+                    currentDynamic.BusinessDate,
+                    EconomyContentRuntimeService.SupportedRulesVersion,
+                    1,
+                    evidence.Seed,
+                    new string('c', 64),
+                    versionId),
+                new Dictionary<string, ContentProductDefinition>(),
+                new Dictionary<string, ContentResourceDefinition>(),
+                [],
+                new HashSet<string>(),
+                currentDynamic);
+            ExtractionSettlementService.RequireCurrentQuoteDynamicEvidence(quote, currentRuntime);
+            var changedRuntime = currentRuntime with
+            {
+                DynamicEconomy = currentDynamic with
+                {
+                    WorldEvents = [worldEvent with { EventId = new string('9', 32) }]
+                }
+            };
+            var changed = await CaptureExtractionErrorAsync(() => Task.Run(() =>
+                ExtractionSettlementService.RequireCurrentQuoteDynamicEvidence(quote, changedRuntime)));
+            Assert(changed?.Code == "QUOTE_EVENT_CHANGED" && changed.StatusCode == 409,
+                "Changed deterministic event evidence was accepted for an existing quote.");
+            var returnedEvents = (EconomyWorldEventEvidence[])quote.DynamicEconomyEvidence!.WorldEvents;
+            returnedEvents[0] = returnedEvents[0] with { EventId = new string('0', 32) };
+            var isolated = await fixture.Store.GetAsync(runId, cancellationToken);
+            Assert(isolated?.DynamicEconomyEvidence?.WorldEvents.Single().EventId == worldEvent.EventId,
+                "Mutating returned quote evidence changed the authoritative in-memory run.");
+        }
+
+        using (var reopened = CreateStore(directory))
+        {
+            var loaded = await reopened.Store.GetAsync(runId, cancellationToken);
+            Assert(loaded?.DynamicEconomyEvidence is not null &&
+                   loaded.DynamicEconomyEvidence.WorldEvents.Single() == worldEvent &&
+                   loaded.DynamicEconomyEvidence.HotspotWindow == hotspotWindow &&
+                   loaded.ZoneYieldMultiplierBasisPoints == 15_000 && loaded.Hotspot,
+                "Restart lost frozen event id/seed/window/multiplier/hotspot evidence.");
+        }
+    }
+    finally
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+}
 
 static async Task VerifyStableCapabilityAndFullSnapshotAsync(CancellationToken cancellationToken)
 {
@@ -700,13 +937,13 @@ internal sealed class FaultInjectingSettlementPersistence(
         string legacyJsonPath) =>
         inner.LoadAndMigrateSettlementRuns(legacyJsonPath);
 
-    public Task PersistSettlementRunsAsync(
-        IReadOnlyCollection<ExtractionSettlementRun> runs,
+    public Task PersistSettlementRunWritesAsync(
+        IReadOnlyCollection<ExtractionSettlementRunWrite> writes,
         CancellationToken cancellationToken)
     {
         var failure = Interlocked.Exchange(ref _nextPersistFailure, null);
         return failure is null
-            ? inner.PersistSettlementRunsAsync(runs, cancellationToken)
+            ? inner.PersistSettlementRunWritesAsync(writes, cancellationToken)
             : Task.FromException(new IOException(failure));
     }
 

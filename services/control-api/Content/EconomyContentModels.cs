@@ -43,6 +43,16 @@ public sealed record EconomyContentDependencies(
 
 public sealed record ContentItemGrant(string ItemId, int Quantity);
 
+[JsonConverter(typeof(JsonStringEnumConverter<ContentRarity>))]
+public enum ContentRarity
+{
+    Common,
+    Uncommon,
+    Rare,
+    Epic,
+    Legendary
+}
+
 public sealed record ContentProductDefinition(
     string Sku,
     string DisplayName,
@@ -57,7 +67,13 @@ public sealed record ContentProductDefinition(
     long? GlobalStock,
     bool Active,
     DateTimeOffset? AvailableFrom,
-    DateTimeOffset? AvailableUntil);
+    DateTimeOffset? AvailableUntil,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? IconKey = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ContentRarity? Rarity = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Usage = null);
 
 /// <summary>
 /// Presence in this collection is the sell allow-list. Items outside it are
@@ -71,7 +87,13 @@ public sealed record ContentResourceDefinition(
     ExtractionCurrency Currency,
     long UnitValue,
     IReadOnlyList<string> ExchangeZoneIds,
-    bool Active);
+    bool Active,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? IconKey = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ContentRarity? Rarity = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Usage = null);
 
 public sealed record ContentExchangeWindow(
     DayOfWeek DayOfWeek,
@@ -88,7 +110,8 @@ public sealed record ContentExchangeZoneDefinition(
     double Radius,
     int YieldMultiplierBasisPoints,
     IReadOnlyList<ContentExchangeWindow> OpenWindows,
-    bool Active);
+    bool Active,
+    string RiskHint = "");
 
 public sealed record ContentTaskReward(
     ExtractionCurrency Currency,
@@ -122,7 +145,8 @@ public sealed record ContentRotationPolicy(
     IReadOnlyList<string> WeeklyTaskPool,
     int WeeklyTaskCount,
     IReadOnlyList<string> HotspotZonePool,
-    int DailyHotspotCount);
+    int DailyHotspotCount,
+    int HotspotYieldMultiplierBasisPoints = 12_000);
 
 public sealed record EconomyContentDefinition(
     int SchemaVersion,
@@ -135,7 +159,11 @@ public sealed record EconomyContentDefinition(
     IReadOnlyList<ContentResourceDefinition> Resources,
     IReadOnlyList<ContentExchangeZoneDefinition> ExchangeZones,
     IReadOnlyList<ContentTaskDefinition> Tasks,
-    ContentRotationPolicy Rotation);
+    ContentRotationPolicy Rotation,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ContentEconomyBalancePolicy? BalancePolicy = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ContentDynamicEconomyPolicy? DynamicEconomyPolicy = null);
 
 public sealed record EconomyContentValidationContext(
     IReadOnlySet<string> KnownItemIds,

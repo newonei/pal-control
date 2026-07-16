@@ -187,8 +187,7 @@ public sealed class AdminAuditMiddleware(
             return;
         }
 
-        var correlationId = GetCorrelationId(context);
-        context.Response.Headers["X-Correlation-ID"] = correlationId;
+        var correlationId = ControlPlaneCorrelationMiddleware.GetCorrelationId(context);
         var requestHash = await HashRequestAsync(context.Request, context.RequestAborted);
         var subject = AdminIdentity.RequireSubject(context);
         var roles = AdminIdentity.Roles(context);
@@ -206,11 +205,13 @@ public sealed class AdminAuditMiddleware(
             resultStatus: null);
         await store.AppendAsync(started, context.RequestAborted);
 
-        using var scope = logger.BeginScope(new Dictionary<string, object?>
-        {
-            ["CorrelationId"] = correlationId,
-            ["AdminSubject"] = subject
-        });
+        var subjectFingerprint = PlayerIdentitySecurityStore.FingerprintSubject(subject);
+        using var scope = ControlPlaneLog.BeginOperation(
+            logger,
+            nameof(AdminAuditMiddleware),
+            "admin.audit",
+            correlationId,
+            subjectFingerprint: subjectFingerprint);
         Exception? failure = null;
         try
         {
@@ -242,11 +243,11 @@ public sealed class AdminAuditMiddleware(
             }
             catch (Exception auditException)
             {
-                logger.LogCritical(
+                logger.LogSafeCritical(
                     auditException,
-                    "Failed to persist completion audit for correlation {CorrelationId} and administrator {AdminSubject}.",
+                    "Failed to persist completion audit for correlation {CorrelationId} and administrator fingerprint {AdminSubjectFingerprint}.",
                     correlationId,
-                    subject);
+                    subjectFingerprint);
             }
         }
     }
@@ -276,14 +277,6 @@ public sealed class AdminAuditMiddleware(
             ServiceVersion,
             resultStatus,
             timeProvider.GetUtcNow());
-
-    private static string GetCorrelationId(HttpContext context)
-    {
-        var supplied = context.Request.Headers["X-Correlation-ID"];
-        return supplied.Count == 1 && Guid.TryParseExact(supplied[0], "D", out var parsed)
-            ? parsed.ToString("D")
-            : Guid.NewGuid().ToString("D");
-    }
 
     private static string? NormalizeReason(Microsoft.Extensions.Primitives.StringValues values)
     {

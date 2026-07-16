@@ -16,6 +16,7 @@
 | GET | `/api/v1/extraction/orders?userId=...` | 订单与 PalDefender 发货状态 |
 | GET | `/api/v1/extraction/ledger?userId=...` | 钱包账本 |
 | POST | `/api/v1/extraction/runs/quote` | 连续位置采样、背包白名单扫描和 30 秒报价 |
+| POST | `/api/v1/extraction/runs/{runId}/select` | 管理兼容路径；携带 `userId/sourceRevision/items` 与幂等键原子派生所选子报价 |
 | POST | `/api/v1/extraction/runs/{runId}/settle` | Native 完整快照原子扣物、持久化回执和唯一入账；正式环境不使用 RCON fallback |
 | GET | `/api/v1/extraction/runs?userId=...` | 资源兑换记录与结算 capability |
 | POST | `/api/v1/extraction/admin/wallet-adjustments` | 本机管理员幂等调账 |
@@ -33,14 +34,15 @@
 | GET | `/api/v1/player/me/orders` | 本人订单；区分退款、取消、partial 与 uncertain |
 | GET | `/api/v1/player/me/ledger` | 本人资金流水 |
 | GET | `/api/v1/player/me/extraction-zones` | 本人位置、内容定义兑换区、开放状态、路线、下一开放时间与收益倍率 |
-| POST | `/api/v1/player/me/runs/quote` | 本人位置双采样、当前内容白名单与 30 秒整单报价 |
+| POST | `/api/v1/player/me/runs/quote` | 本人位置双采样、当前内容白名单与 30 秒源报价；页面默认全选 |
+| POST | `/api/v1/player/me/runs/{runId}/select` | 本人选择；Body 只含 `sourceRevision/items`，身份、账户与赛季只取会话，要求 CSRF 与幂等键 |
 | POST | `/api/v1/player/me/runs/{runId}/settle` | 本人报价结算；Cookie 身份、CSRF 与幂等键均必需 |
 | GET | `/api/v1/player/me/runs` | 本人资源兑换记录 |
 | GET | `/api/v1/player/me/new-player-activities` | 当前周世界已发布活动与本人领取状态 |
 | POST | `/api/v1/player/me/new-player-activities/{activityKey}/versions/{version}/claim` | 显式领取指定不可变活动版本 |
 | GET | `/api/v1/player/me/tasks` | 版本固定的日/周可靠任务、进度、奖励和积分 |
 
-`orders`、`runs/{id}/settle`、活动领取和管理员调账都要求 `Idempotency-Key`。购买和资源兑换还会验证数据库真实可写、经济赛季 worldId 与 `GameUserSettings.ini`/活动存档目录/官方 REST world GUID 一致、当前周完整玩家 UID 绑定、对应 adapter 版本与能力、维护状态和队列容量；周窗口到期不会自动开空 worldId 赛季，而是保持写入关闭直到受控换档提交。控制台应分别读取 `capabilities.writes.purchase` 与 `capabilities.writes.resourceExchange`，不能用其中一个功能的状态推断另一个；`enabled=false` 时展示 `blockers[].code/message` 和 `circuit`，不应自行绕过服务端门禁。完整操作见 [Economy Safety Gate 运行手册](../../docs/runbooks/economy-safety-gate.md)。当前返回形状以玩家/控制台 DTO、端点实现和 OpenAPI 为准。
+`orders`、`runs/{id}/select`、`runs/{id}/settle`、活动领取和管理员调账都要求 `Idempotency-Key`。购买和资源兑换还会验证数据库真实可写、经济赛季 worldId 与 `GameUserSettings.ini`/活动存档目录/官方 REST world GUID 一致、当前周完整玩家 UID 绑定、对应 adapter 版本与能力、维护状态和队列容量；周窗口到期不会自动开空 worldId 赛季，而是保持写入关闭直到受控换档提交。控制台应分别读取 `capabilities.writes.purchase` 与 `capabilities.writes.resourceExchange`，不能用其中一个功能的状态推断另一个；`enabled=false` 时展示 `blockers[].code/message` 和 `circuit`，不应自行绕过服务端门禁。完整操作见 [Economy Safety Gate 运行手册](../../docs/runbooks/economy-safety-gate.md)。当前返回形状以玩家/控制台 DTO、端点实现和 OpenAPI 为准。
 
 版本化内容管理的当前路由：
 
@@ -60,8 +62,8 @@
 ## 1. 公共规则
 
 - 玩家接口只接受 HTTPS，并使用服务端 Session Cookie；不在 URL、localStorage 或返回体中暴露上游 token。
-- 订单、结算、活动领取和管理员经济写入等有经济副作用的 POST 要求 `Idempotency-Key`，长度 8–128 个无控制字符；无副作用的资源扫描报价不接收该键。
-- 同一账户、同一 key、相同规范请求返回原资源；当前订单与资源结算的同 key 不同请求返回 `409 IDEMPOTENCY_CONFLICT`。其他领域若使用不同稳定码，以 OpenAPI 和端点实现为准。
+- 订单、选择、结算、活动领取和管理员经济写入等有经济副作用的 POST 要求 `Idempotency-Key`，长度 8–128 个无控制字符；无副作用的资源扫描报价不接收该键。
+- 选择键全局绑定规范请求、账户和源报价；完全相同的请求跨进程重启返回同一个子报价，同键换选择、账户或源报价返回 `409 IDEMPOTENCY_CONFLICT` 且不改变任何 run。订单与结算沿用各自幂等规则。
 - 错误响应使用 `ApiError` 的 `code`、`message`、`traceId`；成功 DTO 不承诺统一 `requestId`。时间是 RFC 3339 UTC；金额和数量是 JSON 整数。
 - 客户端不得提交价格、余额、PlayerUID、UserId、ItemID 或资源兑换总额作为权威值。
 - 写请求要求 CSRF header；购买和资源兑换按账户与 IP 限流。
@@ -75,6 +77,21 @@
   "traceId": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
 }
 ```
+
+### 1.1 从源报价派生所选子报价
+
+玩家请求只允许以下字段，禁止提交 `userId`、`accountId`、`seasonId`、价格或总额：
+
+```json
+{
+  "sourceRevision": 1,
+  "items": [
+    { "itemId": "Bone", "quantity": 2 }
+  ]
+}
+```
+
+服务端在同一个 RunStore 临界区中验证所有者、赛季、状态、有效期、revision、current content pointer、ItemID 唯一性和数量上限，并通过一次持久快照同时把源报价改为 `Cancelled`、创建所选 `Quoted` 子报价。响应继续使用 `ExtractionQuote`，并包含 `revision`、`sourceQuoteRunId` 与 `selectionDerived=true`。Native 子报价保留完整 `quoteSnapshotHash/nativeInventorySnapshot` 作为乐观锁证据，但 `inventory.consume.items` 只含所选行；Development RCON 诊断也只删除所选行。完整错误、恢复和并发边界见 [选择性资源出售运行手册](../../docs/runbooks/selective-resource-sale.md)。
 
 ## 2. 身份与当前状态
 
@@ -99,7 +116,7 @@
   "player": {
     "bound": true,
     "online": true,
-    "displayName": "新医"
+    "displayName": "演示玩家"
   },
   "gates": {
     "purchases": true,
@@ -232,7 +249,7 @@ Header：`Idempotency-Key: order-<uuid>`、CSRF token。
 
 ### `GET /extraction/v1/extraction-zones`
 
-返回当前开放区域的名称、开放时间和用于展示的粗略位置。精确半径仍由服务端判断。
+当前玩家兼容路由 `GET /api/v1/player/me/extraction-zones` 返回所有活动兑换区、本人位置、当前开放/热点状态、服务端实际收益倍率、路线、风险提示、逐区下一开放时间，以及“全部关闭”时的顶层最早 `nextOpensAt`。精确半径与是否在区内仍由服务端判断；客户端不得自行决定开放或倍率。
 
 ### `POST /extraction/v1/extractions/quote`
 
@@ -376,7 +393,7 @@ Idempotency-Key: extraction:<runId>:consume:1
 | `PURCHASE_CIRCUIT_OPEN` / `RESOURCE_EXCHANGE_CIRCUIT_OPEN` | 423 | 对应经济写闸门由运营熔断关闭 |
 | `PLAYER_BINDING_REQUIRED` | 409 | 当前周档未绑定完整 PlayerUID |
 | `PLAYER_NOT_ONLINE` | 409 | 游戏写入只支持在线玩家 |
-| `EXTRACTION_ZONE_CLOSED` | 409 | 当前报价对应兑换区已关闭且不在 grace 内 |
+| `EXTRACTION_ZONE_CLOSED` | 409 | 当前报价对应兑换区已关闭且不在 grace 内；存在后续窗口时 `ApiError.nextOpensAt` 给出最早安全重试时间 |
 | `PLAYER_OUTSIDE_EXTRACTION_ZONE` / `EXTRACTION_ZONE_NOT_STABLE` | 409 | 不在开放兑换区，或两次位置采样不稳定 |
 | `OFFER_NOT_AVAILABLE` | 409 | 商品下架、过期或未发布 |
 | `PURCHASE_LIMIT_EXCEEDED` | 409 | 超过个人周限购 |

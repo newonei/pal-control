@@ -239,9 +239,42 @@ try {
         $startupContent.pointer.versionId -ne $startupContent.version.versionId -or
         @($startupContent.version.definition.products).Count -ne 10 -or
         @($startupContent.version.definition.resources).Count -ne 51 -or
-        @($startupContent.version.definition.exchangeZones).Count -ne 1 -or
+        @($startupContent.version.definition.exchangeZones).Count -ne 2 -or
         @($startupContent.version.definition.tasks).Count -ne 6) {
         throw "Startup did not atomically publish the complete Scheme A content set: $($startupContentResponse.Content)"
+    }
+
+    # The operations console must consume one global, authoritative projection.
+    # A page must not enumerate platform identities and call player-scoped routes
+    # to reconstruct orders, settlements, gates, backups or rollover state.
+    $operationsResponse = Invoke-CapturedGet `
+        "$baseUri/api/v1/extraction/admin/operations/overview?limit=25&refresh=true"
+    $operations = Convert-ResponseJson $operationsResponse `
+        "economy operations overview"
+    if ($operationsResponse.StatusCode -ne 200 -or
+        $operations.schemaVersion -ne 1 -or
+        $operations.world.serverId -ne "local" -or
+        $operations.content.versionId -ne $startupContent.pointer.versionId -or
+        $null -eq $operations.gate.circuits -or
+        $null -eq $operations.queues.outbox -or
+        $null -eq $operations.backups.game -or
+        $null -eq $operations.orders -or
+        $null -eq $operations.runs -or
+        $null -eq $operations.audit) {
+        throw "The global economy operations projection is incomplete: $($operationsResponse.Content)"
+    }
+    if ($operationsResponse.Content -match
+        '(?i)ownerPlayerUid|playerUid\"\s*:|platformSubject\"\s*:|cookie\"\s*:|verificationCode|totpSecret|apiKeySha256|password\"\s*:') {
+        throw "The economy operations projection exposed a prohibited raw identity, credential or PlayerUID field."
+    }
+
+    $missingEvidenceResponse = Invoke-CapturedGet `
+        "$baseUri/api/v1/extraction/admin/operations/orders/00000000-0000-0000-0000-000000000001/evidence"
+    $missingEvidence = Convert-ResponseJson $missingEvidenceResponse `
+        "missing operations evidence"
+    if ($missingEvidenceResponse.StatusCode -ne 404 -or
+        $missingEvidence.code -ne "ORDER_NOT_FOUND") {
+        throw "Missing order evidence did not return its stable 404 contract: $($missingEvidenceResponse.Content)"
     }
 
     $settlementStatusResponse = Invoke-CapturedGet `
@@ -282,6 +315,7 @@ try {
         "$baseUri/api/v1/extraction/admin/rollover/maintenance" `
         '{"maintenance":true,"reason":"capability smoke maintenance"}' `
         @{
+            "Idempotency-Key" = "boundary-maintenance-0001"
             "X-Pal-Admin-Totp" = Get-TestTotp
             "X-Pal-Admin-Reason" = "capability smoke maintenance"
         }

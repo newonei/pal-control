@@ -13,10 +13,11 @@
     "build:web": "npm run build --workspace @pal-control/console-web",
     "dev:player": "npm run dev --workspace @pal-control/player-web",
     "build:player": "npm run build --workspace @pal-control/player-web",
-    "test": "npm run lint:openapi && npm run test:console && npm run test:player && powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1",
+    "test": "npm run lint:openapi && npm run test:console && npm run test:player && npm run test:player:e2e && powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1",
     "lint:openapi": "redocly lint packages/contracts/openapi/control-api.yaml",
     "test:console": "npm run test --workspace @pal-control/console-web",
     "test:player": "npm run test --workspace @pal-control/player-web",
+    "test:player:e2e": "npm run test:e2e --workspace @pal-control/player-web",
     "test:contract": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1 -Suite Contract",
     "test:integration": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1 -Suite Integration"
   },

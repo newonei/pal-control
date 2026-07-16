@@ -147,6 +147,64 @@ public sealed class SeasonSettlementJobStore
         }
     }
 
+    /// <summary>
+    /// Returns only jobs that contain a settlement item for the requested
+    /// account. Each returned envelope is additionally narrowed to that
+    /// account before it leaves the store so player-facing projections cannot
+    /// accidentally serialize another player's reward or expiry item.
+    /// </summary>
+    public async Task<IReadOnlyList<SeasonSettlementJob>> ListForAccountAsync(
+        Guid sourceSeasonId,
+        Guid accountId,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = Open();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT DISTINCT job.job_id
+                FROM season_settlement_jobs AS job
+                INNER JOIN season_settlement_items AS item
+                    ON item.job_id = job.job_id
+                WHERE job.source_season_id = $seasonId
+                  AND item.account_id = $accountId
+                ORDER BY job.prepared_at, job.job_id;
+                """;
+            command.Parameters.AddWithValue("$seasonId", sourceSeasonId.ToString("D"));
+            command.Parameters.AddWithValue("$accountId", accountId.ToString("D"));
+            var ids = new List<Guid>();
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    ids.Add(Guid.Parse(reader.GetString(0)));
+                }
+            }
+
+            var jobs = new List<SeasonSettlementJob>(ids.Count);
+            foreach (var id in ids)
+            {
+                var job = await LoadAsync(connection, id, cancellationToken)
+                    ?? throw new InvalidDataException(
+                        $"Season settlement job '{id}' disappeared while building a player projection.");
+                jobs.Add(job with
+                {
+                    Items = job.Items
+                        .Where(item => item.AccountId == accountId)
+                        .OrderBy(item => item.ItemKey, StringComparer.Ordinal)
+                        .ToArray()
+                });
+            }
+            return jobs;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<SeasonSettlementJob> PrepareAsync(
         Guid jobId,
         SeasonSettlementJobKind kind,

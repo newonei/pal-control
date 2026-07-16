@@ -158,6 +158,12 @@ public sealed class ExtractionSettlementQueue : BackgroundService
         {
             await foreach (var work in _channel.Reader.ReadAllAsync(stoppingToken))
             {
+                using var scope = ControlPlaneLog.BeginWorker(
+                    _logger,
+                    nameof(ExtractionSettlementQueue),
+                    "settlement.execute",
+                    work.RunId,
+                    subjectFingerprint: PlayerIdentitySecurityStore.FingerprintSubject(work.UserId));
                 try
                 {
                     using var operationLease = _operationGate.AcquireOperation();
@@ -172,7 +178,7 @@ public sealed class ExtractionSettlementQueue : BackgroundService
                 }
                 catch (Exception exception)
                 {
-                    _logger.LogWarning(
+                    _logger.LogSafeWarning(
                         exception,
                         "Settlement queue worker {WorkerId} failed run {RunId} for player fingerprint {PlayerFingerprint}.",
                         workerId,

@@ -181,6 +181,12 @@ public sealed class PalDefenderRestClient
         JsonNode? body,
         CancellationToken cancellationToken)
     {
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(PalDefenderRestClient),
+            method == HttpMethod.Get
+                ? "paldefender-rest.read"
+                : "paldefender-rest.write");
         if (!_options.Enabled)
         {
             return PalDefenderApiResponse.ConfigurationError(

@@ -137,6 +137,12 @@ public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommand
         }
 
         var commandId = Guid.NewGuid();
+        using var scope = ControlPlaneLog.BeginAdapter(
+            _logger,
+            nameof(NativeBridgeClient),
+            operation,
+            commandId,
+            serverId);
         var payloadJson = JsonSerializer.Serialize(payload);
         var requestHash = Convert.ToHexStringLower(
             SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson)));
@@ -183,6 +189,10 @@ public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommand
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(NativeBridgeClient),
+                "native-bridge.connection");
             try
             {
                 await RunConnectionAsync(stoppingToken);
@@ -195,7 +205,7 @@ public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommand
                 exception is IOException or TimeoutException or UnauthorizedAccessException)
             {
                 _state.Disconnect(exception.GetType().Name);
-                _logger.LogDebug(exception, "Native bridge connection ended.");
+                _logger.LogSafeDebug(exception, "Native bridge connection ended.");
             }
 
             try
@@ -230,7 +240,9 @@ public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommand
             throw new TimeoutException("Timed out connecting to the Native Mod pipe.");
         }
 
-        _logger.LogInformation("Connected to Native Mod pipe {PipeName}.", _options.PipeName);
+        _logger.LogInformation(
+            "Connected to Native Mod pipe {PipeFingerprint}.",
+            ControlPlaneLog.Fingerprint(_options.PipeName));
 
         Volatile.Write(ref _activePipe, pipe);
         try
@@ -325,8 +337,8 @@ public sealed class NativeBridgeClient : BackgroundService, INativeBridgeCommand
                 break;
             default:
                 _logger.LogDebug(
-                    "Ignoring unsupported Native Bridge message type {MessageType}.",
-                    messageType.GetString());
+                    "Ignoring unsupported Native Bridge message type {MessageTypeFingerprint}.",
+                    ControlPlaneLog.Fingerprint(messageType.GetString()));
                 break;
         }
     }

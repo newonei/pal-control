@@ -162,6 +162,12 @@ Assert-ContainsOrdinal $source `
 Assert-ContainsOrdinal $source `
     '"QUOTE_CONTENT_CHANGED"' `
     "a quote crossing a content rotation no longer fails with a stable error code."
+Assert-ContainsOrdinal $source `
+    "zone.ActiveWorldEvents);" `
+    "the player map exposes scheduled world events as if they were currently active."
+Assert-ContainsOrdinal $source `
+    "var activeWorldEvents = runtimeZones" `
+    "the player map snapshot no longer derives its top-level event list from active runtime windows."
 
 $programSource = [IO.File]::ReadAllText($programPath, $utf8)
 Assert-ContainsOrdinal $programSource "AddSingleton<SqliteEconomyContentStore>()" `

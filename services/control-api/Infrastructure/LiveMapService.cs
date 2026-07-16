@@ -163,6 +163,12 @@ public sealed class LiveMapService : BackgroundService
     private async Task SampleAsync(CancellationToken cancellationToken)
     {
         var generatedAt = DateTimeOffset.UtcNow;
+        using var scope = ControlPlaneLog.BeginWorker(
+            _logger,
+            nameof(LiveMapService),
+            "live-map.sample",
+            generatedAt.ToUnixTimeMilliseconds(),
+            _serverId);
         IReadOnlyList<PalworldPlayerLocation>? locations = null;
         try
         {
@@ -174,7 +180,7 @@ public sealed class LiveMapService : BackgroundService
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Unexpected live-map sampling failure.");
+            _logger.LogSafeWarning(exception, "Unexpected live-map sampling failure.");
         }
 
         var previous = GetSnapshot();

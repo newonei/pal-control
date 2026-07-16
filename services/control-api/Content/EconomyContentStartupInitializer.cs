@@ -24,6 +24,12 @@ public sealed class EconomyContentStartupInitializer(
             return;
         }
 
+        using var scope = ControlPlaneLog.BeginWorker(
+            logger,
+            nameof(EconomyContentStartupInitializer),
+            "content.startup",
+            "host-startup",
+            _options.ServerId);
         try
         {
             var content = await runtime.EnsureCurrentForBusinessDateAsync(cancellationToken);
@@ -34,10 +40,13 @@ public sealed class EconomyContentStartupInitializer(
         }
         catch (ContentValidationException exception)
         {
+            var issues = exception.Validation.Errors;
             logger.LogCritical(
-                "Scheme A bootstrap content failed validation: {ValidationIssues}",
-                string.Join("; ", exception.Validation.Errors.Select(issue =>
-                    $"{issue.Code}@{issue.Path}: {issue.Message}")));
+                "Scheme A bootstrap content failed validation with {IssueCount} issue(s), codes {ValidationCodes}, fingerprints {ValidationFingerprints}.",
+                issues.Count,
+                string.Join(',', issues.Select(issue => issue.Code).Distinct(StringComparer.Ordinal)),
+                string.Join(',', issues.Select(issue => ControlPlaneLog.Fingerprint(
+                    $"{issue.Code}\n{issue.Path}\n{issue.Message}"))));
             throw;
         }
     }

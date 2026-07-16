@@ -60,7 +60,14 @@ public sealed class AnnouncementCommandQueue : BackgroundService
             FileOptions.WriteThrough);
         _eventPath = Path.Combine(dataDirectory, "command-audit.jsonl");
         EnsureWritable();
-        LoadEvents();
+        using (ControlPlaneLog.BeginOperation(
+                   _logger,
+                   nameof(AnnouncementCommandQueue),
+                   "persistence.load",
+                   "announcement-command-audit"))
+        {
+            LoadEvents();
+        }
     }
 
     public bool IsReady =>
@@ -280,7 +287,11 @@ public sealed class AnnouncementCommandQueue : BackgroundService
         catch (Exception exception)
         {
             _isReady = false;
-            _logger.LogCritical(exception, "The announcement command worker stopped unexpectedly.");
+            using var scope = ControlPlaneLog.BeginWorker(
+                _logger,
+                nameof(AnnouncementCommandQueue),
+                "worker.failure");
+            _logger.LogSafeCritical(exception, "The announcement command worker stopped unexpectedly.");
             throw;
         }
         finally
@@ -412,6 +423,12 @@ public sealed class AnnouncementCommandQueue : BackgroundService
         {
             return;
         }
+        using var scope = ControlPlaneLog.BeginWorker(
+            _logger,
+            nameof(AnnouncementCommandQueue),
+            "announcement.dispatch",
+            command.CommandId,
+            command.ServerId);
         if (command.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
         {
             await _announcements.SetStateAsync(
@@ -481,7 +498,7 @@ public sealed class AnnouncementCommandQueue : BackgroundService
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Could not persist dispatch for announcement command {CommandId} channel {Channel}.",
                     commandId,
@@ -497,7 +514,7 @@ public sealed class AnnouncementCommandQueue : BackgroundService
             }
             catch (Exception exception)
             {
-                _logger.LogError(
+                _logger.LogSafeError(
                     exception,
                     "Unexpected announcement dispatch failure for command {CommandId} channel {Channel}.",
                     commandId,
