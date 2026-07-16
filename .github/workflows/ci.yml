@@ -92,5 +92,5 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Run contract and integration tests
+      - name: Run unified test suite
         run: npm test

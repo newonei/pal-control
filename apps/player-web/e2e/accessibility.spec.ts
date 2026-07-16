@@ -286,7 +286,29 @@ test("login, portal and modal have no serious or critical axe violations", async
 });
 
 test("self-only notification center marks reads and enables browser notifications only after a click", async ({ page }) => {
-  await page.context().grantPermissions(["notifications"], { origin: "http://127.0.0.1:5175" });
+  // Headless Chromium on GitHub-hosted Windows can report `denied` even after
+  // BrowserContext.grantPermissions. Use a deterministic in-page Notification
+  // contract so this test verifies our explicit-click behavior instead of the
+  // runner's desktop notification policy.
+  await page.addInitScript(() => {
+    class TestNotification {
+      static permission: NotificationPermission = "default";
+
+      static async requestPermission(): Promise<NotificationPermission> {
+        const count = Number(sessionStorage.getItem("e2e-notification-request-count") ?? "0");
+        sessionStorage.setItem("e2e-notification-request-count", String(count + 1));
+        TestNotification.permission = "granted";
+        return TestNotification.permission;
+      }
+
+      constructor(_title: string, _options?: NotificationOptions) {}
+    }
+
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: TestNotification
+    });
+  });
   await openPortal(page);
 
   const notificationTab = page.getByRole("button", { name: /消息中心/ });
@@ -297,10 +319,13 @@ test("self-only notification center marks reads and enables browser notification
   await expect(page.getByText("请勿重复购买或重复结算，等待管理员核对。", { exact: true })).toBeVisible();
   await expect(page.getByText("游戏内提醒能力不可用，已保留站内消息", { exact: true })).toBeVisible();
 
-  await expect(page.evaluate(() => Notification.permission)).resolves.toBe("granted");
+  await expect(page.evaluate(() => Notification.permission)).resolves.toBe("default");
+  await expect(page.evaluate(() => sessionStorage.getItem("e2e-notification-request-count"))).resolves.toBeNull();
   await expect(page.evaluate(() => localStorage.getItem("pal-player-browser-notifications-v1"))).resolves.toBeNull();
   await page.getByRole("button", { name: "启用浏览器提醒" }).click();
   await expect(page.getByText("浏览器提醒已启用", { exact: true })).toBeVisible();
+  await expect(page.evaluate(() => Notification.permission)).resolves.toBe("granted");
+  await expect(page.evaluate(() => sessionStorage.getItem("e2e-notification-request-count"))).resolves.toBe("1");
   await expect(page.evaluate(() => localStorage.getItem("pal-player-browser-notifications-v1"))).resolves.toBe("enabled");
 
   await page.getByRole("button", { name: "标为已读", exact: true }).click();
