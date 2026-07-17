@@ -17,6 +17,10 @@ $stdout = Join-Path $env:TEMP (
     "pal-control-api-" + [guid]::NewGuid().ToString("N") + ".out.log")
 $stderr = Join-Path $env:TEMP (
     "pal-control-api-" + [guid]::NewGuid().ToString("N") + ".err.log")
+$bridgeStdout = Join-Path $env:TEMP (
+    "pal-control-bridge-" + [guid]::NewGuid().ToString("N") + ".out.log")
+$bridgeStderr = Join-Path $env:TEMP (
+    "pal-control-bridge-" + [guid]::NewGuid().ToString("N") + ".err.log")
 $fake = $null
 $fakeBridge = $null
 $api = $null
@@ -48,6 +52,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Fake Native Bridge build failed."
     }
+    Set-TestNativeBridgeApprovedIdentity -ExecutablePath $bridgeExecutable
     New-Item -ItemType Directory -Path $dataDirectory | Out-Null
     $fake = Start-Process -FilePath "python" -ArgumentList @(
         $fakeScript, "--port", $fakePort
@@ -55,7 +60,8 @@ try {
     Wait-ForEndpoint "http://127.0.0.1:$fakePort/__state" 40
     $fakeBridge = Start-Process -FilePath $bridgeExecutable -ArgumentList @(
         $bridgePipe
-    ) -PassThru -WindowStyle Hidden
+    ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $bridgeStdout `
+        -RedirectStandardError $bridgeStderr
 
     $env:Urls = "http://127.0.0.1:$apiPort"
     $env:Palworld__OfficialRestApi__BaseUrl = "http://127.0.0.1:$fakePort/v1/api/"
@@ -86,7 +92,9 @@ try {
         -not $capabilities.publishTopBanner -or
         -not $capabilities.commandQueueReady -or
         -not $capabilities.auditReady) {
-        throw "Announcement capabilities were not enabled."
+        $bridgeStatus = Invoke-RestMethod (
+            "http://127.0.0.1:$apiPort/api/v1/servers/local/bridge/status") -TimeoutSec 2
+        throw "Announcement capabilities were not enabled. Bridge status: $($bridgeStatus | ConvertTo-Json -Depth 6 -Compress)"
     }
 
     $overlayProbe = Invoke-RestMethod (
@@ -401,6 +409,12 @@ catch {
     if (Test-Path $stderr) {
         Write-Host (Get-Content -Raw $stderr)
     }
+    if (Test-Path $bridgeStdout) {
+        Write-Host (Get-Content -Raw $bridgeStdout)
+    }
+    if (Test-Path $bridgeStderr) {
+        Write-Host (Get-Content -Raw $bridgeStderr)
+    }
     throw
 }
 finally {
@@ -416,4 +430,6 @@ finally {
     Remove-Item -LiteralPath $dataDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stdout -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $bridgeStdout -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $bridgeStderr -Force -ErrorAction SilentlyContinue
 }

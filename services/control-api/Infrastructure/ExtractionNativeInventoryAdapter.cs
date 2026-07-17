@@ -121,6 +121,8 @@ public sealed class ExtractionNativeInventoryAdapter : IExtractionNativeInventor
         {
             var snapshot = _state.GetSnapshot();
             return snapshot.Connected &&
+                snapshot.RuntimeIdentityVerified &&
+                snapshot.WriteEnabled &&
                 snapshot.Capabilities.Contains("inventory.probe") &&
                 snapshot.Capabilities.Contains(StableConsumeCapability);
         }
@@ -266,7 +268,9 @@ public sealed class ExtractionNativeInventoryAdapter : IExtractionNativeInventor
                 StatusCodes.Status503ServiceUnavailable);
         }
         if (!snapshot.Capabilities.Contains("inventory.probe") ||
-            !snapshot.Capabilities.Contains(StableConsumeCapability))
+            !snapshot.Capabilities.Contains(StableConsumeCapability) ||
+            !snapshot.RuntimeIdentityVerified ||
+            !snapshot.WriteEnabled)
         {
             throw new ExtractionModeException(
                 "NATIVE_INVENTORY_CONSUME_CAPABILITY_MISSING",

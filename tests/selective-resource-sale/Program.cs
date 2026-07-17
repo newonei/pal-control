@@ -672,11 +672,26 @@ static NativeBridgeState StableNativeState()
 {
     var state = new NativeBridgeState();
     state.OnHello(new NativeBridgeHello(
-        "1.0",
-        "1.0.0.100427",
+        "1.1",
+        "v1.0.1.100619",
         "test",
         ["inventory.probe", "inventory.consume"],
-        new Dictionary<string, bool>()));
+        new Dictionary<string, bool>
+        {
+            ["runtime.executable.sha256"] = true,
+            ["runtime.native_dll.sha256"] = true,
+            ["runtime.ue4ss_dll.sha256"] = true,
+            ["runtime.write_enabled"] = true
+        },
+        "24181105",
+        new string('b', 64),
+        152_378_880,
+        true,
+        true,
+        RuntimeNativeDllSha256: new string('d', 64),
+        RuntimeNativeDllSize: 869_888,
+        RuntimeUe4ssDllSha256: new string('e', 64),
+        RuntimeUe4ssDllSize: 16_494_592));
     return state;
 }
 

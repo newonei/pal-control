@@ -1,9 +1,28 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 var pipeName = args.FirstOrDefault() ?? "pal-control.local.v1";
 var notificationStatePath = args.Skip(1).FirstOrDefault();
+var executablePath = Environment.ProcessPath ??
+    throw new InvalidOperationException("The fake bridge process image path is unavailable.");
+var executableInfo = new FileInfo(executablePath);
+await using var executableStream = new FileStream(
+    executablePath,
+    FileMode.Open,
+    FileAccess.Read,
+    FileShare.Read,
+    bufferSize: 1_048_576,
+    FileOptions.Asynchronous | FileOptions.SequentialScan);
+var executableSha256 = Convert.ToHexStringLower(
+    await SHA256.HashDataAsync(executableStream));
+var executableSize = executableInfo.Length;
+if (executableSize <= 0)
+{
+    throw new InvalidOperationException("The fake bridge process image is empty.");
+}
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) =>
 {
@@ -24,12 +43,21 @@ await pipe.WaitForConnectionAsync(shutdown.Token);
 
 await WriteFrameAsync(pipe, writeGate, new
 {
-    protocolVersion = "1.0",
+    protocolVersion = "1.1",
     messageType = "hello",
     messageId = Guid.NewGuid(),
     sentAt = DateTimeOffset.UtcNow,
-    gameBuild = "v1.0.0.100427-smoke",
-    modVersion = "0.2.0-smoke",
+    gameBuild = "v1.0.1.100619",
+    steamBuild = "24181105",
+    modVersion = "0.3.0-smoke",
+    runtimeExecutableSha256 = executableSha256,
+    runtimeExecutableSize = executableSize,
+    runtimeNativeDllSha256 = executableSha256,
+    runtimeNativeDllSize = executableSize,
+    runtimeUe4ssDllSha256 = executableSha256,
+    runtimeUe4ssDllSize = executableSize,
+    runtimeIdentityVerified = true,
+    writeEnabled = true,
     capabilities = new[]
     {
         "bridge.hello",
@@ -43,7 +71,12 @@ await WriteFrameAsync(pipe, writeGate, new
     probes = new Dictionary<string, bool>
     {
         ["ue4ss.unreal_init"] = true,
+        ["engine.tick.registered"] = true,
         ["pal.adapter.loaded"] = true,
+        ["runtime.executable.sha256"] = true,
+        ["runtime.native_dll.sha256"] = true,
+        ["runtime.ue4ss_dll.sha256"] = true,
+        ["runtime.write_enabled"] = true,
         ["announcements.overlay"] = true,
         ["announcements.banner"] = true,
         ["ui.notifications"] = true
@@ -63,11 +96,7 @@ try
         var frame = await ReadFrameAsync(pipe, shutdown.Token);
         using var document = JsonDocument.Parse(frame);
         var root = document.RootElement;
-        if (!root.TryGetProperty("messageType", out var messageType) ||
-            !string.Equals(messageType.GetString(), "command", StringComparison.Ordinal))
-        {
-            continue;
-        }
+        ValidateCommandEnvelope(root);
 
         var commandId = root.GetProperty("commandId").GetGuid();
         var operation = root.GetProperty("operation").GetString();
@@ -257,7 +286,7 @@ try
 
         await WriteFrameAsync(pipe, writeGate, new
         {
-            protocolVersion = "1.0",
+            protocolVersion = "1.1",
             messageType = "result",
             messageId = Guid.NewGuid(),
             sentAt = DateTimeOffset.UtcNow,
@@ -329,6 +358,116 @@ static object NativeExpPreset(string name, string displayName, string function) 
     }
 };
 
+static void ValidateCommandEnvelope(JsonElement root)
+{
+    if (root.ValueKind != JsonValueKind.Object ||
+        !root.TryGetProperty("protocolVersion", out var protocolVersion) ||
+        protocolVersion.ValueKind != JsonValueKind.String ||
+        protocolVersion.GetString() != "1.1" ||
+        !root.TryGetProperty("messageType", out var messageType) ||
+        messageType.ValueKind != JsonValueKind.String ||
+        messageType.GetString() != "command")
+    {
+        throw new InvalidOperationException(
+            "Control API sent a non-command or incompatible bridge frame.");
+    }
+
+    RequireNonEmptyUuid(root, "messageId");
+    RequireNonEmptyUuid(root, "commandId");
+    var sentAt = RequireExplicitTimestamp(root, "sentAt");
+    var deadline = RequireExplicitTimestamp(root, "deadline");
+    var now = DateTimeOffset.UtcNow;
+    if (now - sentAt > TimeSpan.FromMinutes(2) ||
+        sentAt - now > TimeSpan.FromSeconds(30) ||
+        deadline <= now || deadline <= sentAt ||
+        deadline - sentAt > TimeSpan.FromSeconds(30))
+    {
+        throw new InvalidOperationException(
+            "Control API command timestamps are stale, future-dated, expired, or exceed 30 seconds.");
+    }
+
+    RequireBoundedText(root, "idempotencyKey", 1, 128);
+    RequireBoundedText(root, "serverId", 1, 128);
+    RequireBoundedText(root, "operation", 1, 128);
+    RequireBoundedText(root, "reason", 1, 512);
+    if (!root.TryGetProperty("actorId", out var actorId) ||
+        actorId.ValueKind != JsonValueKind.String ||
+        actorId.GetString() != "control-api" ||
+        !root.TryGetProperty("expectedRevision", out var expectedRevision) ||
+        !expectedRevision.TryGetInt64(out var revision) || revision < 0 ||
+        !root.TryGetProperty("payload", out var payload) ||
+        payload.ValueKind != JsonValueKind.Object)
+    {
+        throw new InvalidOperationException(
+            "Control API command actor, revision, or payload is invalid.");
+    }
+
+    if (!root.TryGetProperty("requestHash", out var requestHashElement) ||
+        requestHashElement.ValueKind != JsonValueKind.String ||
+        requestHashElement.GetString() is not { Length: 64 } requestHash ||
+        requestHash.Any(character =>
+            character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
+    {
+        throw new InvalidOperationException(
+            "Control API command requestHash is not a lowercase SHA-256 hash.");
+    }
+
+    var payloadUtf8 = Encoding.UTF8.GetBytes(payload.GetRawText());
+    var computedHash = Convert.ToHexStringLower(SHA256.HashData(payloadUtf8));
+    if (!CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(requestHash),
+            Encoding.ASCII.GetBytes(computedHash)))
+    {
+        throw new InvalidOperationException(
+            "Control API command requestHash does not match the exact raw payload bytes.");
+    }
+}
+
+static void RequireNonEmptyUuid(JsonElement root, string propertyName)
+{
+    if (!root.TryGetProperty(propertyName, out var element) ||
+        element.ValueKind != JsonValueKind.String ||
+        !Guid.TryParseExact(element.GetString(), "D", out var value) ||
+        value == Guid.Empty)
+    {
+        throw new InvalidOperationException(
+            $"Control API command {propertyName} is not a non-empty canonical UUID.");
+    }
+}
+
+static DateTimeOffset RequireExplicitTimestamp(JsonElement root, string propertyName)
+{
+    if (!root.TryGetProperty(propertyName, out var element) ||
+        element.ValueKind != JsonValueKind.String ||
+        element.GetString() is not { } text ||
+        text.Length == 0 ||
+        (text[^1] is not ('Z' or 'z') &&
+         (text.Length < 6 || text[^6] is not ('+' or '-') || text[^3] != ':')) ||
+        !element.TryGetDateTimeOffset(out var value))
+    {
+        throw new InvalidOperationException(
+            $"Control API command {propertyName} is not an explicit-offset timestamp.");
+    }
+    return value;
+}
+
+static void RequireBoundedText(
+    JsonElement root,
+    string propertyName,
+    int minimum,
+    int maximum)
+{
+    if (!root.TryGetProperty(propertyName, out var element) ||
+        element.ValueKind != JsonValueKind.String ||
+        element.GetString() is not { } value ||
+        value.Length < minimum || value.Length > maximum ||
+        string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+    {
+        throw new InvalidOperationException(
+            $"Control API command {propertyName} is missing or outside its bounds.");
+    }
+}
+
 static async Task SendHeartbeatsAsync(
     Stream stream,
     SemaphoreSlim writeGate,
@@ -339,7 +478,7 @@ static async Task SendHeartbeatsAsync(
         await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
         await WriteFrameAsync(stream, writeGate, new
         {
-            protocolVersion = "1.0",
+            protocolVersion = "1.1",
             messageType = "heartbeat",
             messageId = Guid.NewGuid(),
             sentAt = DateTimeOffset.UtcNow

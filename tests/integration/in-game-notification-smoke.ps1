@@ -96,6 +96,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Fake Native Bridge build failed."
     }
+    Set-TestNativeBridgeApprovedIdentity -ExecutablePath $bridgeExecutable
 
     New-Item -ItemType Directory -Path $dataDirectory | Out-Null
     $fake = Start-Process -FilePath "python" -ArgumentList @(

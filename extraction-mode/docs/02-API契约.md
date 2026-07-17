@@ -375,7 +375,7 @@ Idempotency-Key: extraction:<runId>:consume:1
 6. Control API 先持久化 Native 回执，再验证每行 `actualConsumed == requestedQuantity`、前后差值、完整快照和聚合结果；只有全部成立才进入 `Removed`；
 7. 钱包 credit、唯一账本和 `Removed -> Credited` 在同一 SQLite 事务提交，随后可幂等进入 `Settled`。
 
-当前 Native dev36 只声明 `inventory.consume.experimental` 且 `persistenceVerified=false`，因此生产门禁会拒绝结算。只有真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”验收后才能把能力提升为稳定 `inventory.consume`。完整 Bridge 请求/响应见 [`inventory.consume.md`](../../packages/contracts/bridge/inventory.consume.md)。
+旧 Native dev36 曾声明 `inventory.consume.experimental` 且 `persistenceVerified=false`；当前 dev37-ro 只读候选不声明任何 consume/write capability，因此生产门禁同样会拒绝结算。只有当前版本只读探针通过、另行评审写候选，并由真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”验收后，才能声明稳定 `inventory.consume`。完整 Bridge 请求/响应见 [`inventory.consume.md`](../../packages/contracts/bridge/inventory.consume.md)。
 
 派发中断、回执未持久化、回滚未证明、逐行/快照/聚合证据不完整或持久化未证明都进入 `Uncertain`，不能自动重发、自动退款或入账；恢复 worker 只有读取到已持久化的成功 Native 回执时才继续唯一 credit，不会再次扣物。
 

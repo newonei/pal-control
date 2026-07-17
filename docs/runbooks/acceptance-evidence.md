@@ -25,6 +25,18 @@ campaign-2026w30/
   evidence/
 ```
 
+从仓库根目录一次生成完整 22 项工作清单，输出必须位于公开仓库之外：
+
+```powershell
+$project = "tools/acceptance-evidence/PalControl.AcceptanceEvidence.csproj"
+dotnet run --project $project --configuration Release -- create-campaign `
+  --output C:\acceptance\campaign-2026w30
+dotnet run --project $project --configuration Release -- inspect-campaign `
+  --root C:\acceptance\campaign-2026w30
+```
+
+生成结果包含 13 项 P0、6 项 P1、3 项 P2；这会把 PostgreSQL 容量/N-A 决策、团队经济真实周和运营分析真实周也显式列出，不能只搜索 `TODO.md` 的旧空框数量。所有新文件都是必然验证失败的 template，`inspect-campaign` 也永远不会把它们标为 verified。已有目录、仓库内目录和重复初始化均被拒绝。
+
 `subjectId` 必须是使用验收专用组织密钥生成的稳定 keyed pseudonym：`subj:hmac-sha256:<64 lowercase hex>`。不要使用 SteamID、PlayerUID、邮件、昵称、IP 或未加密钥的直接 SHA。验收密钥不得写入 manifest、命令行、artifact 或仓库。相同人员在同一 campaign 内使用相同 pseudonym，才能可靠检查执行/复核分离；跨 campaign 是否轮换由审计保留策略决定。
 
 身份信任库遵循 `tools/acceptance-evidence/identity-trust-store.schema.v1.json`。每个主体只允许一个明确的 role、实现者状态和 ECDSA P-256 SPKI 公钥；key id、subject id 以及导入后重新导出的 canonical SPKI 指纹都必须全局唯一，不能把同一个 EC 公钥换一种 Base64 或挂到两个身份名下。重复、吊销、算法错误或清单自报但库中不存在的主体都会失败。执行人与复核人必须使用两个不同 key 和两个不同 canonical 公钥。信任库 SHA-256 pin 必须来自受保护的发布记录或独立认证渠道，不能从待验证 manifest 中复制。私钥留在组织 HSM、签名服务或操作系统密钥库中，不能落入证据包或仓库。
@@ -39,6 +51,7 @@ campaign-2026w30/
 6. 将每个文件的实际 size/SHA-256、扫描命令和时间回填，设置 `evidenceMode: live`、`isSynthetic: false`、所有 check 为 `pass`、review 为 `approved`，最后才把 conclusion 设为 `pass`。
 7. 用 `signature-payload` 生成固定字节。该载荷包含 payload schema、信任库摘要、执行/复核 key id 以及除 `signatures` 自身之外的完整 manifest；分别交给执行人与独立复核人的组织密钥，以 `ecdsa-p256-sha256-p1363` 生成 64 字节签名并回填。任何字段或 artifact hash 变化后，两份签名都必须重做。
 8. 用外部渠道取得的 pin 执行 `verify --manifest ... --trust-store ... --trust-store-sha256 ...`。正式 verifier 不接受 `--now`、外置 schema 或外置 catalog。Manifest 最大 1 MiB，必须是无 BOM 的严格 UTF-8，所有层级禁止重复 property，根对象后只能没有字节或恰好一个 LF；因此不能在未读取的尾部隐藏第二套值。单次验证最多租约 1024 个文件：root/related manifest 和全部 artifact 的 parser/hash 直接读取持有句柄；外部 trust store 与测试 harness 外置 policy 先解析有界快照，再仅在租约句柄 SHA-256 与该快照一致时继续。所有租约都保持到 Summary 构造完成，Windows 使用 `FileShare.Read` 明确拒绝并发写入/删除。成功返回前还会从持有句柄和当前路径分别重算并比较，路径替换、原 inode 内容变化或 reparse 变化都会失败。Unix-like 系统对不遵守 advisory sharing 的进程只能做到“持有 descriptor + 最终 handle/path 复核”的 best effort。验证器还会对原始 manifest、canonical envelope、scan report 和文本 review record 再做一次凭据特征扫描；退出码非零时保持对应玩法/发布门禁关闭，不得手工忽略错误码。
+9. 每个 manifest 单独通过后，再运行 `verify-campaign --root ... --trust-store ... --trust-store-sha256 ...`。它逐项验证固定 catalog 中全部 22 项并汇总失败 code；少一个 manifest、仍是 template、签名/哈希/人员/时长不合格或 P0 总复核递归失败时均退出 `2`。只有 `complete: true` 且进程退出 `0` 才表示证据包层面全部通过，仍不取代执行人/复核人的事实责任。
 
 ## 特殊门禁
 

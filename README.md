@@ -18,9 +18,9 @@
 | 后端 | ASP.NET Core / .NET 10 |
 | 本地状态 | SQLite 经济账本与 PalDefender 发货 outbox；JSONL 仅保留非经济命令/审计 side state |
 | 原生 MOD | C++23、UE4SS、Windows Named Pipe |
-| Native 目标版本 | Palworld `v1.0.0.100427`、UE4SS commit `c2ac246` |
-| 当前本机 Palworld | `v1.0.1.100619`；高于 Native 目标版本，兼容守卫已隔离旧 loader，Bridge/经济写入保持关闭 |
-| 发布成熟度 | 本机开发服候选；需先适配当前游戏版本，Native 原子消费仍须真实保存/重启/重新登录验收，完整周换档演练也是硬门槛 |
+| Native 源码候选 | Palworld `v1.0.1.100619` / Steam build `24181105`、UE4SS commit `c2ac246`、协议 `1.1`、`0.3.0-dev.37-ro` |
+| 当前本机 Palworld | 与候选目标相同；dev37-ro 已绑定精确 PalServer EXE、UE4SS runtime、Native DLL 及低权限 Control API service SID，两个全新锁定构建均得到 886,272 字节 / `c91bee8f…f8a7`，但尚未部署/实服探针；旧 loader 继续隔离，Bridge/经济写入保持关闭 |
+| 发布成熟度 | 本机开发服候选；需先完成当前版本 Native 只读 ABI/schema 实服探针，再另建写候选并完成原子消费保存/重启/重新登录验收；完整周换档仍是硬门槛 |
 | 开源许可证 | [MIT](LICENSE) |
 
 ## 界面预览
@@ -132,10 +132,10 @@
 
 ### UE4SS Native 集成
 
-- **本机 Named Pipe 双工桥**：长度前缀 JSON、hello/heartbeat、受限命令队列和游戏线程命令泵，Unreal 对象只在游戏线程访问。
-- **运行时探针与受控写入**：玩家、成长、背包和帕鲁操作使用能力探针、revision、预演与回读校验；资源兑换可减少已有静态物品堆叠，并只在完整元数据快照一致时安全清空最后一件，动态物品或无法验证的槽位一律拒绝；等级/Rank/IV 等高风险字段保持只读。
+- **运行时绑定的本机 Named Pipe**：协议 1.1 使用长度前缀 JSON、hello/heartbeat、受限命令队列和游戏线程命令泵；注册任何 Unreal hook 前先核对宿主 PalServer EXE 与 UE4SS runtime 大小/SHA-256，hello 再上报 Steam build、实际 EXE/Native/UE4SS 身份和 write mode。Control API 还会从 pipe 句柄取得服务端 PID，以低权限查询独立解析并哈希该进程的主 EXE；模块摘要由已绑定宿主的 Native 从实际加载路径读取，并继续与锁和批准配置比较。
+- **当前只读候选**：dev37-ro 只宣传玩家、成长、背包、帕鲁和通知签名探针；CMake/构建脚本、hello capability、Control API transport 和游戏线程 adapter 四层共同禁止写入。历史写实现仍保留在源码中，但只读实服门禁通过前不可启用或部署。
 - **原生通知**：在签名与版本门禁通过后发布顶部横幅、客户端浮层和定向 UI 通知。
-- **玩法扩展**：兼容 `!撤离`/`!extract` 本人资源兑换点查询，以及实验性的服务端随机安全复活；反射签名不唯一或版本不匹配时 fail-closed。
+- **玩法扩展源码**：保留 `!撤离`/`!extract` 本人资源兑换点查询和实验性随机安全复活实现；dev37-ro 不安装这两个 hook，后续必须经过独立写能力评审才可重新启用。
 
 ### 功能启用条件
 
@@ -388,7 +388,7 @@ PalDefender 的安装、Token 文件、版本和权限边界见 [PalDefender 集
 
 ### 使用周世界资源经济模式
 
-当前闭环允许出售本周世界允许容器中的任意白名单资源：内置方案 A 内容列出 10 个商品候选和 51 个可售资源候选。启用 `ExtractionMode` 后，Control API 在启动阶段按本机授权资源目录中真实存在的 ItemID 生成并原子激活首个内容版本，完成后才接受 HTTP 流量。内容版本冻结商品、个人/全服库存、兑换区、任务、营业日、规则版本、hash，以及显式 attested 的运营经济影子 DAG。默认双点池每天确定性开放 1 点并声明风险等级，第 8–11 小时为限时热点；每天还确定性选择“资源繁荣”（回收收益 +15%）或“战备补给”（日价再乘 90%，最低有效价为基础价 81%）纯经济事件。目录、地图、报价和 run 固定同一 eventId/seed/window/multiplier 证据；事件不伪造击杀、掉落或采集。影子图按最低买价与最高事件/热点卖价穷尽跨日套利路径，并校验逐 ItemID 参考成本与类别风险缓冲；它明确不是实际 Palworld 配方数据库，也不覆盖玩家私下交易。新报价只在开放窗口内生成，不能跨事件/热点开始边界继续使用旧倍率；活动报价仅在其 `graceSeconds` 和报价自身有效期内完成，所有点关闭则返回下一开放时间。内容 A 的报价即使仍在 grace 内也不能跨 current pointer B 结算。确认后由 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。候选点 2 明确标注“待实服校准”，因此第二个真实兑换区验收、连续两个真实周档报告和真实多人周档仍未完成。Native 能力也仍标记为实验性，因此写闸门会保持关闭，直到固定版本上的真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
+当前闭环允许出售本周世界允许容器中的任意白名单资源：内置方案 A 内容列出 10 个商品候选和 51 个可售资源候选。启用 `ExtractionMode` 后，Control API 在启动阶段按本机授权资源目录中真实存在的 ItemID 生成并原子激活首个内容版本，完成后才接受 HTTP 流量。内容版本冻结商品、个人/全服库存、兑换区、任务、营业日、规则版本、hash，以及显式 attested 的运营经济影子 DAG。默认双点池每天确定性开放 1 点并声明风险等级，第 8–11 小时为限时热点；每天还确定性选择“资源繁荣”（回收收益 +15%）或“战备补给”（日价再乘 90%，最低有效价为基础价 81%）纯经济事件。目录、地图、报价和 run 固定同一 eventId/seed/window/multiplier 证据；事件不伪造击杀、掉落或采集。影子图按最低买价与最高事件/热点卖价穷尽跨日套利路径，并校验逐 ItemID 参考成本与类别风险缓冲；它明确不是实际 Palworld 配方数据库，也不覆盖玩家私下交易。新报价只在开放窗口内生成，不能跨事件/热点开始边界继续使用旧倍率；活动报价仅在其 `graceSeconds` 和报价自身有效期内完成，所有点关闭则返回下一开放时间。内容 A 的报价即使仍在 grace 内也不能跨 current pointer B 结算。确认后由通过稳定门禁的 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。候选点 2 明确标注“待实服校准”，因此第二个真实兑换区验收、连续两个真实周档报告和真实多人周档仍未完成。当前 dev37-ro 是尚未实服探测的只读候选，不发布任何 consume/write capability；旧 dev36 experimental 仅是历史实现。写闸门会保持关闭，直到只读探针通过、另行评审写候选，并由固定版本真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
 
 选择出售时，浏览器只提交源报价 `revision` 与选中的 `ItemID/quantity`，玩家身份、账户和赛季只取 HttpOnly 会话。服务端原子取消源报价并创建冻结同一内容/动态事件证据的子报价；同一 `Idempotency-Key` 在响应丢失或进程重启后返回同一个子报价，同键换账户、源报价或选择内容会冲突且无副作用。Native 子报价保留完整背包快照/hash 用于乐观锁，但消费授权只包含所选行；Development RCON 诊断同样只发送所选行。详细契约、恢复与值班检查见 [选择性资源出售运行手册](docs/runbooks/selective-resource-sale.md)。
 
@@ -408,7 +408,7 @@ $adminKey = Read-Host "Control API 管理密钥" -AsSecureString
 
 Native MOD 与 Palworld/UE4SS 的精确 ABI 绑定。游戏或 UE4SS 更新后必须重新构建，并在只读模式完成探针验证；不匹配时应保持 fail-closed。
 
-源码、目标版本和部署结构见 [Native MOD 文档](mods/pal-control-native/README.md)，依赖锁定见 [`dependencies.lock.json`](mods/pal-control-native/dependencies.lock.json)。`Build-PalControlNative.ps1` 会核对 UE4SS/Unreal 精确提交、CMake/Rust/MSVC 版本和独立构建目录后再编译；依赖源码需按锁文件单独获取，本地 `third_party/` 构建树和既有二进制都不会作为源码发布物提交。
+源码、目标版本和部署结构见 [Native MOD 文档](mods/pal-control-native/README.md)，依赖锁定见 [`dependencies.lock.json`](mods/pal-control-native/dependencies.lock.json)。先对完全干净的锁定 checkout 运行 `Prepare-Ue4ssSource.ps1`，它只应用受审的 MOD 附件、Cargo.lock、Cargo `LOCKED` 与完整依赖提交补丁；再由 `Build-PalControlNative.ps1` 核对 UE4SS/全部子模块、精确补丁、CMake/Rust/MSVC、独立构建目录及最终 DLL 大小/SHA-256。两者都不会部署或重启服务；本地 `third_party/`、构建树和二进制不会作为源码发布物提交。
 
 ## 构建
 

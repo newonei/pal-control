@@ -2,14 +2,14 @@
 
 撤离原子消费的严格 payload、证据与 Control API 接入规则见 [`inventory.consume.md`](./inventory.consume.md)。
 
-本机开发传输使用双向 Windows Named Pipe：`\\.\pipe\pal-control.local.v1`。每帧为：
+当前 dev37-ro 使用双向 Windows Named Pipe：`\\.\pipe\pal-control.local.v1`。名称与允许连接的低权限 `NT SERVICE\PalControl.ControlApi` service SID 固定在 `dependencies.lock.json` 和受控构建参数中；只改 INI 或 Control API 配置不会重命名 Native 端。ACL 还允许 SYSTEM、Administrators 和对象 owner，远程客户端始终被拒绝。每帧为：
 
 ```text
 uint32 little-endian payloadLength
 payloadLength bytes UTF-8 JSON
 ```
 
-连接建立后，模组必须先发送 `hello`。Control API 对 `gameBuild`、`modVersion`、协议版本和探针结果求交集，生成 `/capabilities`。未知游戏版本、关键类/字段探针失败或协议不兼容时，写能力必须关闭。
+连接建立后，模组必须把 `hello` 作为首帧且每条连接只能发送一次。hello 强制携带 game/Steam build、mod/协议、宿主 PalServer EXE、实际 PalControlNative DLL、实际 UE4SS DLL 的大小/SHA-256、runtime 验证位、write mode 和探针。Control API 从 pipe 句柄独立取得服务端 PID，以 `PROCESS_QUERY_LIMITED_INFORMATION` 解析并哈希该进程主 EXE；模块摘要由已绑定宿主的 Native 从实际加载路径读取，并与锁和批准配置比较。任一值不一致、断线后未重新 hello、畸形/半帧、关键类/字段探针失败或协议不兼容时均断开并关闭写能力。
 
 当前已实现 `players.probe` 与 `players.schema`：Control API 发送 `command`，Native Mod 将命令放入有界队列，在 `UEngine::Tick` 游戏线程枚举 `PalPlayerState` 或读取反射元数据，并返回 `result`。身份映射只读取已验证类型的 `PlayerUId(Guid)`、`AccountName`、`PlayerId` 和 `PlayerNamePrivate`；返回值不包含指针、内存地址或属性偏移。
 

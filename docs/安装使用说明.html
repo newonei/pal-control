@@ -218,7 +218,7 @@
       <li>管理台只应在服务器本机使用。需要远程管理时，优先使用系统远程桌面或受控 VPN。</li>
       <li>公网只能通过经过审核的 HTTPS 反向代理开放玩家门户和 <code>/api/v1/player/*</code>，不能开放管理 API。</li>
       <li>任何显示为 <code>uncertain</code> 的发货或写操作都要先人工核对，不要重复点击。</li>
-      <li>Native MOD 当前目标是 Palworld <code>v1.0.0.100427</code> 与指定 UE4SS 提交。公开发布包不包含 Native DLL；必须按仓库锁定版本单独获取依赖并自行构建，版本不一致时不要加载。</li>
+      <li>Native MOD 当前只读候选目标是 Palworld <code>v1.0.1.100619</code>、Steam build <code>24181105</code> 与指定 UE4SS 提交。公开发布包不包含 Native DLL；必须按仓库锁定版本单独获取依赖并自行构建，版本、宿主 EXE 或产物哈希不一致时不要加载。该候选尚未通过实服探针且不能执行经济写入。</li>
     </ul>
 
     <h2>九、卸载</h2>

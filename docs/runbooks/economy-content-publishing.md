@@ -46,7 +46,7 @@
 3. 输入 8–512 字符审计原因、6 位 TOTP 和精确确认短语 `PUBLISH ECONOMY CONTENT`。
 4. 提交一次。客户端会发送当前 revision 与稳定幂等键；超时或响应丢失时，不要创建新草稿或换新键，先读取当前版本，再用同一请求重放。
 5. 发布成功后核对：current pointer、版本号、营业日、规则版本和完整 content hash；玩家商城返回相同内容证据，商品数量/分类/价格、图标/稀有度/用途、个人剩余限购和可选全服库存正确；资源源报价及选择性子报价冻结同一展示字段，旧内容缺省时明确返回 fallback/source；地图的动态开放/关闭区、风险等级、限时热点、事件窗口/seed、实际倍率和 `nextOpensAt` 与版本一致，六个前端图层开关只改变显示；任务实例固定到相同版本证据。
-6. 完成只读核对后，再按 Safety Gate 手册逐项恢复购买与资源兑换。Native 能力仍为 experimental 时，只能恢复受控开发环境允许的路径，不能伪造 Production stable capability。
+6. 完成只读核对后，再按 Safety Gate 手册逐项恢复购买与资源兑换。当前 dev37-ro 只读候选、旧 experimental 或任何未通过持久化门禁的 Native 都不能伪造 Production stable capability。
 
 发布先准备不可变内容版本，但此时不移动 current pointer；随后在一个 SQLite 事务中写入整套商品投影、以 expected version CAS 切换 pointer 并记录激活。第 N 个商品写入后故障会回滚整个事务，玩家目录和购买都继续使用整套旧版；进程重启后可用原幂等请求重试同一已准备版本。即使已有这项自动化，发布请求失败或响应不确定时仍必须保持维护模式：读取 pointer、hash 与完整目录，确认它们仍一致，再用原请求重试；成功并完成只读核对后才能开闸。
 

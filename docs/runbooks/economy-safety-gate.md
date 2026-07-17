@@ -12,7 +12,7 @@
 4. 账户、赛季、平台主体和完整玩家 UID 的当前周绑定一致；
 5. PalDefender token 文件（或显式 `Permissions` 配置）同时声明 `REST.Version.Read`、`REST.Players.Read`、`REST.Items.Read`、`REST.Items.Give`，且 `GET version` 返回批准的游戏与插件版本；
 6. 持久化发货队列正在运行、未满，未决订单没有超过 backlog 上限；
-7. 若配置要求 Native adapter，则协议、game build、MOD 版本和逐项 capability 全部匹配。
+7. 若配置要求 Native adapter，则协议、game/Steam build、MOD 版本、宿主 PalServer EXE、实际 Native DLL、实际 UE4SS DLL 的大小/SHA-256、独立 pipe-server PID/主 EXE identity、write mode 和逐项 capability 全部匹配；每次写派发还会再次核对当前 hello，不能沿用闸门检查后的旧会话。
 
 `resourceExchange` 使用相同的存储、赛季、世界、绑定和维护检查，并额外要求结算队列容量、精确批准的 Native 协议/game build/MOD 版本、`inventory.probe` 与稳定 `inventory.consume` capability。报价会持久化三个必需容器的完整槽位/动态元数据快照；正式结算在派发前再次检查门禁，Native 回执还必须证明逐行扣物、完整回读和 `persistenceVerified=true`。experimental capability 不会被当成正式能力。RCON `delitems` 只有在宿主为 Development、`Security:DevelopmentMode=true`、`PlayerPortal:PublicSteam=false`、RCON 已启用、`ExtractionMode:Rcon:AllowDevelopmentSettlement=true` 且没有强制 Native 时才允许用于隔离诊断；任一条件不满足即选择 Native 并 fail-closed，生产环境不会 fallback。
 
@@ -40,7 +40,9 @@ Invoke-RestMethod `
 | `PALDEFENDER_GRANT_RECEIPT_UNVERIFIED` | 尚未确认 PalDefender 的结构化逐物品回执语义 |
 | `SHOP_DELIVERY_QUEUE_FULL` | 发货命令队列达到上限 |
 | `NATIVE_ECONOMY_ADAPTER_NOT_CONNECTED` | Native Bridge 未连接或 hello 尚未完成 |
-| `NATIVE_ECONOMY_ADAPTER_VERSION_NOT_APPROVED` | Native 协议、游戏或 MOD 版本不在批准组合中 |
+| `NATIVE_ECONOMY_ADAPTER_VERSION_NOT_APPROVED` | Native 协议、game/Steam build、MOD、宿主 PalServer EXE、Native DLL 或 UE4SS DLL 身份不在批准组合中 |
+| `NATIVE_RUNTIME_IDENTITY_UNVERIFIED` | hello 没有证明当前宿主 EXE 与审核目标完全一致 |
+| `NATIVE_WRITE_CAPABILITIES_QUARANTINED` | 当前 build 仅允许只读探针，不可执行经济写入 |
 | `NATIVE_ECONOMY_CAPABILITY_MISSING` | 缺少 `inventory.probe` 或稳定 `inventory.consume`；experimental 不满足 |
 | `PURCHASE_CIRCUIT_OPEN` | 管理员仅关闭了购买 |
 | `RESOURCE_EXCHANGE_CIRCUIT_OPEN` | 管理员仅关闭了资源兑换 |
@@ -78,14 +80,23 @@ Invoke-RestMethod `
     "Safety": {
       "DeliveryBacklogCapacity": 128,
       "MinimumFreeSpaceBytes": 1073741824,
-      "ApprovedGameVersion": "1.0.0.100427",
+      "ApprovedGameVersion": "1.0.1.100619",
       "ApprovedPalDefenderVersion": "1.8.1.3933",
       "PalDefenderGrantReceiptSemanticsVerified": false,
       "RequireNativeForPurchase": false,
       "RequireNativeForResourceExchange": true,
-      "ApprovedNativeProtocolVersion": "1.0",
+      "ApprovedNativeProtocolVersion": "1.1",
       "ApprovedNativeGameBuild": "SET_AFTER_REAL_ACCEPTANCE",
+      "ApprovedNativeSteamBuild": "SET_AFTER_REAL_ACCEPTANCE",
       "ApprovedNativeModVersion": "SET_AFTER_REAL_ACCEPTANCE",
+      "ApprovedNativeExecutableSha256": "SET_AFTER_REAL_ACCEPTANCE",
+      "ApprovedNativeExecutableSize": 0,
+      "ApprovedPalServerExecutablePath": "SET_ABSOLUTE_PATH_AFTER_REAL_ACCEPTANCE",
+      "ApprovedPalServerProcessSid": "SET_PROCESS_SID_AFTER_REAL_ACCEPTANCE",
+      "ApprovedNativeDllSha256": "SET_AFTER_REAL_ACCEPTANCE",
+      "ApprovedNativeDllSize": 0,
+      "ApprovedUe4ssDllSha256": "SET_AFTER_REAL_ACCEPTANCE",
+      "ApprovedUe4ssDllSize": 0,
       "PurchaseNativeCapabilities": [],
       "ResourceExchangeNativeCapabilities": [
         "inventory.probe",
@@ -96,7 +107,9 @@ Invoke-RestMethod `
 }
 ```
 
-不要把 `SET_AFTER_REAL_ACCEPTANCE` 替换成当前 dev36 版本并手工伪造 stable capability。只有真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”并保存脱敏证据后，才能同步 Native hello、批准版本和配置。启用 RCON 诊断时，host 必须是 loopback，端口和 timeout 必须有效，批准版本不能为空，并且 `Password` 与绝对路径 `PasswordFile` 必须二选一；它不改变生产资源兑换的 Native-only 规则。结构错误使用 `ValidateOnStart` 阻止启动；世界、版本、能力、队列或存储的运行时漂移不会杀死只读服务。
+`ApprovedPalServerExecutablePath` 必须填写通过文件句柄解析后的绝对 Windows `.exe` 路径，`ApprovedPalServerProcessSid` 必须填写实际承载 PalServer 的服务账户 SID；Control API 会从命名管道服务端 PID 独立取得两者，并在 hello 和每次写入派发时与配置精确核对。PalServer 安装目录应由管理员所有且不可被普通本机用户写入。两个字段留空或使用上述占位符时，Native 写入会 fail-closed；同一管理员权限下的进程注入仍属于受信主机边界，不能由此机制单独防御。
+
+不要把 `SET_AFTER_REAL_ACCEPTANCE` 替换成旧 dev36，也不要把当前 dev37-ro 的编译成功伪造成 stable capability。dev37-ro 的 `writeEnabled=false` 会被 Safety Gate 明确拒绝。只有先完成当前版本只读 ABI/schema probe，再由独立写候选和真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”并保存脱敏证据后，才能同步 stable Native hello、批准版本和配置。启用 RCON 诊断时，host 必须是 loopback，端口和 timeout 必须有效，批准版本不能为空，并且 `Password` 与绝对路径 `PasswordFile` 必须二选一；它不改变生产资源兑换的 Native-only 规则。结构错误使用 `ValidateOnStart` 阻止启动；世界、版本、能力、队列或存储的运行时漂移不会杀死只读服务。
 
 ## 验证
 

@@ -22,6 +22,7 @@ try
     TestMissingSecretRejected(root);
     TestWeakSecretAclRejected(root);
     TestDisabledAdaptersAreConditional(root);
+    TestNativeProcessIdentityBinding(root);
     TestDevelopmentRconSettlementGuard(root);
     Console.WriteLine("PASS: startup security validation");
 }
@@ -178,6 +179,47 @@ static void TestDevelopmentRconSettlementGuard(string root)
         result,
         "ExtractionMode:Safety:RequireNativeForResourceExchange must be false",
         "Native-required settlement accepted the RCON diagnostic switch.");
+}
+
+static void TestNativeProcessIdentityBinding(string root)
+{
+    var workspace = CreateWorkspace(root, "native-process-identity",
+        new Dictionary<string, string?>
+        {
+            ["ExtractionMode:Safety:RequireNativeForResourceExchange"] = "true",
+            ["ExtractionMode:Safety:ApprovedPalServerExecutablePath"] =
+                @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+            ["ExtractionMode:Safety:ApprovedPalServerProcessSid"] =
+                "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418",
+            ["Palworld:Bridge:CommandTimeoutSeconds"] = "30"
+        });
+    var result = Validate(workspace);
+    Assert(result.Succeeded, JoinFailures(
+        "A canonical PalServer path/SID and 30-second command deadline were rejected.",
+        result));
+
+    workspace.Settings["ExtractionMode:Safety:ApprovedPalServerExecutablePath"] =
+        @"relative\PalServer-Win64-Test-Cmd.exe";
+    result = Validate(workspace);
+    Assert(result.Failed && result.Failures.Any(failure =>
+            failure.Contains("canonical absolute Windows .exe path", StringComparison.Ordinal)),
+        "A relative PalServer executable path was accepted for Native writes.");
+
+    workspace.Settings["ExtractionMode:Safety:ApprovedPalServerExecutablePath"] =
+        @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe";
+    workspace.Settings["ExtractionMode:Safety:ApprovedPalServerProcessSid"] = "S-1-5-080";
+    result = Validate(workspace);
+    Assert(result.Failed && result.Failures.Any(failure =>
+            failure.Contains("canonical Windows SID", StringComparison.Ordinal)),
+        "A non-canonical PalServer process SID was accepted for Native writes.");
+
+    workspace.Settings["ExtractionMode:Safety:ApprovedPalServerProcessSid"] =
+        "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418";
+    workspace.Settings["Palworld:Bridge:CommandTimeoutSeconds"] = "31";
+    result = Validate(workspace);
+    Assert(result.Failed && result.Failures.Any(failure =>
+            failure.Contains("1-30 second connect and command timeouts", StringComparison.Ordinal)),
+        "A Native command timeout above the 30-second absolute limit was accepted.");
 }
 
 static void AssertPolicyRejected(

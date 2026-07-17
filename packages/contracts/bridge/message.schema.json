@@ -14,7 +14,7 @@
       "type": "object",
       "required": ["protocolVersion", "messageType", "messageId", "sentAt"],
       "properties": {
-        "protocolVersion": { "const": "1.0" },
+        "protocolVersion": { "const": "1.1" },
         "messageType": { "type": "string" },
         "messageId": { "type": "string", "format": "uuid" },
         "sentAt": { "type": "string", "format": "date-time" }
@@ -25,19 +25,143 @@
         { "$ref": "#/$defs/base" },
         {
           "type": "object",
-          "required": ["messageType", "gameBuild", "modVersion", "capabilities", "probes"],
+          "required": [
+            "messageType",
+            "gameBuild",
+            "steamBuild",
+            "modVersion",
+            "runtimeExecutableSha256",
+            "runtimeExecutableSize",
+            "runtimeNativeDllSha256",
+            "runtimeNativeDllSize",
+            "runtimeUe4ssDllSha256",
+            "runtimeUe4ssDllSize",
+            "runtimeIdentityVerified",
+            "writeEnabled",
+            "capabilities",
+            "probes"
+          ],
           "properties": {
             "messageType": { "const": "hello" },
-            "gameBuild": { "type": "string" },
-            "modVersion": { "type": "string" },
+            "gameBuild": {
+              "type": "string",
+              "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "steamBuild": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^[0-9]+$"
+            },
+            "modVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+            },
+            "runtimeExecutableSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "runtimeExecutableSize": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runtimeNativeDllSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "runtimeNativeDllSize": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runtimeUe4ssDllSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "runtimeUe4ssDllSize": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runtimeIdentityVerified": { "const": true },
+            "writeEnabled": { "type": "boolean" },
             "capabilities": {
               "type": "array",
-              "items": { "type": "string" },
+              "minItems": 1,
+              "maxItems": 128,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+              },
               "uniqueItems": true
             },
             "probes": {
               "type": "object",
+              "required": [
+                "runtime.executable.sha256",
+                "runtime.native_dll.sha256",
+                "runtime.ue4ss_dll.sha256",
+                "runtime.write_enabled"
+              ],
+              "minProperties": 1,
+              "maxProperties": 128,
+              "propertyNames": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+              },
+              "properties": {
+                "runtime.executable.sha256": { "const": true },
+                "runtime.native_dll.sha256": { "const": true },
+                "runtime.ue4ss_dll.sha256": { "const": true },
+                "runtime.write_enabled": { "type": "boolean" }
+              },
               "additionalProperties": { "type": "boolean" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "writeEnabled": { "const": false } },
+            "required": ["writeEnabled"]
+          },
+          "then": {
+            "properties": {
+              "capabilities": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "players.progression.mutate",
+                      "players.progression.write",
+                      "inventory.mutate",
+                      "inventory.write",
+                      "inventory.consume",
+                      "inventory.consume.experimental",
+                      "pals.mutate",
+                      "pals.write",
+                      "announcements.overlay.write",
+                      "announcements.banner.write",
+                      "ui.notifications.write"
+                    ]
+                  }
+                }
+              },
+              "probes": {
+                "properties": {
+                  "runtime.write_enabled": { "const": false }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "probes": {
+                "properties": {
+                  "runtime.write_enabled": { "const": true }
+                }
+              }
             }
           }
         }

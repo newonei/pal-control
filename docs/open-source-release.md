@@ -73,22 +73,25 @@
 
 4. Native MOD
    - `third_party/` 约 4.7 GB，包含下载的源码、子模块和构建产物，不应整体提交。
-   - 已提供锁定 `dependencies.lock.json` 的 `scripts/Build-PalControlNative.ps1`：它校验 UE4SS/Unreal commit、工具链和独立构建目录，不自动下载、部署或重启服务器。
+   - 已提供 `scripts/Prepare-Ue4ssSource.ps1` 与锁定 `dependencies.lock.json` 的 `scripts/Build-PalControlNative.ps1`：前者只对干净精确 checkout 应用受审 MOD/Cargo 补丁，后者校验 UE4SS/全部子模块、工具链、依赖提交、独立构建目录及最终 DLL 大小/SHA-256；两者都不自动下载、部署或重启服务器。
    - 首次公开只发布 `mods/pal-control-native/` 源码、模板、锁文件和构建脚本；正式发布 DLL 前仍必须保存干净环境构建证据、产物 SHA-256 和真实服务器持久化验收记录。
 
 ## 发布前阻断项
 
-以下任一项未完成时，不得推送当前发布候选提交或创建 GitHub Release：
+以下本地项任一未完成时不得推送当前候选；推送后的 GitHub Actions 未通过时不得创建 GitHub Release：
 
 - [x] 选择 MIT 根许可证并加入 `LICENSE`；
 - [x] 把 OpenAPI 的许可证声明改为同一 SPDX 标识；
 - [x] 资源目录生成文件已从公开提交移除并由 `.gitignore` 阻止误传；
 - [x] 核对并保留地图、PalCalc、UE4SS 等第三方来源与许可证；
-- [x] 检查当前提交中的所有示例配置为空值/占位符，不含真实密码、Token、路径或域名；2026-07-16 已完成暂存树审计与 Gitleaks 复核；
-- [x] 修正当前提交中明显过时的运行文档和机器专用路径；本轮候选的 71 个 Markdown 文件相对内链和 29 个 JSON 文件已复核；
-- [x] 从代码候选 `cce69ce` 克隆全新副本并使用 npm 官方 registry 安装，重新运行两个前端构建、OpenAPI、管理台 21/21、玩家端 32/32、Chromium 15/15、统一 contract/integration 52/52 和 Control API Release；全部通过，OpenAPI 仅保留 63 条既有非阻断警告，Control API 为 0 警告、0 错误；
-- [x] 使用 Gitleaks CLI `8.30.1` 对本轮完整暂存树和候选创建前全部 23 个可达历史提交重新扫描，均为 0 泄漏；固定错误曲线测试不再把 PEM 私钥块写入源码；
-- [x] 人工审阅本轮 114 个暂存路径：无运行数据、存档、凭据、构建产物或第三方二进制，无机器专用用户路径，且本轮最大暂存文件约 382 KiB；仓库既有两份 7.06 MiB 地图仍按已记录的 MIT 来源保留。
+- [x] 检查当前候选中的所有示例配置为空值/占位符，不含真实密码、Token、路径或域名；2026-07-17 已完成暂存树、关键 ignore 规则和机器专用路径审计；
+- [x] 修正明显过时的运行文档；当前仓库 71 个 Markdown 文件的相对链接与本轮 9 个变更 JSON 文件均已复核；
+- [x] 当前工作树重新运行两个前端生产构建、OpenAPI、管理台 21/21、玩家端 32/32、Chromium 15/15、统一 contract/integration 52/52 和 Control API Release；全部通过，OpenAPI 仅保留 63 条既有非阻断警告，Control API 为 0 警告、0 错误；
+- [x] 使用 Gitleaks CLI `8.30.1` 对候选创建前全部 25 个可达提交和完整 staged 树扫描，均为 0 泄漏；被忽略的多 GB 外部 Native 构建目录不属于公开候选，并由 ignore 门禁单独核对；
+- [x] 两个互相独立的外部 UE4SS prepared source 与全新构建目录均在 Cargo `--locked` 和全部源码/子模块守卫下得到 `886272` 字节、SHA-256 `c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7`，与仓库锁完全一致；未部署或启动真实服务；
+- [x] 人工审阅本轮 71 个暂存路径：无运行数据、存档、凭据、构建产物或第三方二进制，无机器专用用户路径；最大暂存文件约 383 KiB，仓库既有两份 7.06 MiB 地图仍按已记录的 MIT 来源保留；
+- [x] 从本地候选提交创建独立干净 clone，重新执行 `npm ci`、两个前端生产构建、完整 `npm test` 与 Control API Release 编译；全部通过，且未复用工作区依赖或构建输出；
+- [ ] 推送后核对 GitHub Actions；该项不阻止首次推送，但失败时禁止创建 Release 或宣称生产就绪。
 
 本项目已采用 MIT。若未来更换许可证，必须同步评估既有贡献者授权，并统一根许可证、README、包元数据与 OpenAPI 声明。
 

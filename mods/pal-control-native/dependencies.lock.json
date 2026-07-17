@@ -1,17 +1,38 @@
 {
-  "palworldTarget": "v1.0.0.100427",
+  "palworldTarget": "v1.0.1.100619",
+  "steamBuild": "24181105",
+  "palServerExecutable": {
+    "size": 152378880,
+    "sha256": "c812def687b7c13be91d22c2ca6ed48389b6260e4d72a93dddfea274be76419e"
+  },
+  "native": {
+    "protocolVersion": "1.1",
+    "modVersion": "0.3.0-dev.37-ro",
+    "capabilityStatus": "read-only-candidate-unverified",
+    "writeCapabilities": false,
+    "pipeName": "pal-control.local.v1",
+    "controlApiServiceName": "PalControl.ControlApi",
+    "controlApiServiceSid": "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418"
+  },
   "ue4ss": {
     "repository": "https://github.com/Okaetsu/RE-UE4SS",
     "releaseTag": "experimental-palworld",
     "sourceCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
     "releaseArchive": "UE4SS-Palworld.zip",
     "releaseArchiveSha256": "7c80b2f4a29baf0f384552c8517e58196e78c8a1b8530637b7179eddae1b54a9",
-    "runtimeDllSha256": "afc83a57a30c3d44bc0d432222f24857b0c3788738b8a1975dfeef746edab798"
+    "runtimeDllSha256": "afc83a57a30c3d44bc0d432222f24857b0c3788738b8a1975dfeef746edab798",
+    "runtimeDllSize": 16494592,
+    "corrosionSourceCommit": "52844733e14f095c947577627e367ee5f6458af7",
+    "iconFontCppHeadersSourceCommit": "210b5a399a64270674560d633638952d1e8d804d",
+    "patternsleuthCargoLockSize": 17203,
+    "patternsleuthCargoLockSha256": "88c3718c03492cdc2650217a9d8bb2a8dbdecdbde1b4ea79e3e529e838b49bbe"
   },
   "build": {
     "cmake": "3.31.6",
     "rustc": "1.97.0",
     "msvc": "19.44.35217",
-    "palControlNativeDllSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
+    "cargoLocked": true,
+    "palControlNativeDllSize": 886272,
+    "palControlNativeDllSha256": "c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7"
   }
 }

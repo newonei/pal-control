@@ -3,7 +3,7 @@
 > 适用项目：幻兽商域 Palworld Windows Dedicated Server 控制台
 > 文档基线日期：2026-07-16
 > Control API 协议：HTTP JSON + SSE
-> Native Bridge 协议：Named Pipe `1.0`
+> Native Bridge 协议：Named Pipe `1.1`
 
 本文档用于后续开发、联调、运维和故障排查。它记录当前已经实现的能力、接口调用方法、安全约束、部署路径和已知限制。
 
@@ -13,13 +13,14 @@
 | --- | --- | --- |
 | 服务器名称 | `幻兽商域` | 来自官方 REST `/info` |
 | 当前游戏版本 | `v1.0.1.100619` | 2026-07-16 从官方 REST `/info` 回读 |
-| Native 已批准目标版本 | `v1.0.0.100427` | 低于当前游戏版本，必须重新适配与验收后才能更新 |
+| Native 当前源码候选 | `v1.0.1.100619` / build `24181105` | dev37-ro 已绑定精确 PalServer EXE 并完成只读构建，但尚未实服加载/探针，不是已批准 runtime |
 | 当前进程 Native Bridge | 未连接 | 服务更新到 Steam build `24181105` 后，兼容性守卫隔离了旧 UE4SS loader；官方 REST 可达且无人在线，但 Named Pipe 连接超时 |
 | 最近已验证加载版本 | `0.3.0-dev.36` | UE4SS 日志记录 2026-07-15 11:07 的上一次进程已加载并建立 Bridge；之后的进程必须重新探针 |
-| 源码声明版本 | `0.3.0-dev.36` | 含受限静态槽清空的实验性 `inventory.consume` 与只读公开撤离点聊天查询 |
+| 源码声明版本 | `0.3.0-dev.37-ro` | 协议 1.1，只读候选；所有写 capability、聊天 hook 与随机复活 hook 均关闭 |
 | 服务器磁盘 DLL | `0.3.0-dev.36` | SHA-256 `6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A` |
-| `Info.template.json` | `0.3.0-dev.36` | 与当前源码和运行 DLL 版本一致；尚未据此发布 Workshop 包 |
-| Native 协议 | `1.0` | 长度前缀 UTF-8 JSON |
+| dev37-ro 候选构建 | `0.3.0-dev.37-ro` | 两个全新独立目录在 Cargo `--locked`、受审 Cargo.lock 与精确非浅克隆依赖下可复现 886,272 字节、SHA-256 `C91BEE8F943B6C151A59C41FF0A51AEBF36469B0C60F4201494CC5A3A416F8A7`；未部署、未发布 Workshop |
+| `Info.template.json` | `0.3.0-dev.37-ro` | 与当前源码候选一致；不代表服务器磁盘上的旧 dev36 已替换 |
+| Native 协议 | `1.1` | hello 强制携带 Steam build、宿主 EXE/Native DLL/UE4SS DLL 大小与 SHA-256、runtime 验证结果和 writeEnabled；Control API 经 pipe server PID 独立复核主 EXE，模块摘要继续与锁比较 |
 | Control API | `http://127.0.0.1:5180` | 生产目标仅监听回环；当前运行状态以 readiness 为准 |
 | Web 控制台 | `http://127.0.0.1:5174` | 本地开发端口，不代表进程持续运行 |
 | 玩家商城 | `http://127.0.0.1:5175` | 本地开发端口；公网必须经 HTTPS 反向代理 |
@@ -31,7 +32,7 @@
 
 ### 当前开发模式约定
 
-1. 磁盘 DLL、源码和模板均为 `0.3.0-dev.36`，DLL SHA-256 与锁文件一致；上一次 `v1.0.0.100427` 进程曾验证 Bridge、完整槽元数据及 capability。当前服务已更新到 `v1.0.1.100619`，兼容性守卫正确隔离旧 UE4SS loader，绝不能为了“连上 Pipe”直接恢复旧 loader。必须先针对新游戏版本重新完成 ABI/schema 适配、构建和只读探针，再进入写能力验收。Palworld 保留 `/` 给管理员命令，不能向普通玩家宣传 `/撤离`。`inventory.consume.experimental` 尚未经过“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收，仍不得用于公开经济入账。
+1. 服务器磁盘仍保留旧 `0.3.0-dev.36` DLL；上一次 `v1.0.0.100427` 进程曾验证 Bridge、完整槽元数据及 capability。当前源码/模板已形成 `v1.0.1.100619` / build `24181105` 的 dev37-ro 只读候选，并在注册 hook 前强制核对宿主 EXE 大小/SHA-256；它只完成编译，尚未部署或取得实服 ABI/schema probe。兼容性守卫继续隔离旧 loader，绝不能为了“连上 Pipe”恢复旧 DLL，也不能把 dev37-ro 的编译成功写成 runtime 成功。只有只读门禁通过后才可另行评审写候选；`inventory.consume` 在真实“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收前仍不得用于公开经济入账。
 2. 即使处于开发模式，PalServer 重启也必须先确认无人在线，再通过官方 REST 保存和正常关服；禁止为替换 DLL 强杀进程。
 3. 客户端浮层只读探针已验证 `PalGameStateInGame:BroadcastServerNotice` 的参数区为 16 字节、FunctionFlags 为 `0x24CC0`，`publishClientOverlay=true`。
 
@@ -683,7 +684,7 @@ payloadLength bytes UTF-8 JSON
 
 ```json
 {
-  "protocolVersion": "1.0",
+  "protocolVersion": "1.1",
   "messageType": "command",
   "messageId": "<uuid>",
   "sentAt": "<ISO-8601>",
@@ -807,24 +808,30 @@ dotnet build .\services\control-api\PalControl.ControlApi.csproj `
 
 Native 构建必须使用 `mods/pal-control-native/dependencies.lock.json` 锁定的 UE4SS
 提交。构建入口不会为调用者 clone、fetch 或 checkout UE4SS，也不会复制 DLL、停止或重启
-PalServer。执行前应准备完整的 UE4SS 子模块，并在其
-`cppmods/CMakeLists.txt` 中接入指向当前源码的 `PalControlNative` 目录。
+PalServer。执行前应准备完整且干净的 UE4SS 子模块，再由
+`Prepare-Ue4ssSource.ps1` 应用精确受审的 `PalControlNative` 附件、规范化 Cargo.lock、
+Corrosion `LOCKED` import 和非浅克隆依赖提交补丁，不要手工放宽构建 guard。
 上游 UE4SS CMake 在首次生成独立构建目录时，仍可能在该目录内下载其自身锁定的第三方
 编译依赖。
 
 ```powershell
 Set-Location "C:\src\pal-control"
 
-.\mods\pal-control-native\scripts\Build-PalControlNative.ps1 `
+.\mods\pal-control-native\scripts\Prepare-Ue4ssSource.ps1 `
   -Ue4ssRoot .\third_party\RE-UE4SS-Palworld-c2ac246
+
+.\mods\pal-control-native\scripts\Build-PalControlNative.ps1 `
+  -Ue4ssRoot .\third_party\RE-UE4SS-Palworld-c2ac246 `
+  -BuildDirectory .\.native-build\pal-control-native-c2ac246
 ```
 
 脚本会同时校验：
 
 - `RE-UE4SS` 当前 HEAD 必须等于锁文件中的完整 `sourceCommit`；
-- `deps/first/Unreal` 当前 HEAD 必须等于该 UE4SS 提交记录的 gitlink；
+- 全部递归子模块必须位于该 UE4SS 提交记录的 gitlink 且无 tracked/untracked/ignored 漂移；
 - UE4SS 的 `cppmods/PalControlNative` 必须与仓库中的 Native 源码一致；
-- CMake、Rust 版本必须等于锁文件版本。
+- 受审 Cargo.lock 大小/SHA-256、Cargo `--locked`、Corrosion/IconFont 完整提交及非浅克隆设置必须一致；
+- CMake、Rust、MSVC 与最终 DLL 大小/SHA-256 必须等于锁文件版本。
 
 任一版本不符都会立即失败，且不会替调用者切换版本。只检查依赖和源码接入、不执行
 CMake 时可使用：
@@ -1023,7 +1030,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 商城以逐物品结构化 receipt 归因发货；同一 `serverId + idempotencyKey` 跨重启返回同一结果，partial/`uncertain` 不重发，dead-letter 会告警并自动关闭购买。扣款/订单与 command accepted 虽在同库，仍是由持久 delivery/receipt 衔接的两个事务，不能宣称一次原子提交。
 - 资源报价在配置圆形区域连续采样两次，读取 `Items/Food/DropSlot` 的完整 Native 槽元数据，为全部白名单资源生成 30 秒整单快照。
 - Production 结算只调用 Native `inventory.consume`：同 Tick 比较完整快照、执行全成或全败扣物、逐行与聚合回读并持久化 run 结果；RCON `/delitems` 只保留为显式 Development 诊断，不能作为生产降级。
-- 当前 Native dev36 只发布 `inventory.consume.experimental` 且 `persistenceVerified=false`。在真实“扣物 → 保存 → 停服 → 重启 → 重登”验收前，生产资源兑换 Safety Gate 必须保持关闭。
+- 当前服务器磁盘旧 dev36 曾发布 `inventory.consume.experimental`；新 dev37-ro 候选完全不发布写 capability。只有 dev37-ro 先通过当前版本只读探针、再产生独立写候选并完成真实“扣物 → 保存 → 停服 → 重启 → 重登”验收后，才可评审稳定 `inventory.consume`；生产资源兑换 Safety Gate 继续保持关闭。
 - settlement 使用 lease/CAS、终态单调、同库唯一 credit 和保守恢复；派发后无法证明结果时进入 `uncertain`，不重扣、不入账并等待人工对账。
 - 维护闸门会同时拒绝新订单、报价和结算；readiness 会阻止存在派发中、`uncertain`、dead-letter、过期备份、版本/世界漂移或未终结 settlement 时换档。
 - [`Invoke-WeeklyRollover.ps1`](../extraction-mode/scripts/Invoke-WeeklyRollover.ps1) 默认只读生成计划；显式 `-Execute` 时由服务端持久化的 operation/step key 驱动双备份、优雅停服、冻结目标 `DedicatedServerName`、启动探针、赛季 worldId 提交和恢复。脚本结构性拒绝移动或删除旧世界。
@@ -1041,5 +1048,5 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 所有 `/api/v1/player/me/*` 身份只来自会话，不接受浏览器指定玩家；全部 POST 校验严格 Origin，业务写操作额外校验 CSRF，购买与结算继续要求幂等键。
 - 兼容路径 `GET /api/v1/player/me/extraction-zones` 返回内容定义兑换点以及当前会话玩家自己的在线位置、开放/热点状态、开放窗口、路线、风险提示、服务端有效收益倍率、逐区下一开放时间和全关时的最早 `nextOpensAt`、中心/边界距离和范围状态；离线或位置不可用时仍可查看区域，不返回其他玩家位置。
 - `apps/player-web` 只包含本人钱包、商城、活动、可靠任务、5 步引导、订单、流水、资源兑换点地图和兑换记录，不加载玩家目录或任何管理员组件。地图每 5 秒更新；处理中订单/兑换在页面可见时每 3 秒有界轮询并在终态停止，报价倒计时到期后 fail-closed。
-- Native MOD 监听原生 `BroadcastChatMessage`，普通玩家输入兼容别名 `!撤离` 或 `!extract`（兼容直接输入 `撤离`、`extract`）时只通过可靠 `ClientMessage` 向发起者回复两行资源兑换点情报；`/` 前缀会在该 Hook 之前进入管理员命令解析器；详细验收见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
+- 旧 dev36 可监听原生 `BroadcastChatMessage` 并私回资源兑换点情报；当前 dev37-ro 只读候选不会安装聊天 hook。只有后续写能力评审重新批准时才可启用；`/` 前缀仍属于管理员命令解析器。历史实现说明见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
 - 公网 Caddy 只反代 `/api/v1/player/*`；其他 `/api` 直接返回 404。`5174`、`5180`、`8212`、`17993`、`25575` 继续禁止公网映射。

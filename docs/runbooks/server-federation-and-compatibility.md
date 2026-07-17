@@ -71,7 +71,7 @@ dotnet run --project .\tools\compatibility-guard\PalControl.CompatibilityGuard.c
   -SteamBuild NUMERIC_BUILD_ID `
   -PalDefenderVersion X.Y.Z `
   -Ue4ssCommit FULL_40_HEX_COMMIT `
-  -NativeProtocol 1.0 `
+  -NativeProtocol REVIEWED_NATIVE_PROTOCOL `
   -NativeMod X.Y.Z `
   -BridgeAvailability available
 ```

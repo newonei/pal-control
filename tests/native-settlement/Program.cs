@@ -1,3 +1,6 @@
+using System.Collections.Concurrent;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -9,6 +12,8 @@ using PalControl.ControlApi.Extraction;
 using PalControl.ControlApi.Infrastructure;
 
 var cancellationToken = CancellationToken.None;
+VerifyRuntimeIdentityQuarantine();
+VerifySessionFrameValidation();
 await VerifyStableCapabilityAndFullSnapshotAsync(cancellationToken);
 await VerifyContentSwitchFailsBeforeNativeDispatchAsync(cancellationToken);
 await VerifyDynamicQuoteEvidenceAndWindowSemanticsAsync(cancellationToken);
@@ -16,7 +21,341 @@ await VerifyConsumeEvidenceClassificationAsync(cancellationToken);
 await VerifyDurableIdempotencyAndReceiptAsync(cancellationToken);
 await VerifyPersistenceFaultBoundariesAsync(cancellationToken);
 VerifyProductionNeverSelectsRcon();
-Console.WriteLine("PASS: Native quote snapshot, content/event-switch pre-dispatch rejection, dynamic event/hotspot quote grace, durable dynamic evidence, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
+Console.WriteLine("PASS: runtime-bound protocol 1.1/read-only quarantine, fail-closed session frames/results, Native quote snapshot, content/event-switch pre-dispatch rejection, dynamic event/hotspot quote grace, durable dynamic evidence, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
+
+static void VerifyRuntimeIdentityQuarantine()
+{
+    var readOnly = new NativeBridgeState();
+    readOnly.OnHello(new NativeBridgeHello(
+        "1.1",
+        "v1.0.1.100619",
+        "0.3.0-dev.37-ro",
+        ["bridge.hello", "inventory.schema", "inventory.probe", "inventory.read"],
+        new Dictionary<string, bool>
+        {
+            ["runtime.executable.sha256"] = true,
+            ["runtime.native_dll.sha256"] = true,
+            ["runtime.ue4ss_dll.sha256"] = true,
+            ["runtime.write_enabled"] = false
+        },
+        "24181105",
+        new string('c', 64),
+        152_378_880,
+        true,
+        false,
+        RuntimeNativeDllSha256: new string('d', 64),
+        RuntimeNativeDllSize: 869_888,
+        RuntimeUe4ssDllSha256: new string('e', 64),
+        RuntimeUe4ssDllSize: 16_494_592));
+    var snapshot = readOnly.GetSnapshot();
+    Assert(snapshot.Connected && snapshot.RuntimeIdentityVerified &&
+           !snapshot.WriteEnabled && snapshot.ProtocolVersion == "1.1" &&
+           snapshot.SteamBuild == "24181105" &&
+           snapshot.RuntimeExecutableSize == 152_378_880 &&
+           snapshot.RuntimeNativeDllSize == 869_888 &&
+           snapshot.RuntimeUe4ssDllSize == 16_494_592,
+        "A structurally valid runtime-bound read-only hello was not retained exactly.");
+    Assert(!new ExtractionNativeInventoryAdapter(
+            readOnly,
+            new FakeNativeBridgeTransport()).StableSettlementAvailable,
+        "A read-only Native candidate was accepted for settlement writes.");
+    Assert(readOnly.Touch(),
+        "A heartbeat did not refresh an active runtime-bound hello.");
+    readOnly.Disconnect("test-disconnect");
+    snapshot = readOnly.GetSnapshot();
+    Assert(!snapshot.Connected && !snapshot.RuntimeIdentityVerified &&
+           !snapshot.WriteEnabled && snapshot.ProtocolVersion is null &&
+           snapshot.GameBuild is null && snapshot.SteamBuild is null &&
+           snapshot.ModVersion is null && snapshot.RuntimeExecutableSha256 is null &&
+           snapshot.RuntimeExecutableSize is null &&
+           snapshot.RuntimeExecutablePath is null && snapshot.RuntimeProcessSid is null &&
+           snapshot.RuntimeNativeDllSha256 is null && snapshot.RuntimeNativeDllSize is null &&
+           snapshot.RuntimeUe4ssDllSha256 is null && snapshot.RuntimeUe4ssDllSize is null &&
+           snapshot.Capabilities.Count == 0 &&
+           snapshot.Probes.Count == 0,
+        "Disconnect retained a runtime identity or capability set for the next pipe session.");
+    Assert(!readOnly.Touch() && !readOnly.GetSnapshot().Connected,
+        "A heartbeat revived a disconnected Native identity without a new hello.");
+
+    ExpectInvalidHello(new NativeBridgeHello(
+        "1.0",
+        "v1.0.1.100619",
+        "0.3.0-dev.37-ro",
+        ["inventory.probe"],
+        new Dictionary<string, bool>(),
+        "24181105",
+        new string('c', 64),
+        152_378_880,
+        true,
+        false));
+    ExpectInvalidHello(new NativeBridgeHello(
+        "1.1",
+        "v1.0.1.100619",
+        "0.3.0-dev.37-ro",
+        ["inventory.probe", "inventory.consume.experimental"],
+        new Dictionary<string, bool>(),
+        "24181105",
+        new string('c', 64),
+        152_378_880,
+        true,
+        false));
+    ExpectInvalidHello(new NativeBridgeHello(
+        "1.1",
+        "v1.0.1.100619",
+        "0.3.0-dev.37-ro",
+        ["inventory.probe"],
+        new Dictionary<string, bool>(),
+        "24181105",
+        new string('C', 64),
+        152_378_880,
+        true,
+        false));
+    ExpectInvalidHello(new NativeBridgeHello(
+        "1.1",
+        "v1.0.1.100619",
+        "0.3.0-dev.37-ro",
+        ["inventory.probe"],
+        new Dictionary<string, bool>(),
+        "24181105",
+        new string('c', 64),
+        152_378_880,
+        false,
+        false));
+}
+
+static void ExpectInvalidHello(NativeBridgeHello hello)
+{
+    try
+    {
+        new NativeBridgeState().OnHello(hello);
+    }
+    catch (IOException)
+    {
+        return;
+    }
+    throw new InvalidOperationException("An unbound or capability-inconsistent Native hello was accepted.");
+}
+
+static void VerifySessionFrameValidation()
+{
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame.Remove("messageId");
+        ExpectFrameRejected(session, frame,
+            "A hello without messageId was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame["messageId"] = Guid.Empty;
+        ExpectFrameRejected(session, frame,
+            "A hello with an empty messageId was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame["messageId"] = "not-a-uuid";
+        ExpectFrameRejected(session, frame,
+            "A hello with a malformed messageId was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame.Remove("sentAt");
+        ExpectFrameRejected(session, frame,
+            "A hello without sentAt was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame["sentAt"] = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff");
+        ExpectFrameRejected(session, frame,
+            "A hello whose sentAt omitted an explicit offset was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame["sentAt"] = DateTimeOffset.UtcNow.AddMinutes(-3);
+        ExpectFrameRejected(session, frame,
+            "A stale hello was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        var frame = ValidHelloFrame();
+        frame["sentAt"] = DateTimeOffset.UtcNow.AddMinutes(1);
+        ExpectFrameRejected(session, frame,
+            "A future-dated hello was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        ExpectFrameRejected(
+            session,
+            ValidHeartbeatFrame(),
+            "A heartbeat before hello was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        ExpectFrameRejected(
+            session,
+            ResultFrame(Guid.NewGuid(), "succeeded", 0, new { }, null),
+            "A result before hello was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        ExpectFrameRejected(session, ValidHelloFrame(),
+            "A second hello on one connection was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        ExpectFrameRejected(
+            session,
+            BaseFrame("extension"),
+            "An unknown Native Bridge message type was ignored.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        var heartbeat = ValidHeartbeatFrame();
+        heartbeat.Remove("messageId");
+        ExpectFrameRejected(session, heartbeat,
+            "A heartbeat without its required base envelope was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        var result = ResultFrame(Guid.NewGuid(), "succeeded", 0, new { }, null);
+        result["sentAt"] = "not-a-date";
+        ExpectFrameRejected(session, result,
+            "A result with an invalid sentAt was accepted.");
+    }
+
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        var commandId = Guid.NewGuid();
+        var completion = session.AddPending(commandId);
+        ExpectFrameRejected(
+            session,
+            ResultFrame(commandId, "succeeded", -1, new { }, null),
+            "A matching result with a negative revision was delivered.");
+        Assert(!completion.Task.IsCompleted,
+            "A structurally invalid matching result completed its pending command.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        ExpectFrameRejected(
+            session,
+            ResultFrame(Guid.NewGuid(), "complete", 0, new { }, null),
+            "An unsupported result state was accepted.");
+        ExpectFrameRejected(
+            session,
+            ResultFrame(Guid.NewGuid(), "succeeded", 0, Array.Empty<object>(), null),
+            "A succeeded result with non-object data was accepted.");
+        ExpectFrameRejected(
+            session,
+            ResultFrame(
+                Guid.NewGuid(),
+                "succeeded",
+                0,
+                new { },
+                new { code = "UNEXPECTED", message = "must be null" }),
+            "A succeeded result with an error was accepted.");
+        ExpectFrameRejected(
+            session,
+            ResultFrame(Guid.NewGuid(), "failed", 0, null, null),
+            "A failed result without an error was accepted.");
+        ExpectFrameRejected(
+            session,
+            ResultFrame(
+                Guid.NewGuid(),
+                "uncertain",
+                0,
+                null,
+                new { code = "BAD\nCODE", message = "bounded" }),
+            "A result error containing control characters was accepted.");
+    }
+    using (var session = new FakeNativeSession())
+    {
+        session.Send(ValidHelloFrame());
+        var commandId = Guid.NewGuid();
+        var completion = session.AddPending(commandId);
+        session.Send(ResultFrame(commandId, "succeeded", 0, new { }, null));
+        Assert(completion.Task.IsCompletedSuccessfully &&
+               completion.Task.Result.Data?.ValueKind == JsonValueKind.Object,
+            "A valid succeeded result with empty object data was rejected.");
+    }
+}
+
+static Dictionary<string, object?> BaseFrame(string messageType) => new()
+{
+    ["protocolVersion"] = "1.1",
+    ["messageType"] = messageType,
+    ["messageId"] = Guid.NewGuid(),
+    ["sentAt"] = DateTimeOffset.UtcNow
+};
+
+static Dictionary<string, object?> ValidHeartbeatFrame() => BaseFrame("heartbeat");
+
+static Dictionary<string, object?> ValidHelloFrame()
+{
+    var frame = BaseFrame("hello");
+    frame["gameBuild"] = "v1.0.1.100619";
+    frame["modVersion"] = "0.3.0-dev.37-ro";
+    frame["capabilities"] = new[] { "bridge.hello", "inventory.probe" };
+    frame["probes"] = new Dictionary<string, bool>
+    {
+        ["runtime.executable.sha256"] = true,
+        ["runtime.native_dll.sha256"] = true,
+        ["runtime.ue4ss_dll.sha256"] = true,
+        ["runtime.write_enabled"] = false
+    };
+    frame["steamBuild"] = "24181105";
+    frame["runtimeExecutableSha256"] = new string('b', 64);
+    frame["runtimeExecutableSize"] = 152_378_880L;
+    frame["runtimeIdentityVerified"] = true;
+    frame["writeEnabled"] = false;
+    frame["runtimeNativeDllSha256"] = new string('d', 64);
+    frame["runtimeNativeDllSize"] = 869_888L;
+    frame["runtimeUe4ssDllSha256"] = new string('e', 64);
+    frame["runtimeUe4ssDllSize"] = 16_494_592L;
+    return frame;
+}
+
+static Dictionary<string, object?> ResultFrame(
+    Guid commandId,
+    string state,
+    long observedRevision,
+    object? data,
+    object? error)
+{
+    var frame = BaseFrame("result");
+    frame["commandId"] = commandId;
+    frame["state"] = state;
+    frame["observedRevision"] = observedRevision;
+    frame["data"] = data;
+    frame["error"] = error;
+    return frame;
+}
+
+static void ExpectFrameRejected(
+    FakeNativeSession session,
+    object frame,
+    string message)
+{
+    try
+    {
+        session.Send(frame);
+    }
+    catch (IOException)
+    {
+        return;
+    }
+    throw new InvalidOperationException(message);
+}
 
 static async Task VerifyContentSwitchFailsBeforeNativeDispatchAsync(
     CancellationToken cancellationToken)
@@ -258,6 +597,79 @@ static async Task VerifyStableCapabilityAndFullSnapshotAsync(CancellationToken c
     var transport = new FakeNativeBridgeTransport();
     transport.Results.Enqueue(Result("succeeded", ProbeJson(playerUid)));
     var state = StableState();
+    var approvedIdentity = new EconomySafetyOptions
+    {
+        ApprovedNativeProtocolVersion = "1.1",
+        ApprovedNativeGameBuild = "v1.0.1.100619",
+        ApprovedNativeSteamBuild = "24181105",
+        ApprovedNativeModVersion = "0.4.0",
+        ApprovedNativeExecutableSha256 = new string('b', 64),
+        ApprovedNativeExecutableSize = 152_378_880,
+        ApprovedPalServerExecutablePath =
+            @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+        ApprovedPalServerProcessSid =
+            "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418",
+        ApprovedNativeDllSha256 = new string('d', 64),
+        ApprovedNativeDllSize = 869_888,
+        ApprovedUe4ssDllSha256 = new string('e', 64),
+        ApprovedUe4ssDllSize = 16_494_592
+    };
+    Assert(NativeBridgeProtocol.MatchesApprovedWriteIdentity(
+            state.GetSnapshot(), approvedIdentity),
+        "An exact current-session Native/UE4SS write identity was rejected.");
+    Assert(NativeBridgeProtocol.PathsEqual(
+            @"\\?\C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+            approvedIdentity.ApprovedPalServerExecutablePath),
+        "The canonical Win32 extended path returned by a file handle was rejected.");
+    Assert(NativeBridgeProtocol.PathsEqual(
+            @"\??\C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+            approvedIdentity.ApprovedPalServerExecutablePath),
+        "The canonical NT DOS path returned by process inspection was rejected.");
+    Assert(NativeBridgeProtocol.PathsEqual(
+            @"\\?\UNC\server\share\PalServer.exe",
+            @"\\server\share\PalServer.exe"),
+        "The canonical Win32 extended UNC path was rejected.");
+    Assert(!NativeBridgeProtocol.TryNormalizeWindowsExecutablePath(
+            @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\PalServer.exe",
+            out _),
+        "An unsupported GLOBALROOT device path was accepted.");
+    Assert(!NativeBridgeProtocol.MatchesApprovedWriteIdentity(
+            state.GetSnapshot(), new EconomySafetyOptions
+            {
+                ApprovedNativeProtocolVersion = "1.1",
+                ApprovedNativeGameBuild = "v1.0.1.100619",
+                ApprovedNativeSteamBuild = "24181105",
+                ApprovedNativeModVersion = "0.4.0",
+                ApprovedNativeExecutableSha256 = new string('b', 64),
+                ApprovedNativeExecutableSize = 152_378_880,
+                ApprovedPalServerExecutablePath =
+                    @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+                ApprovedPalServerProcessSid =
+                    "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418",
+                ApprovedNativeDllSha256 = new string('f', 64),
+                ApprovedNativeDllSize = 869_888,
+                ApprovedUe4ssDllSha256 = new string('e', 64),
+                ApprovedUe4ssDllSize = 16_494_592
+            }),
+        "A changed Native module identity was accepted at dispatch time.");
+    Assert(!NativeBridgeProtocol.MatchesApprovedWriteIdentity(
+            state.GetSnapshot(), new EconomySafetyOptions
+            {
+                ApprovedNativeProtocolVersion = "1.1",
+                ApprovedNativeGameBuild = "v1.0.1.100619",
+                ApprovedNativeSteamBuild = "24181105",
+                ApprovedNativeModVersion = "0.4.0",
+                ApprovedNativeExecutableSha256 = new string('b', 64),
+                ApprovedNativeExecutableSize = 152_378_880,
+                ApprovedPalServerExecutablePath =
+                    @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+                ApprovedPalServerProcessSid = "S-1-5-18",
+                ApprovedNativeDllSha256 = new string('d', 64),
+                ApprovedNativeDllSize = 869_888,
+                ApprovedUe4ssDllSha256 = new string('e', 64),
+                ApprovedUe4ssDllSize = 16_494_592
+            }),
+        "A changed pipe-server process SID was accepted at dispatch time.");
     var adapter = new ExtractionNativeInventoryAdapter(state, transport);
 
     var snapshot = await adapter.CaptureQuoteSnapshotAsync(
@@ -294,11 +706,26 @@ static async Task VerifyStableCapabilityAndFullSnapshotAsync(CancellationToken c
 
     var experimentalState = new NativeBridgeState();
     experimentalState.OnHello(new NativeBridgeHello(
-        "1.0",
-        "1.0.0.100427",
+        "1.1",
+        "v1.0.1.100619",
         "0.3.0-dev",
         ["inventory.probe", "inventory.consume.experimental"],
-        new Dictionary<string, bool>()));
+        new Dictionary<string, bool>
+        {
+            ["runtime.executable.sha256"] = true,
+            ["runtime.native_dll.sha256"] = true,
+            ["runtime.ue4ss_dll.sha256"] = true,
+            ["runtime.write_enabled"] = true
+        },
+        "24181105",
+        new string('a', 64),
+        152_378_880,
+        true,
+        true,
+        RuntimeNativeDllSha256: new string('d', 64),
+        RuntimeNativeDllSize: 869_888,
+        RuntimeUe4ssDllSha256: new string('e', 64),
+        RuntimeUe4ssDllSize: 16_494_592));
     var experimental = new ExtractionNativeInventoryAdapter(
         experimentalState,
         new FakeNativeBridgeTransport());
@@ -649,11 +1076,26 @@ static void VerifyProductionNeverSelectsRcon()
 {
     var experimentalState = new NativeBridgeState();
     experimentalState.OnHello(new NativeBridgeHello(
-        "1.0",
-        "1.0.0.100427",
+        "1.1",
+        "v1.0.1.100619",
         "0.3.0-dev",
         ["inventory.probe", "inventory.consume.experimental"],
-        new Dictionary<string, bool>()));
+        new Dictionary<string, bool>
+        {
+            ["runtime.executable.sha256"] = true,
+            ["runtime.native_dll.sha256"] = true,
+            ["runtime.ue4ss_dll.sha256"] = true,
+            ["runtime.write_enabled"] = true
+        },
+        "24181105",
+        new string('a', 64),
+        152_378_880,
+        true,
+        true,
+        RuntimeNativeDllSha256: new string('d', 64),
+        RuntimeNativeDllSize: 869_888,
+        RuntimeUe4ssDllSha256: new string('e', 64),
+        RuntimeUe4ssDllSize: 16_494_592));
     var adapter = new ExtractionNativeInventoryAdapter(
         experimentalState,
         new FakeNativeBridgeTransport());
@@ -758,11 +1200,28 @@ static NativeBridgeState StableState()
 {
     var state = new NativeBridgeState();
     state.OnHello(new NativeBridgeHello(
-        "1.0",
-        "1.0.0.100427",
+        "1.1",
+        "v1.0.1.100619",
         "0.4.0",
         ["inventory.probe", "inventory.consume"],
-        new Dictionary<string, bool>()));
+        new Dictionary<string, bool>
+        {
+            ["runtime.executable.sha256"] = true,
+            ["runtime.native_dll.sha256"] = true,
+            ["runtime.ue4ss_dll.sha256"] = true,
+            ["runtime.write_enabled"] = true
+        },
+        "24181105",
+        new string('b', 64),
+        152_378_880,
+        true,
+        true,
+        RuntimeNativeDllSha256: new string('d', 64),
+        RuntimeNativeDllSize: 869_888,
+        RuntimeUe4ssDllSha256: new string('e', 64),
+        RuntimeUe4ssDllSize: 16_494_592),
+        @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+        "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418");
     return state;
 }
 
@@ -893,6 +1352,87 @@ static void Assert(bool condition, string message)
     {
         throw new InvalidOperationException(message);
     }
+}
+
+internal sealed class FakeNativeSession : IDisposable
+{
+    private readonly NativeBridgeClient _client;
+    private readonly MethodInfo _processMessage;
+    private readonly object _serverIdentity;
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource<NativeBridgeResult>> _pending;
+    private bool _helloReceived;
+
+    public FakeNativeSession()
+    {
+        _client = new NativeBridgeClient(
+            Options.Create(new NativeBridgeOptions()),
+            Options.Create(new EconomySafetyOptions()),
+            new NativeBridgeState(),
+            NullLogger<NativeBridgeClient>.Instance);
+        _processMessage = typeof(NativeBridgeClient).GetMethod(
+                "ProcessMessage",
+                BindingFlags.Instance | BindingFlags.NonPublic) ??
+            throw new InvalidOperationException("Native Bridge frame handler was not found.");
+
+        var assembly = typeof(NativeBridgeClient).Assembly;
+        var fileIdentityType = assembly.GetType(
+                "PalControl.ControlApi.Infrastructure.NativeBridgeFileIdentity",
+                throwOnError: true)!;
+        var fileIdentity = Activator.CreateInstance(
+                fileIdentityType,
+                @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+                new string('b', 64),
+                152_378_880L) ??
+            throw new InvalidOperationException("Native Bridge file identity could not be created.");
+        var serverIdentityType = assembly.GetType(
+                "PalControl.ControlApi.Infrastructure.NativeBridgeServerProcessIdentity",
+                throwOnError: true)!;
+        _serverIdentity = Activator.CreateInstance(
+                serverIdentityType,
+                42u,
+                "S-1-5-18",
+                fileIdentity) ??
+            throw new InvalidOperationException("Native Bridge server identity could not be created.");
+
+        _pending = (ConcurrentDictionary<Guid, TaskCompletionSource<NativeBridgeResult>>)
+            (typeof(NativeBridgeClient).GetField(
+                 "_pending",
+                 BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(_client) ??
+             throw new InvalidOperationException("Native Bridge pending map was not found."));
+    }
+
+    public TaskCompletionSource<NativeBridgeResult> AddPending(Guid commandId)
+    {
+        var completion = new TaskCompletionSource<NativeBridgeResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pending.TryAdd(commandId, completion))
+        {
+            throw new InvalidOperationException("Fake command id was already pending.");
+        }
+        return completion;
+    }
+
+    public void Send(object frame)
+    {
+        object?[] arguments =
+        [
+            JsonSerializer.SerializeToUtf8Bytes(frame),
+            _helloReceived,
+            _serverIdentity
+        ];
+        try
+        {
+            _processMessage.Invoke(_client, arguments);
+            _helloReceived = (bool)arguments[1]!;
+        }
+        catch (TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+            throw;
+        }
+    }
+
+    public void Dispose() => _client.Dispose();
 }
 
 internal sealed class FakeNativeBridgeTransport : INativeBridgeCommandTransport

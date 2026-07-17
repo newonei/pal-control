@@ -4,7 +4,7 @@
 
 ## 固定版本与完整性
 
-当前已审查组合：
+历史已审查组合（仅适用于 Steam build `24088465`，不适用于当前 `24181105`）：
 
 | 项目 | 固定值 |
 | --- | --- |
@@ -14,7 +14,7 @@
 | `d3d9.dll` SHA-256 | `8638fef6628d8c4c221696739d1ccf55cbf2d1ca02111e35dbb707f792325f21` |
 | `PalDefender.dll` SHA-256 | `a88f4dfa056c2e4b1201d9a50ab0f74b13065257c4406bcfa42f97e2c60a3057` |
 
-Palworld 更新后不要直接沿用旧的 `d3d9.dll` 旁加载。`deploy/windows/start-palserver-guarded.ps1` 会同时核对 Steam build 和两个 DLL 的 SHA-256；任何未知组合都会拒绝启动，直到重新做兼容性评审并显式更新固定值。
+Palworld 更新后不要直接沿用旧的 `d3d9.dll` 旁加载。`deploy/windows/start-palserver-guarded.ps1` 当前仍故意固定上述历史组合，因此面对当前 build `24181105` 必须拒绝启动；不得把脚本默认值改成新 build 来绕过评审。只有完成当前版本 PalDefender 兼容性与结构化 receipt 实服验收后，才能显式更新固定值。
 
 ## 安装与启用
 

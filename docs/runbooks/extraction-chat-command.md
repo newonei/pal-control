@@ -1,5 +1,7 @@
 # 游戏内撤离点查询命令
 
+> **历史实现，禁止部署到当前版本。** 本页记录旧 `v1.0.0.100427` / dev36 的人工验收方法。当前 `v1.0.1.100619` / dev37-ro 候选在编译期关闭聊天 hook；不要按本页恢复旧 loader、构建旧 DLL 或重启当前服务器。当前只读候选的加载步骤只以 [`first-server-start.md`](first-server-start.md) 为准。
+
 基线版本：Palworld `v1.0.0.100427`、PalDefender `1.8.1`、PalControlNative
 `0.3.0-dev.36`。
 
@@ -50,10 +52,10 @@ MOD 使用 UE4SS 的 UFunction post hook 监听：
 命令没有经济副作用，不创建报价、不扣物品、不写钱包或账本。单个玩家两秒内重复输入只会
 回复一次，缓存最多 128 个玩家标识且会定期淘汰。
 
-## 构建与部署验收
+## 历史构建与部署验收记录（不可用于当前服）
 
-构建仍必须针对锁定的 UE4SS 提交 `c2ac246` 和游戏版本 `v1.0.0.100427`。部署 DLL
-并重启 PalServer 后，在 `ue4ss/UE4SS.log` 中确认：
+当时的构建针对 UE4SS 提交 `c2ac246` 和游戏版本 `v1.0.0.100427`；当时部署 DLL
+并重启 PalServer 后，会在 `ue4ss/UE4SS.log` 中确认以下历史日志。该步骤现在不得执行：
 
 ```text
 [PalControlNative] Read-only public extraction chat aliases registered (!extract and non-slash Chinese equivalents).

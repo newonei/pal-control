@@ -37,6 +37,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef PALCONTROL_ENABLE_WRITE_CAPABILITIES
+#define PALCONTROL_ENABLE_WRITE_CAPABILITIES 0
+#endif
+
 namespace PalControl::Game::Detail
 {
     struct InventoryMutationPayload
@@ -347,6 +351,35 @@ namespace
         nowTicks.LowPart = nowFileTime.dwLowDateTime;
         nowTicks.HighPart = nowFileTime.dwHighDateTime;
         return nowTicks.QuadPart >= static_cast<std::uint64_t>(utcTicks);
+    }
+
+    bool IsWriteOperation(std::string_view operation)
+    {
+        return operation == "players.progression.mutate" ||
+            operation == "inventory.mutate" ||
+            operation == "inventory.consume" ||
+            operation == "pals.mutate" ||
+            operation == "announcements.overlay.send" ||
+            operation == "announcements.banner.send" ||
+            operation == "ui.notifications.send";
+    }
+
+    bool HasControlCharacter(std::string_view value)
+    {
+        return std::ranges::any_of(value, [](unsigned char character)
+        {
+            return std::iscntrl(character) != 0;
+        });
+    }
+
+    bool IsLowerSha256(std::string_view value)
+    {
+        return value.size() == 64 &&
+            std::ranges::all_of(value, [](unsigned char character)
+            {
+                return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+            });
     }
 
     PalControl::Contracts::CommandResult Failure(
@@ -2929,6 +2962,47 @@ namespace PalControl::Game
     Contracts::CommandResult PalworldGameAdapter::Execute(
         const Contracts::CommandEnvelope& command) const
     {
+        const auto expired = IsDeadlineExpired(command.Deadline);
+        if (command.DeadlineUtcFileTimeTicks == 0 || !expired)
+        {
+            return Failure(
+                command,
+                "INVALID_COMMAND_DEADLINE",
+                "Every Native command requires a parsed RFC 3339 deadline with an explicit UTC offset.");
+        }
+        if (*expired)
+        {
+            return Failure(
+                command,
+                "COMMAND_DEADLINE_EXPIRED",
+                "The command deadline expired before game-thread execution.");
+        }
+
+        const bool writeOperation = IsWriteOperation(command.Operation);
+#if !PALCONTROL_ENABLE_WRITE_CAPABILITIES
+        if (writeOperation)
+        {
+            return Failure(
+                command,
+                "NATIVE_WRITE_CAPABILITIES_QUARANTINED",
+                "This runtime-bound Native candidate permits read-only probes only.");
+        }
+#endif
+        if (writeOperation &&
+            (!command.RequestHashVerified ||
+             command.IdempotencyKey.size() < 8 ||
+             command.IdempotencyKey.size() > 128 ||
+             HasControlCharacter(command.IdempotencyKey) ||
+             !IsLowerSha256(command.RequestHash) ||
+             command.ServerId.empty() || command.ServerId.size() > 128 ||
+             HasControlCharacter(command.ServerId) ||
+             command.PayloadJson.empty() || command.PayloadJson.size() > 262'144))
+        {
+            return Failure(
+                command,
+                "INVALID_NATIVE_WRITE_ENVELOPE",
+                "Native writes require a verified request hash, scoped idempotency key, server id, and bounded payload.");
+        }
         if (command.Operation == "players.probe")
         {
             return ProbePlayers(command);

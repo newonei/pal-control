@@ -189,6 +189,46 @@ try
         RequireNativeForPurchase = true
     }.IsValid(out _),
         "Native purchase was accepted without approved build and capabilities.");
+    Assert(new EconomySafetyOptions
+    {
+        RequireNativeForResourceExchange = true,
+        ApprovedNativeProtocolVersion = "1.1",
+        ApprovedNativeGameBuild = "v1.0.1.100619",
+        ApprovedNativeSteamBuild = "24181105",
+        ApprovedNativeModVersion = "0.4.0",
+        ApprovedNativeExecutableSha256 = new string('a', 64),
+        ApprovedNativeExecutableSize = 152_378_880,
+        ApprovedPalServerExecutablePath =
+            @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+        ApprovedPalServerProcessSid =
+            "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418",
+        ApprovedNativeDllSha256 = new string('b', 64),
+        ApprovedNativeDllSize = 869_888,
+        ApprovedUe4ssDllSha256 = new string('c', 64),
+        ApprovedUe4ssDllSize = 16_494_592,
+        ResourceExchangeNativeCapabilities = ["inventory.probe", "inventory.consume"]
+    }.IsValid(out _),
+        "A fully runtime-bound stable Native configuration was rejected.");
+    Assert(!new EconomySafetyOptions
+    {
+        RequireNativeForResourceExchange = true,
+        ApprovedNativeProtocolVersion = "1.1",
+        ApprovedNativeGameBuild = "v1.0.1.100619",
+        ApprovedNativeSteamBuild = "24181105",
+        ApprovedNativeModVersion = "0.4.0",
+        ApprovedNativeExecutableSha256 = new string('A', 64),
+        ApprovedNativeExecutableSize = 152_378_880,
+        ApprovedPalServerExecutablePath =
+            @"C:\PalServer\Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe",
+        ApprovedPalServerProcessSid =
+            "S-1-5-80-993063732-716721481-3728868849-3499021384-1810321418",
+        ApprovedNativeDllSha256 = new string('b', 64),
+        ApprovedNativeDllSize = 869_888,
+        ApprovedUe4ssDllSha256 = new string('c', 64),
+        ApprovedUe4ssDllSize = 16_494_592,
+        ResourceExchangeNativeCapabilities = ["inventory.probe", "inventory.consume"]
+    }.IsValid(out _),
+        "An uppercase/unpinned Native executable digest was accepted.");
     Assert(new ExtractionRconOptions { Enabled = false }.IsValid(out _),
         "Disabled RCON should not require a password or version probe.");
     Assert(!new ExtractionRconOptions { Enabled = true }.IsValid(out _),

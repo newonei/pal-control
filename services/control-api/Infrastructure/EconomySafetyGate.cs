@@ -17,14 +17,23 @@ public sealed class EconomySafetyOptions
 {
     public int DeliveryBacklogCapacity { get; init; } = 128;
     public long MinimumFreeSpaceBytes { get; init; } = 536_870_912;
-    public string ApprovedGameVersion { get; init; } = "1.0.0.100427";
+    public string ApprovedGameVersion { get; init; } = "1.0.1.100619";
     public string ApprovedPalDefenderVersion { get; init; } = "1.8.1.3933";
     public bool PalDefenderGrantReceiptSemanticsVerified { get; init; }
     public bool RequireNativeForPurchase { get; init; }
     public bool RequireNativeForResourceExchange { get; init; }
-    public string ApprovedNativeProtocolVersion { get; init; } = "1.0";
+    public string ApprovedNativeProtocolVersion { get; init; } = NativeBridgeProtocol.CurrentVersion;
     public string ApprovedNativeGameBuild { get; init; } = string.Empty;
+    public string ApprovedNativeSteamBuild { get; init; } = string.Empty;
     public string ApprovedNativeModVersion { get; init; } = string.Empty;
+    public string ApprovedNativeExecutableSha256 { get; init; } = string.Empty;
+    public long ApprovedNativeExecutableSize { get; init; }
+    public string ApprovedPalServerExecutablePath { get; init; } = string.Empty;
+    public string ApprovedPalServerProcessSid { get; init; } = string.Empty;
+    public string ApprovedNativeDllSha256 { get; init; } = string.Empty;
+    public long ApprovedNativeDllSize { get; init; }
+    public string ApprovedUe4ssDllSha256 { get; init; } = string.Empty;
+    public long ApprovedUe4ssDllSize { get; init; }
     public IReadOnlyList<string> PurchaseNativeCapabilities { get; init; } = [];
     public IReadOnlyList<string> ResourceExchangeNativeCapabilities { get; init; } = [];
 
@@ -51,9 +60,29 @@ public sealed class EconomySafetyOptions
         if ((RequireNativeForPurchase || RequireNativeForResourceExchange) &&
             (string.IsNullOrWhiteSpace(ApprovedNativeProtocolVersion) ||
              string.IsNullOrWhiteSpace(ApprovedNativeGameBuild) ||
-             string.IsNullOrWhiteSpace(ApprovedNativeModVersion)))
+             string.IsNullOrWhiteSpace(ApprovedNativeSteamBuild) ||
+             string.IsNullOrWhiteSpace(ApprovedNativeModVersion) ||
+             ApprovedNativeExecutableSha256 is not { Length: 64 } ||
+             ApprovedNativeExecutableSha256.Any(character =>
+                 character is not (>= '0' and <= '9') and
+                 not (>= 'a' and <= 'f')) ||
+             ApprovedNativeExecutableSize <= 0 ||
+             !NativeBridgeProtocol.TryNormalizeWindowsExecutablePath(
+                 ApprovedPalServerExecutablePath,
+                 out _) ||
+             !NativeBridgeProtocol.IsValidWindowsSid(ApprovedPalServerProcessSid) ||
+             ApprovedNativeDllSha256 is not { Length: 64 } ||
+             ApprovedNativeDllSha256.Any(character =>
+                 character is not (>= '0' and <= '9') and
+                 not (>= 'a' and <= 'f')) ||
+             ApprovedNativeDllSize <= 0 ||
+             ApprovedUe4ssDllSha256 is not { Length: 64 } ||
+             ApprovedUe4ssDllSha256.Any(character =>
+                 character is not (>= '0' and <= '9') and
+                 not (>= 'a' and <= 'f')) ||
+             ApprovedUe4ssDllSize <= 0))
         {
-            error = "An enabled Native economy adapter requires approved protocol, game-build, and mod versions.";
+            error = "An enabled Native economy adapter requires approved protocol, game/Steam build, mod version, PalServer canonical path/process SID, and executable/Native/UE4SS size/SHA-256 identities.";
             return false;
         }
         if ((RequireNativeForPurchase && PurchaseNativeCapabilities.Count == 0) ||
@@ -535,13 +564,51 @@ public sealed class EconomySafetyDependencyProbe : IEconomySafetyDependencyProbe
                 _safetyOptions.ApprovedNativeGameBuild,
                 StringComparison.Ordinal) ||
             !string.Equals(
+                snapshot.SteamBuild,
+                _safetyOptions.ApprovedNativeSteamBuild,
+                StringComparison.Ordinal) ||
+            !string.Equals(
                 snapshot.ModVersion,
                 _safetyOptions.ApprovedNativeModVersion,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                snapshot.RuntimeExecutableSha256,
+                _safetyOptions.ApprovedNativeExecutableSha256,
+                StringComparison.Ordinal) ||
+            snapshot.RuntimeExecutableSize != _safetyOptions.ApprovedNativeExecutableSize ||
+            !NativeBridgeProtocol.PathsEqual(
+                snapshot.RuntimeExecutablePath,
+                _safetyOptions.ApprovedPalServerExecutablePath) ||
+            !string.Equals(
+                snapshot.RuntimeProcessSid,
+                _safetyOptions.ApprovedPalServerProcessSid,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                snapshot.RuntimeNativeDllSha256,
+                _safetyOptions.ApprovedNativeDllSha256,
+                StringComparison.Ordinal) ||
+            snapshot.RuntimeNativeDllSize != _safetyOptions.ApprovedNativeDllSize ||
+            !string.Equals(
+                snapshot.RuntimeUe4ssDllSha256,
+                _safetyOptions.ApprovedUe4ssDllSha256,
+                StringComparison.Ordinal) ||
+            snapshot.RuntimeUe4ssDllSize != _safetyOptions.ApprovedUe4ssDllSize)
         {
             blockers.Add(Blocker(
                 "NATIVE_ECONOMY_ADAPTER_VERSION_NOT_APPROVED",
-                "Native economy adapter 的协议、游戏或 MOD 版本不在批准列表中。"));
+                "Native economy adapter 的协议、游戏/Steam build、MOD、宿主 EXE 路径/进程 SID、Native DLL 或 UE4SS DLL 不在批准列表中。"));
+        }
+        if (!snapshot.RuntimeIdentityVerified)
+        {
+            blockers.Add(Blocker(
+                "NATIVE_RUNTIME_IDENTITY_UNVERIFIED",
+                "Native adapter 未证明当前 PalServer 可执行文件与审核目标一致。"));
+        }
+        if (!snapshot.WriteEnabled)
+        {
+            blockers.Add(Blocker(
+                "NATIVE_WRITE_CAPABILITIES_QUARANTINED",
+                "当前 Native build 仅允许只读探针，不能执行经济写入。"));
         }
         var missing = requiredCapabilities
             .Where(capability => !snapshot.Capabilities.Contains(capability))

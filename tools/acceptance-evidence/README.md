@@ -21,6 +21,10 @@ Run from the repository root:
 $project = "tools/acceptance-evidence/PalControl.AcceptanceEvidence.csproj"
 
 dotnet run --project $project --configuration Release -- list-gates
+dotnet run --project $project --configuration Release -- create-campaign `
+  --output C:\acceptance\campaign-2026w30
+dotnet run --project $project --configuration Release -- inspect-campaign `
+  --root C:\acceptance\campaign-2026w30
 dotnet run --project $project --configuration Release -- create-template `
   --gate p0-04-native-persistence `
   --output C:\acceptance\campaign-2026w30\p0-04-native-persistence\manifest.json
@@ -44,9 +48,16 @@ dotnet run --project $project --configuration Release -- verify `
   --manifest C:\acceptance\campaign-2026w30\p0-04-native-persistence\manifest.json `
   --trust-store C:\acceptance\policy\identity-trust-store.json `
   --trust-store-sha256 sha256:<independently-pinned-digest>
+
+dotnet run --project $project --configuration Release -- verify-campaign `
+  --root C:\acceptance\campaign-2026w30 `
+  --trust-store C:\acceptance\policy\identity-trust-store.json `
+  --trust-store-sha256 sha256:<independently-pinned-digest>
 ```
 
 `create-template` uses create-new semantics and never overwrites a manifest. It intentionally emits `evidenceMode: template`, `isSynthetic: true`, zero hashes, pending results and absent artifact files. Verification must fail until operators replace every template field with observed live values.
+
+`create-campaign` atomically creates a new directory outside the Git repository and includes every catalog gate: 13 P0, 6 P1 and 3 P2. It creates `campaign-index.json`, one manifest/evidence directory per gate, and the final P0 review at `p0-release-review.json` with exact in-root paths to all twelve prerequisite P0 manifests. It refuses existing destinations and repository-local outputs. `inspect-campaign` is deliberately non-authoritative: every result has `verified: false` and it can only distinguish missing, template, pending or ready-for-verification files. Only `verify-campaign` with an externally pinned trust store attempts all 22 cryptographic verifications and exits `0` when every gate—including an independently approved PostgreSQL N/A decision when applicable—passes.
 
 The trust-store SHA-256 is an external policy pin. Obtain it from the protected release record or another authenticated channel; never copy it from the manifest being verified. Every subject in the manifest must exactly match an active trust-store mapping. Key ids, subjects and imported canonical P-256 public-key fingerprints are globally unique: two identities cannot reuse the same EC key under different base64 or metadata. The executor and reviewer must use different keys and different canonical public keys; both signatures use `ecdsa-p256-sha256-p1363`. The payload binds the payload schema, trust-store digest, both key ids and every manifest field except the two signatures themselves. Private keys remain in the organization's HSM, signing service or OS key store; this repository deliberately has no production private-key signer.
 

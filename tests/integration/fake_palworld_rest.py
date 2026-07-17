@@ -27,7 +27,7 @@ class FakePalworldHandler(BaseHTTPRequestHandler):
     last_save_snapshot: str | None = None
     world_guid = "ABCDEF0123456789ABCDEF0123456789"
     pd_token = "integration-pd-token"
-    pd_game_version = "1.0.0.100427"
+    pd_game_version = "1.0.1.100619"
     pd_adapter_version = "1.8.1.3933"
     pd_give_count = 0
     rcon_delete_count = 0

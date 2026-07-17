@@ -1634,6 +1634,9 @@ internal static class EvidenceVerifier
         return fullPath;
     }
 
+    internal static void RejectReparsePath(string path, string code) =>
+        RejectReparseChain(path, code);
+
     internal static string ResolveContainedFile(string root, string relativePath, string code)
     {
         if (string.IsNullOrWhiteSpace(relativePath) ||

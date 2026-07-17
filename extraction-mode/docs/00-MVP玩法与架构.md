@@ -89,7 +89,7 @@ MVP 不包含：
 ### 2.2 不能误判为现成能力
 
 - `POST give/items` 只能发放，不能回收资源兑换物品。
-- Native 开发版已实现扣物语义，但在完成真实玩家“扣物 → 保存 → 停服 → 重启 → 重登”验收前仅声明 `inventory.consume.experimental`，生产资源兑换闸门必须保持关闭。
+- 旧 dev36 开发版曾实现 experimental 扣物语义；当前 dev37-ro 是尚未实服探测的只读候选，完全不声明 consume/write capability。只有只读探针通过、另行评审写候选并完成真实玩家“扣物 → 保存 → 停服 → 重启 → 重登”验收后，才可考虑打开生产资源兑换闸门。
 - Native 不能验证全部请求槽位、实际扣除数量不等于请求、回读不完整、持久化证据缺失或连接结果不确定时，一律不入账且不自动重扣。
 - 存档中心只保存和备份，不会自动创建/切换新世界。
 - 当前已实现 Steam OpenID 与游戏内验证码双层绑定、HttpOnly Cookie、CSRF、Origin/限流和当前周 PlayerUID 绑定；Production/PublicSteam 强制官方 HTTPS OP 与精确 realm/return_to，但仍需在正式域名完成 TLS、代理回调、Cookie 和重放黑盒验收。

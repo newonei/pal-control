@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "matrixVersion": "1.0.0",
-  "generatedAt": "2026-07-15T19:00:00Z",
-  "canonicalSha256": "3edd0fe96d70a8438362afaa0d6a8b8638797988275abaa02f00538055f68342",
+  "matrixVersion": "1.1.0",
+  "generatedAt": "2026-07-16T23:18:56Z",
+  "canonicalSha256": "681ada6c9432006cb412b117a8fd7223022641efa8f32ddbdccd0e5225b58048",
   "combinations": [
     {
       "id": "pal-1.0.0.100427-native-dev36",
@@ -24,7 +24,7 @@
       "evidence": [
         {
           "kind": "artifact",
-          "source": "mods/pal-control-native/dependencies.lock.json",
+          "source": "https://github.com/newonei/pal-control/blob/1e0dd1ecb569f84e720f74bbafe4386137379b97/mods/pal-control-native/dependencies.lock.json",
           "observedAt": "2026-07-15T03:07:00Z",
           "summary": "Repository lock pins Palworld target, full UE4SS commit and the reviewed Native DLL digest.",
           "artifactSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
@@ -44,14 +44,14 @@
       "steamBuild": "24181105",
       "palDefenderVersion": "unknown",
       "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
-      "nativeProtocolVersion": "1.0",
-      "nativeModVersion": "0.3.0-dev.36",
+      "nativeProtocolVersion": "1.1",
+      "nativeModVersion": "0.3.0-dev.37-ro",
       "bridgeAvailability": "unavailable",
       "capabilities": [
         "official-rest.read"
       ],
       "status": "quarantined",
-      "verifiedAt": "2026-07-15T06:30:00Z",
+      "verifiedAt": "2026-07-16T23:18:56Z",
       "evidence": [
         {
           "kind": "runtime",
@@ -62,12 +62,12 @@
         {
           "kind": "artifact",
           "source": "mods/pal-control-native/dependencies.lock.json",
-          "observedAt": "2026-07-15T06:30:00Z",
-          "summary": "The disk Native artifact still matches the dev36 digest, but it is not loaded into the updated process and does not prove runtime compatibility.",
-          "artifactSha256": "6ef1dcd71df9ffc3458a20560e10264f1f795753c2adc8c2e109889a552de44a"
+          "observedAt": "2026-07-16T23:18:56Z",
+          "summary": "Two independent guarded builds reproduced the same 886272-byte protocol 1.1 read-only dev37-ro DLL after session-generation, absolute-deadline, and exact request-payload hash hardening, with Cargo locked and exact fetched dependency commits. The artifact is bound to the exact current PalServer executable but is not deployed, so it does not prove runtime compatibility.",
+          "artifactSha256": "c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7"
         }
       ],
-      "notes": "Unsupported runtime combination. The old loader remains quarantined; do not restore it. ABI and schema adaptation plus read-only probes are required before any write-capability acceptance."
+      "notes": "Unprobed read-only candidate. The old loader remains quarantined and the new artifact is not deployed. A controlled current-version runtime load plus schema/inventory probes is still required before producing p0-04-current-native-probe evidence; write capabilities remain disabled."
     }
   ]
 }

@@ -26,7 +26,7 @@ public sealed class ExtractionRconOptions
 
     public int TimeoutSeconds { get; init; } = 5;
 
-    public string ApprovedGameVersion { get; init; } = "1.0.0.100427";
+    public string ApprovedGameVersion { get; init; } = "1.0.1.100619";
 
     public string ApprovedPalDefenderVersion { get; init; } = "1.8.1.3933";
 

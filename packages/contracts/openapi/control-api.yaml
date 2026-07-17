@@ -5856,7 +5856,23 @@ components:
           type: integer
     NativeBridgeStatus:
       type: object
-      required: [serverId, connected, capabilities, probes]
+      required:
+        - serverId
+        - connected
+        - protocolVersion
+        - gameBuild
+        - steamBuild
+        - modVersion
+        - runtimeExecutableSha256
+        - runtimeExecutableSize
+        - runtimeNativeDllSha256
+        - runtimeNativeDllSize
+        - runtimeUe4ssDllSha256
+        - runtimeUe4ssDllSize
+        - runtimeIdentityVerified
+        - writeEnabled
+        - capabilities
+        - probes
       properties:
         serverId:
           type: string
@@ -5866,8 +5882,35 @@ components:
           type: [string, "null"]
         gameBuild:
           type: [string, "null"]
+        steamBuild:
+          type: [string, "null"]
         modVersion:
           type: [string, "null"]
+        runtimeExecutableSha256:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        runtimeExecutableSize:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+        runtimeNativeDllSha256:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        runtimeNativeDllSize:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+        runtimeUe4ssDllSha256:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        runtimeUe4ssDllSize:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+        runtimeIdentityVerified:
+          type: boolean
+        writeEnabled:
+          type: boolean
         capabilities:
           type: array
           items:

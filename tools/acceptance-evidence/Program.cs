@@ -119,12 +119,61 @@ try
             }, EvidenceVerifier.SerializerOptions));
             return 0;
         }
+        case "create-campaign":
+        {
+            commandLine.RequireOnly("output");
+            var schema = EvidenceVerifier.LoadTrustedSchema();
+            var catalog = EvidenceVerifier.LoadTrustedCatalog(schema);
+            var summary = CampaignManager.Create(
+                commandLine.Require("output"),
+                catalog,
+                schema,
+                DateTimeOffset.UtcNow);
+            Console.WriteLine(JsonSerializer.Serialize(
+                summary,
+                EvidenceVerifier.SerializerOptions));
+            return 0;
+        }
+        case "inspect-campaign":
+        {
+            commandLine.RequireOnly("root");
+            var schema = EvidenceVerifier.LoadTrustedSchema();
+            var catalog = EvidenceVerifier.LoadTrustedCatalog(schema);
+            var summary = CampaignManager.Inspect(
+                commandLine.Require("root"),
+                catalog);
+            Console.WriteLine(JsonSerializer.Serialize(
+                summary,
+                EvidenceVerifier.SerializerOptions));
+            return 0;
+        }
+        case "verify-campaign":
+        {
+            commandLine.RequireOnly("root", "trust-store", "trust-store-sha256");
+            var schema = EvidenceVerifier.LoadTrustedSchema();
+            var catalog = EvidenceVerifier.LoadTrustedCatalog(schema);
+            var trustStore = EvidenceVerifier.LoadTrustStore(
+                commandLine.Require("trust-store"),
+                commandLine.Require("trust-store-sha256"));
+            var summary = CampaignManager.Verify(
+                commandLine.Require("root"),
+                catalog,
+                schema,
+                trustStore,
+                DateTimeOffset.UtcNow);
+            Console.WriteLine(JsonSerializer.Serialize(
+                summary,
+                EvidenceVerifier.SerializerOptions));
+            return summary.Complete ? 0 : 2;
+        }
         default:
             throw new ArgumentException(
                 "Usage: verify --manifest <manifest.json> --trust-store <identity-trust-store.json> --trust-store-sha256 <sha256:...> | " +
                 "signature-payload --manifest <manifest.json> --trust-store-sha256 <sha256:...> --executor-key <key-id> --reviewer-key <key-id> --output <payload.json> | " +
                 "hash --file <artifact> | combination-id --manifest <manifest.json> | list-gates | " +
-                "create-template --gate <gate-id> --output <manifest.json>");
+                "create-template --gate <gate-id> --output <manifest.json> | " +
+                "create-campaign --output <new-directory> | inspect-campaign --root <campaign-directory> | " +
+                "verify-campaign --root <campaign-directory> --trust-store <identity-trust-store.json> --trust-store-sha256 <sha256:...>");
     }
 }
 catch (Exception exception) when (

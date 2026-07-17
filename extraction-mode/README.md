@@ -53,10 +53,10 @@
 | 发放物品 | PalDefender `POST give/items/{playerIdentifier}` 已接入逐物品命令与不可变 receipt | 作为商城发货通道；partial/uncertain 进入人工对账 |
 | 发放经验和点数 | PalDefender `POST give/progression/{playerIdentifier}` 已接入 | 可用于任务奖励，不属于首发商城必需项 |
 | 命令审计与 `uncertain` 语义 | PalDefender command、租约、死信和不可变事件已进入 `extraction-commerce.db`；旧 JSONL 一次性迁移后不再是权威 | `dispatched` 重启后进入 `uncertain`，不能盲目重发；死信触发购买熔断并人工复核 |
-| 定向回收物品 | Native dev36 已实现完整快照 `inventory.consume`、回滚和安全清空普通静态槽位 | Production Native-only；当前 experimental 在真实持久化验收前 fail-closed |
+| 定向回收物品 | 旧 dev36 曾实现 experimental 完整快照 `inventory.consume`、回滚和普通静态槽位清空；当前 dev37-ro 只读候选不发布写能力 | Production Native-only；先完成当前版本只读探针，再另行评审写候选并完成真实持久化验收 |
 | RCON 运行状态 | 可选开发诊断通道 | Windows 防火墙阻断远程来源；不参与正式资源兑换 |
 | 清空背包 | PalDefender RCON 提供 `/clearinv` | 破坏范围过大，不用于自动资源兑换，只允许开发服/人工应急 |
-| 精确原子消费槽位 | Native 与 Control API 已接入完整快照、稳定 request hash、持久回执和跨重启幂等 | 仍需真实保存/重启/重登后才能从 experimental 提升 stable |
+| 精确原子消费槽位 | Control API 与历史写适配器已接入完整快照、稳定 request hash、持久回执和跨重启幂等；dev37-ro 不执行这些写操作 | 仍需独立写候选通过真实保存/重启/重登后才能声明 stable |
 | 永久账户、钱包、订单、赛季 | 已实现本机 SQLite 事务数据库、版本化 migration、不可负账本、PalDefender outbox 与一致性快照 | 单机候选可用；多实例不在当前 MVP，购买事务与命令接收靠持久 delivery/receipt 和确定性 key 跨事务恢复 |
 | 在线商城与可靠发货 | 已实现页面、幂等订单、逐物品 PalDefender receipt、明确失败退款和 partial/uncertain 对账 | 固定 PalDefender 版本的真实回执语义仍是上线门禁 |
 | 版本化内容与库存 | 草稿/diff/严格校验、不可变版本、current pointer 与完整商品投影同事务激活、发布/回滚、显式分类/标签/推荐位、个人/全服库存、动态开放区/风险/事件/限时热点证据和旧 offer 拒绝已有自动化 | 候选点 2 尚未完成真实坐标验收；真实内容发布/恢复演练尚未完成 |

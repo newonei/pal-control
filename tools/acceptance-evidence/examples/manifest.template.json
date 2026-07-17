@@ -5,7 +5,7 @@
   "manifestId": "ae-template-p0-07-real-admin-rbac",
   "gateId": "p0-07-real-admin-rbac",
   "gateCatalogVersion": "1.0.0",
-  "gateCatalogSha256": "sha256:34fee0a70c9bb28ca11c37afc44abe3c219b7790694f289a820b9ad23205894c",
+  "gateCatalogSha256": "sha256:84fc7c8b629c5aefde5fc840cb9995e0aa4f8ca6f73db642a057ba28a0333073",
   "evidenceMode": "template",
   "environment": {
     "environmentId": "replace-production-environment",

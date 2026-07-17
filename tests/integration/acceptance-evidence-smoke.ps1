@@ -228,6 +228,33 @@ function New-Artifact(
 try {
     [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
     $script:privateKeys = @{}
+    $catalogDocument = [IO.File]::ReadAllText($catalog) | ConvertFrom-Json
+    $todoLines = [IO.File]::ReadAllLines((Join-Path $repositoryRoot "TODO.md"))
+    $referencedTodoLines = [Collections.Generic.HashSet[int]]::new()
+    foreach ($gate in $catalogDocument.gates) {
+        $todoReferences = @($gate.todoReferences | Where-Object {
+            [string]$_ -match '^TODO\.md:[1-9][0-9]*$'
+        })
+        if ($todoReferences.Count -ne 1) {
+            throw "Gate '$($gate.id)' must have exactly one TODO.md:<line> reference."
+        }
+        $lineNumber = [int](([string]$todoReferences[0]).Substring("TODO.md:".Length))
+        if ($lineNumber -gt $todoLines.Count -or
+            -not $referencedTodoLines.Add($lineNumber)) {
+            throw "Gate '$($gate.id)' has an invalid or duplicate TODO line reference."
+        }
+        $line = $todoLines[$lineNumber - 1]
+        $marker = "<!-- gate:$($gate.id) -->"
+        if ($line -notmatch '^- \[ \]' -or -not $line.Contains($marker)) {
+            throw "Gate '$($gate.id)' does not reference its marked unchecked TODO item."
+        }
+    }
+    $markedTodoCount = @($todoLines | Where-Object {
+        $_ -match '<!-- gate:[a-z0-9-]+ -->'
+    }).Count
+    if ($markedTodoCount -ne $catalogDocument.gates.Count) {
+        throw "TODO gate marker count does not match the acceptance catalog."
+    }
     & dotnet restore $project --nologo
     if ($LASTEXITCODE -ne 0) { throw "Acceptance evidence tool restore failed." }
     & dotnet restore $policyHarnessProject --nologo
@@ -859,10 +886,54 @@ try {
     Invoke-EvidenceTool "generated-template-rejected" @("verify", "--manifest", $generatedTemplate, "--schema", $schema, "--catalog", $catalog) 2 "ACCEPTANCE_EVIDENCE_NOT_LIVE" | Out-Null
     Invoke-EvidenceTool "template-no-overwrite" @("create-template", "--gate", "p0-04-native-persistence", "--output", $generatedTemplate, "--schema", $schema, "--catalog", $catalog) 2 "ACCEPTANCE_CLI_ERROR" | Out-Null
 
+    $campaignRoot = Join-Path $tempRoot "generated-campaign"
+    $campaignCreate = Invoke-EvidenceTool "create-campaign" `
+        @("create-campaign", "--output", $campaignRoot) 0
+    $campaignCreateSummary = $campaignCreate.Stdout | ConvertFrom-Json
+    if ($campaignCreateSummary.gateCount -ne 22 -or
+        $campaignCreateSummary.p0Count -ne 13 -or
+        $campaignCreateSummary.p1Count -ne 6 -or
+        $campaignCreateSummary.p2Count -ne 3) {
+        throw "Campaign creation did not include the complete 13/6/3 external-gate catalog."
+    }
+    $campaignInspect = Invoke-EvidenceTool "inspect-campaign" `
+        @("inspect-campaign", "--root", $campaignRoot) 0
+    $campaignInspectSummary = $campaignInspect.Stdout | ConvertFrom-Json
+    if ($campaignInspectSummary.complete -or
+        $campaignInspectSummary.verifiedGateCount -ne 0 -or
+        @($campaignInspectSummary.gates | Where-Object status -eq "template").Count -ne 22) {
+        throw "Campaign inspection treated generated templates as verified evidence."
+    }
+    $releaseReviewPath = Join-Path $campaignRoot "p0-release-review.json"
+    $releaseReview = [IO.File]::ReadAllText($releaseReviewPath) | ConvertFrom-Json
+    if ($releaseReview.relatedEvidence.Count -ne 12 -or
+        @($releaseReview.relatedEvidence | Where-Object {
+            $_.manifestPath -match '(^|/)\.\.(/|$)' -or
+            $_.manifestPath -match 'replace-' -or
+            -not (Test-Path -LiteralPath (Join-Path $campaignRoot `
+                ([string]$_.manifestPath).Replace('/', [IO.Path]::DirectorySeparatorChar)))
+        }).Count -ne 0) {
+        throw "P0 release-review template does not bind all twelve in-root P0 manifest paths."
+    }
+    $campaignVerify = Invoke-EvidenceTool "verify-template-campaign" @(
+        "verify-campaign",
+        "--root", $campaignRoot,
+        "--trust-store", $script:trustStorePath,
+        "--trust-store-sha256", $script:trustStoreHash) 2
+    $campaignVerifySummary = $campaignVerify.Stdout | ConvertFrom-Json
+    if ($campaignVerifySummary.complete -or
+        $campaignVerifySummary.verifiedGateCount -ne 0 -or
+        $campaignVerifySummary.gates.Count -ne 22) {
+        throw "verify-campaign did not fail every untouched template closed."
+    }
+    Invoke-EvidenceTool "campaign-no-overwrite" `
+        @("create-campaign", "--output", $campaignRoot) `
+        2 "ACCEPTANCE_CLI_ERROR" | Out-Null
+
     Write-Host ("PASS: acceptance evidence v1 embedded policy, bounded duplicate-safe manifests, " +
         "unique pinned P-256 identities, dual signatures, canonical combination binding, " +
-        "strictly recomputed soak samples, deny-write lease race/TOCTOU rehash, sensitive scan " +
-        "and rejected templates.")
+        "strictly recomputed soak samples, deny-write lease race/TOCTOU rehash, sensitive scan, " +
+        "complete 22-gate campaign scaffolding, and rejected templates.")
 }
 finally {
     if ($null -ne $script:privateKeys) {

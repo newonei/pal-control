@@ -271,15 +271,30 @@ public sealed class StartupSecurityValidator : IValidateOptions<StartupSecurityV
                     "An enabled Native adapter requires a simple PipeName of 1-128 characters.");
             }
             if (native.ConnectTimeoutSeconds is < 1 or > 30 ||
-                native.CommandTimeoutSeconds is < 1 or > 120)
+                native.CommandTimeoutSeconds is < 1 or > 30)
             {
                 failures.Add(
-                    "An enabled Native adapter requires a 1-30 second connect timeout and a 1-120 second command timeout.");
+                    "An enabled Native adapter requires 1-30 second connect and command timeouts.");
             }
             if (native.MaxFrameBytes is < 1_024 or > 16_777_216)
             {
                 failures.Add(
                     "An enabled Native adapter requires MaxFrameBytes between 1 KiB and 16 MiB.");
+            }
+            if (!NativeBridgeProtocol.TryNormalizeWindowsExecutablePath(
+                    safety.ApprovedPalServerExecutablePath,
+                    out _))
+            {
+                failures.Add(
+                    "An enabled Native adapter requires ExtractionMode:Safety:" +
+                    "ApprovedPalServerExecutablePath to be a canonical absolute Windows .exe path.");
+            }
+            if (!NativeBridgeProtocol.IsValidWindowsSid(
+                    safety.ApprovedPalServerProcessSid))
+            {
+                failures.Add(
+                    "An enabled Native adapter requires ExtractionMode:Safety:" +
+                    "ApprovedPalServerProcessSid to be a canonical Windows SID.");
             }
         }
     }
