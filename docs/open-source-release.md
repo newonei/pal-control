@@ -91,7 +91,7 @@
 - [x] 两个互相独立的外部 UE4SS prepared source 与全新构建目录均在 Cargo `--locked` 和全部源码/子模块守卫下得到 `886272` 字节、SHA-256 `c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7`，与仓库锁完全一致；未部署或启动真实服务；
 - [x] 人工审阅本轮 71 个暂存路径：无运行数据、存档、凭据、构建产物或第三方二进制，无机器专用用户路径；最大暂存文件约 383 KiB，仓库既有两份 7.06 MiB 地图仍按已记录的 MIT 来源保留；
 - [x] 从本地候选提交创建独立干净 clone，重新执行 `npm ci`、两个前端生产构建、完整 `npm test` 与 Control API Release 编译；全部通过，且未复用工作区依赖或构建输出；
-- [ ] 推送后核对 GitHub Actions；该项不阻止首次推送，但失败时禁止创建 Release 或宣称生产就绪。
+- [x] 推送后核对 GitHub Actions；本轮代码候选的 secret scan 与 Windows build/test 两个 job 均已通过。该结果只证明公开候选可构建、可测试，不替代 `TODO.md` 中 22 个真实环境验收门禁。
 
 本项目已采用 MIT。若未来更换许可证，必须同步评估既有贡献者授权，并统一根许可证、README、包元数据与 OpenAPI 声明。
 
