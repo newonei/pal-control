@@ -98,8 +98,22 @@ Assert-Contains $matrix '"steamBuild": "24181105"' `
     "The current observed Steam build is missing."
 Assert-Contains $matrix '"status": "quarantined"' `
     "The current unsupported runtime is not quarantined."
-Assert-Contains $matrix '"bridgeAvailability": "unavailable"' `
-    "The current unavailable Bridge is inaccurately represented."
+Assert-Contains $matrix '"nativeModVersion": "0.3.0-dev.37-ro"' `
+    "The superseded dev37-ro observation is missing."
+Assert-Contains $matrix 'persisted offline inventories as live inventory' `
+    "The dev37-ro quarantine reason is missing."
+Assert-Contains $matrix '"nativeModVersion": "0.3.0-dev.38-ro"' `
+    "The historical dev38-ro runtime observation is missing."
+Assert-Contains $matrix '"bridgeAvailability": "available"' `
+    "The historical read-only Bridge availability is inaccurately represented."
+Assert-Contains $matrix '"nativeModVersion": "0.3.0-dev.39-ro"' `
+    "The current dev39-ro source candidate is missing."
+Assert-Contains $matrix '"bridgeAvailability": "unknown"' `
+    "The unvalidated dev39-ro Bridge availability is inaccurately represented."
+Assert-Contains $matrix 'c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34' `
+    "The dev39-ro deterministic artifact digest is missing."
+Assert-Contains $matrix 'Runtime loading and the fixed probe suite have not yet been performed for dev39-ro.' `
+    "The dev39-ro runtime-validation boundary is missing."
 Assert-Contains $schema '"additionalProperties": false' `
     "The compatibility schema does not reject hash-polluting fields."
 

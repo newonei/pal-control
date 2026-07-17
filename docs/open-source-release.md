@@ -88,10 +88,12 @@
 - [x] 修正明显过时的运行文档；当前仓库 71 个 Markdown 文件的相对链接与本轮 9 个变更 JSON 文件均已复核；
 - [x] 当前工作树重新运行两个前端生产构建、OpenAPI、管理台 21/21、玩家端 32/32、Chromium 15/15、统一 contract/integration 52/52 和 Control API Release；全部通过，OpenAPI 仅保留 63 条既有非阻断警告，Control API 为 0 警告、0 错误；
 - [x] 使用 Gitleaks CLI `8.30.1` 对候选创建前全部 25 个可达提交和完整 staged 树扫描，均为 0 泄漏；被忽略的多 GB 外部 Native 构建目录不属于公开候选，并由 ignore 门禁单独核对；
-- [x] 两个互相独立的外部 UE4SS prepared source 与全新构建目录均在 Cargo `--locked` 和全部源码/子模块守卫下得到 `886272` 字节、SHA-256 `c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7`，与仓库锁完全一致；未部署或启动真实服务；
+- [x] 历史 dev37-ro 在两个互相独立的外部 UE4SS prepared source 与全新构建目录中得到一致的 `886272` 字节、SHA-256 `c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7`；后续受控探针发现它会把持久离线库存误当作 live inventory，现已 `superseded/quarantined`，不得重新部署；
+- [x] 历史 dev38-ro 在两个互相独立、Cargo `--locked` 且通过全部源码/子模块守卫的全新目录中均得到字节一致的 `888320` 字节 DLL，SHA-256 `012f84929448321196734b0bdc1f1b6a899a6f7a0aa87564d99b6e4c40b868aa`；精确产物受控实服加载后 9 项非玩家只读操作成功、3 项 live-player 探针因无人在线拒绝、0 项意外失败。该版本现已 `superseded/quarantined`，不得重新部署或作为当前运行证据；
+- [x] 当前 dev39-ro 在两个互相独立、Cargo `--locked` 且通过全部源码/子模块守卫的全新目录中均得到字节一致的 `893440` 字节 DLL，SHA-256 `c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34`；该精确产物尚未实服加载或运行固定探针套件，Bridge 可用性仍是 unknown。在线玩家三项、PalDefender 组合、独立复核及真实写持久化均未通过；
 - [x] 人工审阅本轮 71 个暂存路径：无运行数据、存档、凭据、构建产物或第三方二进制，无机器专用用户路径；最大暂存文件约 383 KiB，仓库既有两份 7.06 MiB 地图仍按已记录的 MIT 来源保留；
 - [x] 从本地候选提交创建独立干净 clone，重新执行 `npm ci`、两个前端生产构建、完整 `npm test` 与 Control API Release 编译；全部通过，且未复用工作区依赖或构建输出；
-- [x] 推送后核对 GitHub Actions；本轮代码候选的 secret scan 与 Windows build/test 两个 job 均已通过。该结果只证明公开候选可构建、可测试，不替代 `TODO.md` 中 22 个真实环境验收门禁。
+- [x] 最近已推送基线的 GitHub Actions secret scan 与 Windows build/test 两个 job 均已通过；每次推送新候选仍须重新核对。CI 只证明公开候选可构建、可测试，不替代 `TODO.md` 中 22 个真实环境验收门禁。
 
 本项目已采用 MIT。若未来更换许可证，必须同步评估既有贡献者授权，并统一根许可证、README、包元数据与 OpenAPI 声明。
 

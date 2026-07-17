@@ -33,6 +33,14 @@ $nativeBuildScriptPath = Join-Path $nativeRoot `
 $nativePrepareScriptPath = Join-Path $nativeRoot `
     "scripts\Prepare-Ue4ssSource.ps1"
 $nativeProbeScriptPath = Join-Path $repositoryRoot "tools\native-bridge-probe.ps1"
+$nativeDeploymentScriptPath = Join-Path $repositoryRoot `
+    "deploy\windows\activate-client-overlay.ps1"
+$nativeProbeStartScriptPath = Join-Path $repositoryRoot `
+    "deploy\windows\start-native-probe-palserver.ps1"
+$nativeProbeStopScriptPath = Join-Path $repositoryRoot `
+    "deploy\windows\stop-native-probe-palserver.ps1"
+$nativeProbeSuiteScriptPath = Join-Path $repositoryRoot `
+    "tools\run-native-bridge-probe-suite.ps1"
 $nativeClientPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\NativeBridgeClient.cs"
 $bridgeSmokePath = Join-Path $repositoryRoot "tools\bridge-smoke\Program.cs"
@@ -230,6 +238,46 @@ Assert-Contract ($openApi.IndexOf(
         [StringComparison]::Ordinal) -ge 0) `
     "the generic settlement status adapter enum is missing."
 
+$nativeInventoryProbeStart = $openApi.IndexOf(
+    '    NativeInventoryProbe:',
+    [StringComparison]::Ordinal)
+$nativeInventoryObjectStart = $openApi.IndexOf(
+    '    NativeInventoryObject:',
+    $nativeInventoryProbeStart,
+    [StringComparison]::Ordinal)
+$nativeInventoryContainerStart = $openApi.IndexOf(
+    '    NativeInventoryContainer:',
+    $nativeInventoryObjectStart,
+    [StringComparison]::Ordinal)
+Assert-Contract ($nativeInventoryProbeStart -ge 0 -and
+        $nativeInventoryObjectStart -gt $nativeInventoryProbeStart -and
+        $nativeInventoryContainerStart -gt $nativeInventoryObjectStart) `
+    "OpenAPI Native inventory probe/object schema blocks are malformed."
+$nativeInventoryProbe = $openApi.Substring(
+    $nativeInventoryProbeStart,
+    $nativeInventoryObjectStart - $nativeInventoryProbeStart)
+foreach ($field in @(
+    'slotMetadataReady',
+    'onlinePlayerCount',
+    'onlineInventoryCount'
+)) {
+    Assert-Contract (@([regex]::Matches(
+                $nativeInventoryProbe,
+                "(?m)^\s+-?\s*$field\s*:?[\r\n]"
+            )).Count -ge 2) `
+        "OpenAPI NativeInventoryProbe does not require and define '$field'."
+}
+$nativeInventoryObject = $openApi.Substring(
+    $nativeInventoryObjectStart,
+    $nativeInventoryContainerStart - $nativeInventoryObjectStart)
+Assert-Contract ($nativeInventoryObject.IndexOf(
+        'required: [ownerPlayerUId, ownerOnline, objectName, containers]',
+        [StringComparison]::Ordinal) -ge 0 -and
+    $nativeInventoryObject.IndexOf(
+        '        ownerOnline:',
+        [StringComparison]::Ordinal) -ge 0) `
+    "OpenAPI NativeInventoryObject does not require and define ownerOnline."
+
 $store = [IO.File]::ReadAllText($storePath, $utf8)
 foreach ($field in @(
     "NativeInventorySnapshot",
@@ -272,7 +320,11 @@ Assert-Contract ($nativeLock.steamBuild -eq "24181105") `
 Assert-Contract ($nativeLock.palServerExecutable.sha256 -match '^[a-f0-9]{64}$' -and
                  $nativeLock.palServerExecutable.size -gt 0) `
     "the Native lock does not pin the reviewed PalServer executable."
+Assert-Contract ($nativeLock.ue4ss.proxyDllSha256 -match '^[a-f0-9]{64}$' -and
+                 $nativeLock.ue4ss.proxyDllSize -gt 0) `
+    "the Native lock does not pin the reviewed UE4SS proxy DLL."
 Assert-Contract ($nativeLock.native.protocolVersion -eq "1.1" -and
+                 $nativeLock.native.modVersion -eq "0.3.0-dev.39-ro" -and
                  $nativeLock.native.capabilityStatus -eq `
                     "read-only-candidate-unverified" -and
                  $nativeLock.native.writeCapabilities -eq $false) `
@@ -364,6 +416,13 @@ foreach ($token in @(
     'const bool writeOperation = IsWriteOperation(command.Operation);',
     '!command.RequestHashVerified',
     'INVALID_NATIVE_WRITE_ENVELOPE'
+    'ownerOnline',
+    'onlinePlayerCount',
+    'onlineInventoryCount',
+    'ResolveLivePlayers()',
+    'NO_ONLINE_PLAYER',
+    'NATIVE_LIVE_PLAYER_SCHEMA_UNAVAILABLE',
+    'NATIVE_LIVE_PLAYER_IDENTITY_INVALID'
 )) {
     Assert-Contract ($nativeGameAdapter.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
         "the game-thread deadline/write-envelope guard omits '$token'."
@@ -419,6 +478,15 @@ foreach ($token in @(
     'ConvertSidToStringSid',
     'ExpectedPalServerExecutablePath',
     'ExpectedPalServerProcessSid',
+    'ExpectedPalServerProcessId',
+    'ExpectedPalServerProcessCreationTimeUtcFileTime',
+    'CreationTimeUtcFileTime',
+    'GetProcessTimes',
+    'AllowNoOnlinePlayer',
+    'NO_ONLINE_PLAYER',
+    'NativeProbeDispatchState',
+    'dispatch-ambiguous',
+    'not-dispatched',
     'Security.Principal.SecurityIdentifier',
     'ExpectedCanonicalPath',
     'Get-FileSha256Hex',
@@ -430,9 +498,270 @@ foreach ($token in @(
     'Native bridge sent more than one hello on the same connection.',
     'Native bridge returned a result for another command/session.',
     'frame read exceeded the absolute probe deadline'
+    'onlinePlayerCount',
+    'onlineInventoryCount',
+    '$inventory.ownerOnline -eq $true'
 )) {
     Assert-Contract ($nativeProbeScript.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
         "the live read-only probe omits '$token'."
+}
+
+$probeTokens = $null
+$probeParseErrors = $null
+$probeAst = [Management.Automation.Language.Parser]::ParseFile(
+    $nativeProbeScriptPath,
+    [ref]$probeTokens,
+    [ref]$probeParseErrors)
+Assert-Contract (@($probeParseErrors).Count -eq 0) `
+    "the Native probe script does not parse cleanly."
+$probeBehaviorFunctionNames = @(
+    "Get-Sha256Hex",
+    "Test-JsonInteger",
+    "Get-LivePlayerSetEvidence"
+)
+$probeBehaviorDefinitions = @($probeAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $probeBehaviorFunctionNames -ccontains $node.Name
+}, $true))
+Assert-Contract ($probeBehaviorDefinitions.Count -eq
+    $probeBehaviorFunctionNames.Count) `
+    "the Native probe live-player evidence functions are incomplete."
+Invoke-Expression (($probeBehaviorDefinitions | ForEach-Object {
+    $_.Extent.Text
+}) -join [Environment]::NewLine)
+
+function New-ProbeContainer(
+    [string] $kind,
+    [string] $containerId,
+    [bool] $resolved = $true
+) {
+    return [pscustomobject]@{
+        kind = $kind
+        containerId = $containerId
+        resolved = $resolved
+        slots = @()
+    }
+}
+
+function New-ProbeInventoryData([object[]] $containers) {
+    return [pscustomobject]@{
+        truncated = $false
+        inventoryObjectCount = 1
+        onlinePlayerCount = 1
+        onlineInventoryCount = 1
+        inventories = @([pscustomobject]@{
+            ownerOnline = $true
+            ownerPlayerUId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            containers = $containers
+        })
+    }
+}
+
+function Assert-ProbeInventoryRejected(
+    [object[]] $containers,
+    [string] $scenario,
+    [string] $expectedErrorPattern
+) {
+    $rejected = $false
+    $message = $null
+    try {
+        Get-LivePlayerSetEvidence `
+            -ProbeOperation "inventory.probe" `
+            -Data (New-ProbeInventoryData $containers) | Out-Null
+    }
+    catch {
+        $rejected = $true
+        $message = $_.Exception.Message
+    }
+    Assert-Contract ($rejected -and $message -match $expectedErrorPattern) `
+        "the Native inventory probe accepted $scenario."
+}
+
+$validProbeContainers = @(
+    (New-ProbeContainer "common" "11111111-1111-1111-1111-111111111111"),
+    (New-ProbeContainer "dropSlot" "22222222-2222-2222-2222-222222222222"),
+    (New-ProbeContainer "food" "33333333-3333-3333-3333-333333333333")
+)
+$validLivePlayerSet = Get-LivePlayerSetEvidence `
+    -ProbeOperation "inventory.probe" `
+    -Data (New-ProbeInventoryData $validProbeContainers)
+Assert-Contract ($validLivePlayerSet.count -eq 1 -and
+    $validLivePlayerSet.sha256 -match '^[0-9a-f]{64}$') `
+    "the Native inventory probe rejected a valid unique container set."
+
+Assert-ProbeInventoryRejected `
+    -Containers @($validProbeContainers + @(
+        New-ProbeContainer `
+            "common" `
+            "44444444-4444-4444-4444-444444444444" `
+            $false
+    )) `
+    -Scenario "one resolved and one unresolved entry for the same required kind" `
+    -ExpectedErrorPattern "exactly one 'common' container entry"
+Assert-ProbeInventoryRejected `
+    -Containers @(
+        (New-ProbeContainer "common" "11111111111111111111111111111111"),
+        $validProbeContainers[1],
+        $validProbeContainers[2]
+    ) `
+    -Scenario "a non-canonical container GUID" `
+    -ExpectedErrorPattern "non-canonical containerId"
+Assert-ProbeInventoryRejected `
+    -Containers @(
+        $validProbeContainers[0],
+        (New-ProbeContainer "dropSlot" "11111111-1111-1111-1111-111111111111"),
+        $validProbeContainers[2]
+    ) `
+    -Scenario "duplicate container IDs across required kinds" `
+    -ExpectedErrorPattern "containerIds must be distinct"
+
+$nativeDeploymentScript = [IO.File]::ReadAllText($nativeDeploymentScriptPath, $utf8)
+foreach ($token in @(
+    'read-only-candidate-unverified',
+    '0.3.0-dev.39-ro',
+    'Ue4ssReleaseArchivePath',
+    'proxyDllSha256',
+    'PalDefender d3d9 loader',
+    'QuarantineLegacyWorkshopPackages',
+    'IncludeSavedStateBackup',
+    'BackupRoot must be outside the public Git repository.',
+    'Set-PrivateAcl',
+    'Protect-PrivateTree',
+    'Get-SafeTreeItems',
+    'Get-ServerRelativePath',
+    'schemaVersion = 2',
+    'operatorSid = $operatorSid',
+    'aclPolicy = "system-administrators-operator-full-control-protected"',
+    'if (-not $Execute)',
+    'ReadOnly = $true'
+)) {
+    Assert-Contract ($nativeDeploymentScript.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
+        "the dev read-only Native deployment guard omits '$token'."
+}
+Assert-Contract ($nativeDeploymentScript.IndexOf(
+        'C216CDFDF57D5ED5C5E609FCB2F59818F3C9397001286B27878E626046EC4E5C',
+        [StringComparison]::OrdinalIgnoreCase) -lt 0) `
+    "the Native deployment guard still pins the obsolete overlay artifact."
+
+$nativeProbeStartScript = [IO.File]::ReadAllText($nativeProbeStartScriptPath, $utf8)
+foreach ($token in @(
+    'DeploymentResultPath',
+    '0.3.0-dev.39-ro',
+    'dev39-ro-readonly-native-maintenance-backup',
+    'Assert-PrivateAcl',
+    'Assert-BackupTreeMatchesManifest',
+    'Backup file identity does not match the manifest',
+    '$deployment.schemaVersion -ne 2',
+    '$backupManifest.schemaVersion -ne 2',
+    'Assert-SavedStateMatchesBackup',
+    'PalDefender d3d9 loader must remain quarantined',
+    'Legacy PalControl Workshop package remains',
+    'NetworkExposureAcknowledged',
+    '$ServerArguments.Count -ne 1 -or $ServerArguments[0] -cne "-log"',
+    'WindowStyle Hidden',
+    'GetOwnerSid',
+    'ParentProcessId',
+    'ShippingProcessCreationTimeUtcFileTime',
+    'ToFileTimeUtc()'
+)) {
+    Assert-Contract ($nativeProbeStartScript.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
+        "the controlled Native probe startup guard omits '$token'."
+}
+
+$nativeProbeStopScript = [IO.File]::ReadAllText($nativeProbeStopScriptPath, $utf8)
+foreach ($token in @(
+    'ResultPath must be outside both PalServer and the public repository.',
+    'playerPolicy = "must-be-zero"',
+    'if (-not $Execute)',
+    'MaintenanceWindowAcknowledged',
+    'ExpectedShippingProcessId',
+    'ExpectedShippingProcessCreationTimeUtcFileTime',
+    'Assert-PinnedPalServerSession @PinnedSession',
+    'Assert-OfficialRestListenerOwnedByProcess',
+    'OwningProcess',
+    '$httpHandler.AllowAutoRedirect = $false',
+    '$httpHandler.UseProxy = $false',
+    '-RelativePath "save"',
+    'Save outcome is failed or uncertain; shutdown was not attempted.',
+    '-RelativePath "shutdown"',
+    'the command will not be retried',
+    'no force-stop was used',
+    'reviewedPortsReleased = $true',
+    'forceStopUsed = $false',
+    'Set-PrivateAcl -Path $resultFullPath',
+    '[Array]::Clear($credentialBytes'
+)) {
+    Assert-Contract ($nativeProbeStopScript.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
+        "the controlled Native probe shutdown guard omits '$token'."
+}
+Assert-Contract ($nativeProbeStopScript.IndexOf(
+        'Stop-Process',
+        [StringComparison]::OrdinalIgnoreCase) -lt 0) `
+    "the controlled Native probe shutdown path contains a force-stop primitive."
+Assert-Contract ($nativeProbeStopScript.IndexOf(
+        'Invoke-WebRequest',
+        [StringComparison]::OrdinalIgnoreCase) -lt 0) `
+    "the controlled Native probe shutdown path can use ambient proxy/redirect behavior."
+
+$nativeProbeSuiteScript = [IO.File]::ReadAllText($nativeProbeSuiteScriptPath, $utf8)
+foreach ($token in @(
+    'ExpectedPalServerExecutablePath',
+    'ExpectedPalServerProcessSid',
+    'ExpectedPalServerProcessId',
+    'ExpectedPalServerProcessCreationTimeUtcFileTime',
+    'Repository-local probe output is allowed only below ignored .agent-build.',
+    'players.schema',
+    'players.probe',
+    'players.progression.schema',
+    'players.progression.probe',
+    'inventory.schema',
+    'inventory.probe',
+    'pals.schema',
+    'pals.probe',
+    'pals.skills.catalog',
+    'announcements.overlay.probe',
+    'announcements.banner.probe',
+    'ui.notifications.probe',
+    '-RawJson',
+    '-AllowNoOnlinePlayer',
+    'NativeProbeDispatchState',
+    'Test-RetryablePreDispatchFailure',
+    '$errorCode -ceq "NO_ONLINE_PLAYER"',
+    'expected-no-online-player',
+    'runtimeIdentityVerified',
+    'writeEnabled',
+    'executionComplete',
+    'allOperationsSucceeded',
+    'livePlayerCoverageComplete',
+    'independentReviewComplete = $false',
+    'acceptanceEligible = $false',
+    'Raw payloads may contain player or Pal identifiers'
+)) {
+    Assert-Contract ($nativeProbeSuiteScript.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
+        "the bounded Native probe suite omits '$token'."
+}
+foreach ($writeOperation in @(
+    'inventory.consume',
+    'players.kick',
+    'players.ban',
+    'pals.spawn',
+    'world.save'
+)) {
+    Assert-Contract ($nativeProbeSuiteScript.IndexOf(
+            $writeOperation,
+            [StringComparison]::Ordinal) -lt 0) `
+        "the bounded Native probe suite includes write operation '$writeOperation'."
+}
+foreach ($unsafeClassificationToken in @(
+    'Test-NoOnlinePlayerRejection',
+    'positive integer|identified live player',
+    'onlinePlayerCount|onlineInventoryCount|No live'
+)) {
+    Assert-Contract ($nativeProbeSuiteScript.IndexOf(
+            $unsafeClassificationToken,
+            [StringComparison]::Ordinal) -lt 0) `
+        "the bounded Native probe suite still classifies no-player results from fuzzy error text '$unsafeClassificationToken'."
 }
 
 $nativeClient = [IO.File]::ReadAllText($nativeClientPath, $utf8)

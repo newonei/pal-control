@@ -2273,6 +2273,11 @@ api.MapGet(
             var found = false;
             foreach (var inventory in data.GetProperty("inventories").EnumerateArray())
             {
+                if (!inventory.TryGetProperty("ownerOnline", out var ownerOnline) ||
+                    ownerOnline.ValueKind != JsonValueKind.True)
+                {
+                    continue;
+                }
                 var ownerPlayerUId = inventory.GetProperty("ownerPlayerUId").GetString();
                 if (ownerPlayerUId is null)
                 {

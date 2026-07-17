@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "matrixVersion": "1.1.0",
-  "generatedAt": "2026-07-16T23:18:56Z",
-  "canonicalSha256": "681ada6c9432006cb412b117a8fd7223022641efa8f32ddbdccd0e5225b58048",
+  "matrixVersion": "1.3.0",
+  "generatedAt": "2026-07-17T04:36:44Z",
+  "canonicalSha256": "ccc19e73933a96ff5a4b966d3eb4a3e8ce2dba9fac8931320f9c3be5d1263512",
   "combinations": [
     {
       "id": "pal-1.0.0.100427-native-dev36",
@@ -46,28 +46,126 @@
       "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
       "nativeProtocolVersion": "1.1",
       "nativeModVersion": "0.3.0-dev.37-ro",
-      "bridgeAvailability": "unavailable",
+      "bridgeAvailability": "available",
       "capabilities": [
+        "bridge.hello",
+        "inventory.probe",
         "official-rest.read"
       ],
       "status": "quarantined",
-      "verifiedAt": "2026-07-16T23:18:56Z",
+      "verifiedAt": "2026-07-17T02:42:23Z",
       "evidence": [
         {
           "kind": "runtime",
           "source": "docs/MOD能力与接口维护手册.md",
           "observedAt": "2026-07-15T06:30:00Z",
-          "summary": "Official REST reported v1.0.1.100619 and Steam build 24181105; the compatibility guard isolated the old loader and the Native named pipe was unavailable."
+          "summary": "Official REST reported v1.0.1.100619 and Steam build 24181105; the compatibility guard initially isolated the old dev36 loader before the separate controlled dev37-ro read-only load."
         },
         {
           "kind": "artifact",
-          "source": "mods/pal-control-native/dependencies.lock.json",
+          "source": "https://github.com/newonei/pal-control/blob/0bea7074f5544005c640d0452902a01fc00e3995/mods/pal-control-native/dependencies.lock.json",
           "observedAt": "2026-07-16T23:18:56Z",
-          "summary": "Two independent guarded builds reproduced the same 886272-byte protocol 1.1 read-only dev37-ro DLL after session-generation, absolute-deadline, and exact request-payload hash hardening, with Cargo locked and exact fetched dependency commits. The artifact is bound to the exact current PalServer executable but is not deployed, so it does not prove runtime compatibility.",
+          "summary": "Two independent guarded builds reproduced the same 886272-byte protocol 1.1 read-only dev37-ro DLL after session-generation, absolute-deadline, and exact request-payload hash hardening, with Cargo locked and exact fetched dependency commits. Artifact reproducibility alone did not prove runtime compatibility; this exact candidate was later loaded only for a controlled read-only probe.",
+          "artifactSha256": "c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7"
+        },
+        {
+          "kind": "runtime",
+          "source": "TODO.md",
+          "observedAt": "2026-07-17T02:42:23Z",
+          "summary": "A controlled dev37-ro session established Bridge, but inventory.probe treated persisted offline inventories as live inventory. The candidate was superseded and quarantined; its historical bridge availability does not make it supported or stable.",
           "artifactSha256": "c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7"
         }
       ],
-      "notes": "Unprobed read-only candidate. The old loader remains quarantined and the new artifact is not deployed. A controlled current-version runtime load plus schema/inventory probes is still required before producing p0-04-current-native-probe evidence; write capabilities remain disabled."
+      "notes": "Historical superseded read-only candidate. A controlled runtime load found that its inventory probe did not distinguish persisted offline inventories from online players, so dev37-ro must not be redeployed. Write capabilities were disabled throughout."
+    },
+    {
+      "id": "pal-1.0.1.100619-build-24181105-runtime-dev38-ro",
+      "gameVersion": "v1.0.1.100619",
+      "steamBuild": "24181105",
+      "palDefenderVersion": "unknown",
+      "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
+      "nativeProtocolVersion": "1.1",
+      "nativeModVersion": "0.3.0-dev.38-ro",
+      "bridgeAvailability": "available",
+      "capabilities": [
+        "announcements.banner.probe",
+        "announcements.overlay.probe",
+        "bridge.hello",
+        "inventory.probe",
+        "inventory.read",
+        "inventory.schema",
+        "official-rest.read",
+        "pals.probe",
+        "pals.read",
+        "pals.schema",
+        "pals.skills.catalog",
+        "players.probe",
+        "players.progression.probe",
+        "players.progression.read",
+        "players.progression.schema",
+        "players.schema",
+        "ui.notifications.probe"
+      ],
+      "status": "quarantined",
+      "verifiedAt": "2026-07-17T02:42:23Z",
+      "evidence": [
+        {
+          "kind": "artifact",
+          "source": "mods/pal-control-native/dependencies.lock.json",
+          "observedAt": "2026-07-17T02:32:00Z",
+          "summary": "Two independent fresh guarded builds produced byte-identical 888320-byte protocol 1.1 read-only dev38-ro DLLs from the locked UE4SS, Unreal, Cargo, CMake, Rust, and MSVC inputs.",
+          "artifactSha256": "012f84929448321196734b0bdc1f1b6a899a6f7a0aa87564d99b6e4c40b868aa"
+        },
+        {
+          "kind": "runtime",
+          "source": "TODO.md",
+          "observedAt": "2026-07-17T02:42:23Z",
+          "summary": "The exact dev38-ro DLL loaded on the current server with runtime identity verified and writes disabled. Nine read-only operations that do not require an online player succeeded; three live-player probes correctly refused because no player was online, with zero unexpected failures.",
+          "artifactSha256": "012f84929448321196734b0bdc1f1b6a899a6f7a0aa87564d99b6e4c40b868aa"
+        }
+      ],
+      "notes": "Historical superseded read-only runtime candidate. The Bridge was available and persisted offline inventories were marked ownerOnline=false, but player, progression, and inventory live probes still lacked a controlled online player and independent review. It has been replaced by the dev39-ro source candidate and must not be redeployed. No write capability was advertised; this is not production stable."
+    },
+    {
+      "id": "pal-1.0.1.100619-build-24181105-source-dev39-ro",
+      "gameVersion": "v1.0.1.100619",
+      "steamBuild": "24181105",
+      "palDefenderVersion": "unknown",
+      "ue4ssCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
+      "nativeProtocolVersion": "1.1",
+      "nativeModVersion": "0.3.0-dev.39-ro",
+      "bridgeAvailability": "unknown",
+      "capabilities": [
+        "announcements.banner.probe",
+        "announcements.overlay.probe",
+        "bridge.hello",
+        "inventory.probe",
+        "inventory.read",
+        "inventory.schema",
+        "official-rest.read",
+        "pals.probe",
+        "pals.read",
+        "pals.schema",
+        "pals.skills.catalog",
+        "players.probe",
+        "players.progression.probe",
+        "players.progression.read",
+        "players.progression.schema",
+        "players.schema",
+        "ui.notifications.probe"
+      ],
+      "status": "quarantined",
+      "verifiedAt": "2026-07-17T04:36:44Z",
+      "evidence": [
+        {
+          "kind": "artifact",
+          "source": "mods/pal-control-native/dependencies.lock.json",
+          "observedAt": "2026-07-17T04:36:44Z",
+          "summary": "Two independent fresh guarded builds produced byte-identical 893440-byte protocol 1.1 read-only dev39-ro DLLs from the locked UE4SS, Unreal, Cargo, CMake, Rust, and MSVC inputs. Runtime loading and the fixed probe suite have not yet been performed for dev39-ro.",
+          "artifactSha256": "c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34"
+        }
+      ],
+      "notes": "Current source and artifact candidate only. Declared capabilities are read-only, but Bridge availability remains unknown until the exact dev39-ro DLL is loaded and the fixed runtime suite is collected. Controlled online-player coverage, PalDefender combination testing, independent review, and all write persistence gates remain pending; this is not production stable."
     }
   ]
 }

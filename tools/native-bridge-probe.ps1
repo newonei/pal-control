@@ -32,6 +32,16 @@ param(
     [ValidatePattern('^S-1-[0-9]+(?:-[0-9]+)+$')]
     [string]$ExpectedPalServerProcessSid,
 
+    [Parameter(Mandatory)]
+    [ValidateRange(1, 2147483647)]
+    [int]$ExpectedPalServerProcessId,
+
+    [Parameter(Mandatory)]
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$ExpectedPalServerProcessCreationTimeUtcFileTime,
+
+    [switch]$AllowNoOnlinePlayer,
+
     [switch]$RawJson
 )
 
@@ -86,17 +96,30 @@ namespace PalControl
             public SidAndAttributes User;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileTimeValue
+        {
+            public uint LowDateTime;
+            public uint HighDateTime;
+        }
+
         public sealed class ServerIdentity
         {
             public uint ProcessId { get; private set; }
             public string ImagePath { get; private set; }
             public string ProcessSid { get; private set; }
+            public long CreationTimeUtcFileTime { get; private set; }
 
-            internal ServerIdentity(uint processId, string imagePath, string processSid)
+            internal ServerIdentity(
+                uint processId,
+                string imagePath,
+                string processSid,
+                long creationTimeUtcFileTime)
             {
                 ProcessId = processId;
                 ImagePath = imagePath;
                 ProcessSid = processSid;
+                CreationTimeUtcFileTime = creationTimeUtcFileTime;
             }
         }
 
@@ -119,6 +142,15 @@ namespace PalControl
             uint flags,
             StringBuilder executablePath,
             ref int size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetProcessTimes(
+            IntPtr process,
+            out FileTimeValue creationTime,
+            out FileTimeValue exitTime,
+            out FileTimeValue kernelTime,
+            out FileTimeValue userTime);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -205,6 +237,27 @@ namespace PalControl
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error());
                 }
+                FileTimeValue creationTime;
+                FileTimeValue exitTime;
+                FileTimeValue kernelTime;
+                FileTimeValue userTime;
+                if (!GetProcessTimes(
+                        process,
+                        out creationTime,
+                        out exitTime,
+                        out kernelTime,
+                        out userTime))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                var creationTimeUtcFileTime = unchecked((long)(
+                    ((ulong)creationTime.HighDateTime << 32) |
+                    creationTime.LowDateTime));
+                if (creationTimeUtcFileTime <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "The Named Pipe server process has an invalid creation time.");
+                }
                 var token = IntPtr.Zero;
                 if (!OpenProcessToken(process, TokenQuery, out token) ||
                     token == IntPtr.Zero)
@@ -257,7 +310,8 @@ namespace PalControl
                             return new ServerIdentity(
                                 processId,
                                 System.IO.Path.GetFullPath(path.ToString()),
-                                sid);
+                                sid,
+                                creationTimeUtcFileTime);
                         }
                         finally
                         {
@@ -436,6 +490,133 @@ function Get-Sha256Hex {
     }
     finally {
         $sha256.Dispose()
+    }
+}
+
+function Get-LivePlayerSetEvidence {
+    param(
+        [Parameter(Mandatory)][string]$ProbeOperation,
+        [Parameter(Mandatory)][pscustomobject]$Data
+    )
+
+    if ($ProbeOperation -notin @(
+        "players.probe",
+        "players.progression.probe",
+        "inventory.probe")) {
+        return $null
+    }
+
+    $context = "Native '$ProbeOperation' live-player coverage"
+    $values = @()
+    switch -CaseSensitive ($ProbeOperation) {
+        "players.probe" {
+            if (-not ($Data.truncated -is [bool]) -or $Data.truncated) {
+                throw "$context must contain the complete, untruncated player set."
+            }
+            $objects = @($Data.objects)
+            if (-not (Test-JsonInteger $Data.objectCount) -or
+                [long]$Data.objectCount -ne $objects.Count) {
+                throw "$context objectCount does not match its complete objects array."
+            }
+            $values = @($objects | ForEach-Object {
+                if ($_ -isnot [pscustomobject] -or
+                    $_.identity -isnot [pscustomobject] -or
+                    $_.identity.playerUId -isnot [string]) {
+                    throw "$context contains an object without a string PlayerUID."
+                }
+                $_.identity.playerUId
+            })
+        }
+        "players.progression.probe" {
+            $players = @($Data.players)
+            if (-not (Test-JsonInteger $Data.playerCount) -or
+                [long]$Data.playerCount -ne $players.Count) {
+                throw "$context playerCount does not match its players array."
+            }
+            $online = @($players | Where-Object {
+                $_ -is [pscustomobject] -and
+                $_.online -is [bool] -and $_.online
+            })
+            $values = @($online | ForEach-Object {
+                if ($_.playerUId -isnot [string]) {
+                    throw "$context contains an online entry without a string PlayerUID."
+                }
+                $_.playerUId
+            })
+        }
+        "inventory.probe" {
+            if (-not ($Data.truncated -is [bool]) -or $Data.truncated) {
+                throw "$context must contain the complete, untruncated inventory set."
+            }
+            $inventories = @($Data.inventories)
+            if (-not (Test-JsonInteger $Data.inventoryObjectCount) -or
+                [long]$Data.inventoryObjectCount -ne $inventories.Count) {
+                throw "$context inventoryObjectCount does not match its complete inventories array."
+            }
+            $online = @($inventories | Where-Object {
+                $_ -is [pscustomobject] -and
+                $_.ownerOnline -is [bool] -and $_.ownerOnline
+            })
+            if (-not (Test-JsonInteger $Data.onlineInventoryCount) -or
+                [long]$Data.onlineInventoryCount -ne $online.Count -or
+                -not (Test-JsonInteger $Data.onlinePlayerCount) -or
+                [long]$Data.onlinePlayerCount -ne $online.Count) {
+                throw "$context online player/inventory counts are not one-to-one."
+            }
+            $requiredContainers = @("common", "dropSlot", "food")
+            foreach ($inventory in $online) {
+                if ($inventory.ownerPlayerUId -isnot [string] -or
+                    $inventory.containers -isnot [Array]) {
+                    throw "$context contains an online inventory without a PlayerUID or container array."
+                }
+                $containerIds = @()
+                foreach ($requiredKind in $requiredContainers) {
+                    $matches = @($inventory.containers | Where-Object {
+                        $_ -is [pscustomobject] -and
+                        $_.kind -is [string] -and
+                        $_.kind -ceq $requiredKind
+                    })
+                    if ($matches.Count -ne 1) {
+                        throw "$context must contain exactly one '$requiredKind' container entry."
+                    }
+                    $container = $matches[0]
+                    if ($container.resolved -isnot [bool] -or
+                        -not $container.resolved -or
+                        $container.containerId -isnot [string] -or
+                        $container.containerId -notmatch
+                            '^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+                        throw "$context '$requiredKind' container is unresolved or has a non-canonical containerId."
+                    }
+                    $containerIds += $container.containerId
+                }
+                if (@($containerIds | Select-Object -Unique).Count -ne
+                    $requiredContainers.Count) {
+                    throw "$context common/dropSlot/food containerIds must be distinct."
+                }
+            }
+            $values = @($online | ForEach-Object { $_.ownerPlayerUId })
+        }
+    }
+
+    if ($values.Count -lt 1) {
+        throw "$context contains no online PlayerUID."
+    }
+    $normalized = @($values | ForEach-Object {
+        $value = ([string]$_).Trim().ToLowerInvariant()
+        if ($value -notmatch
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+            throw "$context contains a non-canonical PlayerUID."
+        }
+        $value
+    } | Sort-Object -CaseSensitive)
+    if (@($normalized | Select-Object -Unique).Count -ne $normalized.Count) {
+        throw "$context contains a duplicate PlayerUID."
+    }
+    $canonical = "pal-control-live-player-set-v1`n$($normalized.Count)`n" +
+        ($normalized -join "`n")
+    return [pscustomobject]@{
+        count = $normalized.Count
+        sha256 = Get-Sha256Hex -Value $canonical
     }
 }
 
@@ -666,6 +847,8 @@ function Assert-NativeProbeData {
             & $requireTrue "mappingReady"
             & $requireTrue "slotMetadataReady"
             & $requirePositiveInteger "inventoryObjectCount" | Out-Null
+            & $requirePositiveInteger "onlinePlayerCount" | Out-Null
+            & $requirePositiveInteger "onlineInventoryCount" | Out-Null
             & $requireArray "inventories" $true | Out-Null
         }
         "pals.schema" {
@@ -720,12 +903,21 @@ $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
     $PipeName,
     [System.IO.Pipes.PipeDirection]::InOut,
     [System.IO.Pipes.PipeOptions]::Asynchronous)
+$dispatchState = "not-dispatched"
 
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $pipe.Connect($TimeoutSeconds * 1000)
     $serverIdentity = [PalControl.NativePipeProcessIdentity]::GetServerIdentity(
         $pipe.SafePipeHandle.DangerousGetHandle())
+    if ([uint32]$serverIdentity.ProcessId -ne
+            [uint32]$ExpectedPalServerProcessId) {
+        throw "Named Pipe server process ID is not the explicitly approved process ID."
+    }
+    if ([long]$serverIdentity.CreationTimeUtcFileTime -ne
+            $ExpectedPalServerProcessCreationTimeUtcFileTime) {
+        throw "Named Pipe server process creation time is not the explicitly approved creation time."
+    }
     $serverImagePath = [IO.Path]::GetFullPath($serverIdentity.ImagePath)
     if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
             $serverImagePath,
@@ -848,6 +1040,9 @@ try {
     if ($remaining.TotalMilliseconds -le 0) {
         throw "Native bridge probe exceeded the absolute deadline before command dispatch."
     }
+    # From this point until FlushAsync completes, a failed write is ambiguous:
+    # some command bytes may already have reached the server and retry is forbidden.
+    $dispatchState = "dispatch-ambiguous"
     $writeCts = [Threading.CancellationTokenSource]::new($remaining)
     try {
         $pipe.WriteAsync(
@@ -856,6 +1051,7 @@ try {
             $writeBytes.Length,
             $writeCts.Token).GetAwaiter().GetResult()
         $pipe.FlushAsync($writeCts.Token).GetAwaiter().GetResult()
+        $dispatchState = "dispatched"
     }
     finally {
         $writeCts.Dispose()
@@ -896,15 +1092,65 @@ try {
     }
     $errorProperty = $result.PSObject.Properties["error"]
     $dataProperty = $result.PSObject.Properties["data"]
-    if (-not ($result.state -is [string]) -or $result.state -cne "succeeded" -or
+    if (-not ($result.state -is [string]) -or
+        $result.state -notin @("succeeded", "failed", "uncertain") -or
         -not (Test-JsonInteger $result.observedRevision) -or
         [long]$result.observedRevision -lt 0 -or
-        $null -eq $errorProperty -or $null -ne $errorProperty.Value -or
-        $null -eq $dataProperty -or
+        $null -eq $errorProperty -or
+        $null -eq $dataProperty) {
+        throw "Native bridge returned a malformed result envelope for '$Operation'."
+    }
+    if ($result.state -ceq "failed") {
+        if ($null -ne $dataProperty.Value -or
+            -not ($errorProperty.Value -is [pscustomobject]) -or
+            -not ($errorProperty.Value.code -is [string]) -or
+            [string]::IsNullOrWhiteSpace($errorProperty.Value.code) -or
+            $errorProperty.Value.code.Length -gt 128 -or
+            $errorProperty.Value.code.IndexOfAny([char[]]@(0..31 + 127)) -ge 0 -or
+            -not ($errorProperty.Value.message -is [string]) -or
+            [string]::IsNullOrWhiteSpace($errorProperty.Value.message) -or
+            $errorProperty.Value.message.Length -gt 1024 -or
+            $errorProperty.Value.message.IndexOfAny([char[]]@(0..31 + 127)) -ge 0) {
+            throw "Native bridge returned a malformed failed result for '$Operation'."
+        }
+        $noOnlineOperations = @(
+            "players.probe",
+            "players.progression.probe",
+            "inventory.probe"
+        )
+        if (-not $AllowNoOnlinePlayer -or
+            $Operation -notin $noOnlineOperations -or
+            $errorProperty.Value.code -cne "NO_ONLINE_PLAYER") {
+            throw "Native bridge returned error code '$($errorProperty.Value.code)' for '$Operation'."
+        }
+
+        $output = [pscustomobject]@{
+            serverIdentity = [pscustomobject]@{
+                processId = [uint32]$serverIdentity.ProcessId
+                creationTimeUtcFileTime =
+                    [long]$serverIdentity.CreationTimeUtcFileTime
+            }
+            hello = $hello
+            result = $result
+            livePlayerSet = $null
+        }
+        if ($RawJson) {
+            $output | ConvertTo-Json -Depth 100 -Compress
+        }
+        else {
+            $output
+        }
+        return
+    }
+    if ($result.state -cne "succeeded" -or
+        $null -ne $errorProperty.Value -or
         -not ($dataProperty.Value -is [pscustomobject])) {
-        throw "Native bridge returned a failed or incomplete result for '$Operation'."
+        throw "Native bridge returned an uncertain or incomplete result for '$Operation'."
     }
     Assert-NativeProbeData -ProbeOperation $Operation -Data $dataProperty.Value
+    $livePlayerSet = Get-LivePlayerSetEvidence `
+        -ProbeOperation $Operation `
+        -Data $dataProperty.Value
     if ($Operation -eq "inventory.probe") {
         $requiredContainers = @("common", "dropSlot", "food")
         if (-not ($result.data.mappingReady -is [bool]) -or
@@ -915,6 +1161,8 @@ try {
             $inventory = $_
             $inventory.ownerPlayerUId -is [string] -and
             -not [string]::IsNullOrWhiteSpace($inventory.ownerPlayerUId) -and
+            $inventory.ownerOnline -is [bool] -and
+            $inventory.ownerOnline -eq $true -and
             $inventory.containers -is [Array] -and
             @($requiredContainers | Where-Object {
                 $requiredKind = $_
@@ -930,8 +1178,14 @@ try {
     }
 
     $output = [pscustomobject]@{
+        serverIdentity = [pscustomobject]@{
+            processId = [uint32]$serverIdentity.ProcessId
+            creationTimeUtcFileTime =
+                [long]$serverIdentity.CreationTimeUtcFileTime
+        }
         hello = $hello
         result = $result
+        livePlayerSet = $livePlayerSet
     }
     if ($RawJson) {
         $output | ConvertTo-Json -Depth 100 -Compress
@@ -939,6 +1193,10 @@ try {
     else {
         $output
     }
+}
+catch {
+    $_.Exception.Data["NativeProbeDispatchState"] = $dispatchState
+    throw
 }
 finally {
     $pipe.Dispose()

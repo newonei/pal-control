@@ -7,7 +7,7 @@
   },
   "native": {
     "protocolVersion": "1.1",
-    "modVersion": "0.3.0-dev.37-ro",
+    "modVersion": "0.3.0-dev.39-ro",
     "capabilityStatus": "read-only-candidate-unverified",
     "writeCapabilities": false,
     "pipeName": "pal-control.local.v1",
@@ -20,6 +20,8 @@
     "sourceCommit": "c2ac246447a8bcd92541070cb474044e7a2bbbe6",
     "releaseArchive": "UE4SS-Palworld.zip",
     "releaseArchiveSha256": "7c80b2f4a29baf0f384552c8517e58196e78c8a1b8530637b7179eddae1b54a9",
+    "proxyDllSha256": "6c6e7151c206628445eb69c3dfee702b31bc51208df13a5cc15c2118c413cde1",
+    "proxyDllSize": 61952,
     "runtimeDllSha256": "afc83a57a30c3d44bc0d432222f24857b0c3788738b8a1975dfeef746edab798",
     "runtimeDllSize": 16494592,
     "corrosionSourceCommit": "52844733e14f095c947577627e367ee5f6458af7",
@@ -32,7 +34,7 @@
     "rustc": "1.97.0",
     "msvc": "19.44.35217",
     "cargoLocked": true,
-    "palControlNativeDllSize": 886272,
-    "palControlNativeDllSha256": "c91bee8f943b6c151a59c41ff0a51aebf36469b0c60f4201494cc5a3a416f8a7"
+    "palControlNativeDllSize": 893440,
+    "palControlNativeDllSha256": "c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34"
   }
 }

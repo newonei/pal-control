@@ -38,7 +38,9 @@ PalServer\Mods\PalModSettings.ini
 
 ## 启用只读 Native 候选
 
-当前源码候选为 `v1.0.1.100619` / Steam build `24181105` / `0.3.0-dev.37-ro`。只有先核对 `dependencies.lock.json`、当前 PalServer EXE、UE4SS runtime、候选 Native DLL 的大小/SHA-256 与受控构建结果，并进入明确的维护窗口后，才可部署候选做只读 smoke；构建成功本身不能替代本节。候选在注册 hook 前还会再次哈希宿主 EXE、Native 与 UE4SS 文件；Control API 随后经 pipe server PID 用低权限查询独立复核主 EXE，模块摘要继续与锁比较，不匹配时不会接受 Bridge hello。
+当前源码候选为 `v1.0.1.100619` / Steam build `24181105` / `0.3.0-dev.39-ro`。两个全新独立构建均得到 893,440 字节、SHA-256 `c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34` 的字节一致 DLL。该精确候选尚未实服加载或运行固定探针套件，Bridge 可用性仍是 unknown。只有先核对 `dependencies.lock.json`、当前 PalServer EXE、UE4SS runtime、候选 Native DLL 的大小/SHA-256 与受控构建结果，并进入明确的维护窗口后，才可部署候选做只读 smoke；构建成功本身不能替代本节。候选在注册 hook 前还会再次哈希宿主 EXE、Native 与 UE4SS 文件；Control API 随后经 pipe server PID 用低权限查询独立复核主 EXE，模块摘要继续与锁比较，不匹配时不会接受 Bridge hello。
+
+2026-07-17 的最近受控运行结果属于 dev38-ro：该精确 DLL 完成运行时身份校验且写能力关闭；固定 12 项套件中 9 项不依赖在线玩家的操作成功，`players.probe`、`players.progression.probe`、`inventory.probe` 因无人在线按规则拒绝，0 项意外失败。官方保存与优雅关服成功后服务器已停止，但该维护流程不证明玩家数据或扣物持久化。dev38-ro 现已被 dev39-ro 源码候选取代并保持 `superseded/quarantined`；其结果不能当作 dev39-ro 运行证据。P0-04 仍缺 dev39-ro 固定套件、受控在线玩家三项、PalDefender 组合和独立复核。dev37-ro 曾把持久离线库存误判为 live inventory，也不得重新部署。
 
 受控加载步骤：
 
@@ -54,7 +56,7 @@ PalServer\Mods\PalModSettings.ini
    ```
 
 5. 重启服务端，检查 `Mods\ManagedMods\PalControlNative\InstallManifest.json`。
-6. 将 `PalControl.ini` 保持 `ReadOnly=true`；dev37-ro 的编译选项还会独立关闭所有写 capability、聊天 hook 与随机复活 hook。当前构建固定 pipe `pal-control.local.v1`，并只额外放行默认低权限服务账户 `NT SERVICE\PalControl.ControlApi` 的锁定 service SID；自定义服务名必须先重新评审、更新锁并受控重建，不能只改配置。
+6. 将 `PalControl.ini` 保持 `ReadOnly=true`；dev39-ro 的编译选项还会独立关闭所有写 capability、聊天 hook 与随机复活 hook。当前构建固定 pipe `pal-control.local.v1`，并只额外放行默认低权限服务账户 `NT SERVICE\PalControl.ControlApi` 的锁定 service SID；自定义服务名必须先重新评审、更新锁并受控重建，不能只改配置。自托管开发服若使用直接 overlay，不要手工复制 DLL；先对 `activate-client-overlay.ps1` 做 plan-only 复核，再显式 `-IncludeSavedStateBackup -QuarantineLegacyWorkshopPackages -Execute`。它会要求 PalServer 已停止、完整备份 `Pal\Saved`、校验候选/UE4SS proxy/runtime 摘要并在失败时恢复旧 overlay。
 7. 先以管理员终端从正在运行的 PalServer 进程取得实际 EXE 路径和进程账户 SID，再把二者作为每次只读探针的必填批准值；不要从仓库示例、用户名或另一台机器猜测 SID：
 
    ```powershell
@@ -84,8 +86,10 @@ PalServer\Mods\PalModSettings.ini
    }
    ```
 
-   脚本会从 Pipe 服务端 PID 独立取得真实 EXE、文件句柄最终路径和进程 token SID，并在同一绝对超时内严格校验 JSON 类型、成功状态、空错误、game/Steam/MOD/EXE/Native/UE4SS 精确身份、runtime 验证位、只读模式、完整 capability/probe 集以及每种操作的数据结构；第二个 hello、未知消息、跨 session result 或任一漂移都会立即非零退出。`inventory.probe` 还要求至少一个已识别在线玩家的 common/dropSlot/food 三容器全部 resolved。将最终路径与 SID 同步写入私有生产配置的 `ApprovedPalServerExecutablePath` 和 `ApprovedPalServerProcessSid`，不得提交真实机器路径。
-8. 对探针结果脱敏、扫描并按 `p0-04-current-native-probe` 生成双签名 live evidence；未通过前卸载候选或继续保持所有经济写入关闭，不得改写兼容矩阵为 stable。
+   脚本会从 Pipe 服务端 PID 独立取得真实 EXE、文件句柄最终路径和进程 token SID，并在同一绝对超时内严格校验 JSON 类型、成功状态、空错误、game/Steam/MOD/EXE/Native/UE4SS 精确身份、runtime 验证位、只读模式、完整 capability/probe 集以及每种操作的数据结构；第二个 hello、未知消息、跨 session result 或任一漂移都会立即非零退出。`inventory.probe` 还要求至少一个已识别在线玩家的 common/dropSlot/food 三容器全部 resolved，并要求该库存由当前权威世界的有效玩家控制器证明 `ownerOnline=true`。将最终路径与 SID 同步写入私有生产配置的 `ApprovedPalServerExecutablePath` 和 `ApprovedPalServerProcessSid`，不得提交真实机器路径。
+
+   也可以使用 `tools/run-native-bridge-probe-suite.ps1` 一次运行固定的 12 项只读探针。输出目录只能位于仓库外私有目录或已忽略的 `.agent-build`；工具只在终端显示有界汇总，可能包含玩家/帕鲁标识的原始 JSON 不得提交。无人在线时，`players.probe`、`players.progression.probe` 和 `inventory.probe` 的拒绝只能证明 fail-closed，不能算通过 P0-04。
+8. 对探针结果脱敏、扫描并按 `p0-04-current-native-probe` 生成双签名 live evidence；未通过前卸载候选或继续保持所有经济写入关闭，不得改写兼容矩阵为 stable。维护结束使用 `stop-native-probe-palserver.ps1`：它要求官方 REST 回环、零在线玩家、先保存并等待 `Level.sav` 稳定，再发送一次 graceful shutdown；响应不确定时不盲目重试，也不使用 `Stop-Process`/`taskkill`。
 
 ## 开放写入前的门禁
 

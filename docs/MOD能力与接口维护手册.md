@@ -1,7 +1,7 @@
 # Pal Control MOD 能力与接口维护手册
 
 > 适用项目：幻兽商域 Palworld Windows Dedicated Server 控制台
-> 文档基线日期：2026-07-16
+> 文档基线日期：2026-07-17
 > Control API 协议：HTTP JSON + SSE
 > Native Bridge 协议：Named Pipe `1.1`
 
@@ -13,13 +13,16 @@
 | --- | --- | --- |
 | 服务器名称 | `幻兽商域` | 来自官方 REST `/info` |
 | 当前游戏版本 | `v1.0.1.100619` | 2026-07-16 从官方 REST `/info` 回读 |
-| Native 当前源码候选 | `v1.0.1.100619` / build `24181105` | dev37-ro 已绑定精确 PalServer EXE 并完成只读构建，但尚未实服加载/探针，不是已批准 runtime |
-| 当前进程 Native Bridge | 未连接 | 服务更新到 Steam build `24181105` 后，兼容性守卫隔离了旧 UE4SS loader；官方 REST 可达且无人在线，但 Named Pipe 连接超时 |
-| 最近已验证加载版本 | `0.3.0-dev.36` | UE4SS 日志记录 2026-07-15 11:07 的上一次进程已加载并建立 Bridge；之后的进程必须重新探针 |
-| 源码声明版本 | `0.3.0-dev.37-ro` | 协议 1.1，只读候选；所有写 capability、聊天 hook 与随机复活 hook 均关闭 |
-| 服务器磁盘 DLL | `0.3.0-dev.36` | SHA-256 `6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A` |
-| dev37-ro 候选构建 | `0.3.0-dev.37-ro` | 两个全新独立目录在 Cargo `--locked`、受审 Cargo.lock 与精确非浅克隆依赖下可复现 886,272 字节、SHA-256 `C91BEE8F943B6C151A59C41FF0A51AEBF36469B0C60F4201494CC5A3A416F8A7`；未部署、未发布 Workshop |
-| `Info.template.json` | `0.3.0-dev.37-ro` | 与当前源码候选一致；不代表服务器磁盘上的旧 dev36 已替换 |
+| Native 当前源码候选 | `v1.0.1.100619` / build `24181105` | dev39-ro 已绑定精确 PalServer EXE/UE4SS，并完成双独立可复现只读构建；尚未实服加载，仍不是已批准 stable runtime |
+| 当前进程 Native Bridge | 服务器已停止 | 最近一次 dev38-ro 探针后通过官方 REST 保存并优雅关服；dev39-ro 尚未加载，当前没有可沿用的 Bridge 会话 |
+| 最近已验证加载版本 | `0.3.0-dev.38-ro` | 历史精确 DLL 在受控实服加载，runtime identity 通过且写能力关闭；9 项非玩家 schema/catalog/UI 操作成功，3 项 live-player 探针因无人在线拒绝，0 项意外失败；现为 superseded/quarantined |
+| 源码声明版本 | `0.3.0-dev.39-ro` | 协议 1.1，只读源码/制品候选；所有 consume/mutate/send、聊天 hook 与随机复活 hook 均关闭；runtime validation pending |
+| 服务器磁盘 DLL | `0.3.0-dev.38-ro` 历史 overlay | 888,320 字节；SHA-256 `012F84929448321196734B0BDC1F1B6A899A6F7A0AA87564D99B6E4C40B868AA`；已 superseded 且服务器已停止，不得作为当前部署启动 |
+| dev39-ro 候选构建 | `0.3.0-dev.39-ro` | 两个全新独立目录在 Cargo `--locked`、受审 Cargo.lock 与精确非浅克隆依赖下得到字节一致的 893,440 字节 DLL；SHA-256 `C2DAB9F9BFD3C47AC1A244139FB96CE1DE6F598C4BCE438EBDDDE96185063B34`；尚未加载或执行固定探针套件 |
+| dev38-ro 历史候选 | `0.3.0-dev.38-ro` | 888,320 字节，SHA-256 `012F84929448321196734B0BDC1F1B6A899A6F7A0AA87564D99B6E4C40B868AA`；保留上述 9 成功/3 无人在线拒绝/0 意外失败证据，状态为 `superseded/quarantined`，禁止重新部署 |
+| dev37-ro 历史候选 | `0.3.0-dev.37-ro` | 886,272 字节，SHA-256 `C91BEE8F943B6C151A59C41FF0A51AEBF36469B0C60F4201494CC5A3A416F8A7`；实服探针暴露“持久离线库存被误当作 live inventory”，状态为 `superseded/quarantined`，禁止重新部署 |
+| dev36 历史加载 | `0.3.0-dev.36` | 旧 `v1.0.0.100427` 进程曾建立 Bridge；SHA-256 `6EF1DCD71DF9FFC3458A20560E10264F1F795753C2ADC8C2E109889A552DE44A`，仅为 experimental 历史实现 |
+| `Info.template.json` | `0.3.0-dev.39-ro` | 与当前源码候选一致；不表示运行时、写能力或完整验收已经获批 |
 | Native 协议 | `1.1` | hello 强制携带 Steam build、宿主 EXE/Native DLL/UE4SS DLL 大小与 SHA-256、runtime 验证结果和 writeEnabled；Control API 经 pipe server PID 独立复核主 EXE，模块摘要继续与锁比较 |
 | Control API | `http://127.0.0.1:5180` | 生产目标仅监听回环；当前运行状态以 readiness 为准 |
 | Web 控制台 | `http://127.0.0.1:5174` | 本地开发端口，不代表进程持续运行 |
@@ -28,13 +31,15 @@
 | 游戏端口 | UDP `8211` | 可做公网映射 |
 | Query 端口 | UDP `27015` | 可做公网映射 |
 | RCON | 启用（仅供本机控制链路） | `RCONEnabled=True`；Windows 防火墙阻断 TCP `25575` 外部入站 |
-| Native Pipe | `\\.\pipe\pal-control.local.v1` | 仅本机进程访问；本次快照未连接 |
+| Native Pipe | `\\.\pipe\pal-control.local.v1` | 仅本机受控 SID 可访问；服务器停止后本次快照无活动 pipe |
 
 ### 当前开发模式约定
 
-1. 服务器磁盘仍保留旧 `0.3.0-dev.36` DLL；上一次 `v1.0.0.100427` 进程曾验证 Bridge、完整槽元数据及 capability。当前源码/模板已形成 `v1.0.1.100619` / build `24181105` 的 dev37-ro 只读候选，并在注册 hook 前强制核对宿主 EXE 大小/SHA-256；它只完成编译，尚未部署或取得实服 ABI/schema probe。兼容性守卫继续隔离旧 loader，绝不能为了“连上 Pipe”恢复旧 DLL，也不能把 dev37-ro 的编译成功写成 runtime 成功。只有只读门禁通过后才可另行评审写候选；`inventory.consume` 在真实“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收前仍不得用于公开经济入账。
+1. 当前源码与模板为 `v1.0.1.100619` / build `24181105` 的 dev39-ro；它在注册 hook 前强制核对宿主 EXE 大小/SHA-256，并已完成 893,440 字节、SHA-256 `C2DAB9F9BFD3C47AC1A244139FB96CE1DE6F598C4BCE438EBDDDE96185063B34` 的双独立字节一致构建，但尚未实服加载或执行固定套件。服务器磁盘上的 dev38-ro overlay 已 superseded，不是当前可启动部署；其 9 项成功、3 项无人在线拒绝只是历史证据。dev37-ro 因离线库存边界缺陷已淘汰，dev36 仅保留历史，三者都不得恢复。dev39-ro 仍须受控运行固定套件、在线玩家三项、固定 PalDefender 组合和独立复核后才可另行评审写候选；`inventory.consume` 在真实“受控玩家扣物 → 保存 → 停服 → 重启 → 重登”验收前仍不得用于公开经济入账。
 2. 即使处于开发模式，PalServer 重启也必须先确认无人在线，再通过官方 REST 保存和正常关服；禁止为替换 DLL 强杀进程。
-3. 客户端浮层只读探针已验证 `PalGameStateInGame:BroadcastServerNotice` 的参数区为 16 字节、FunctionFlags 为 `0x24CC0`，`publishClientOverlay=true`。
+3. 历史 dev38-ro 客户端浮层只读探针验证过 `PalGameStateInGame:BroadcastServerNotice` 的参数区为 16 字节、FunctionFlags 为 `0x24CC0`，`publishClientOverlay=true`；dev39-ro 必须重新执行固定套件后才能把该结果记为当前运行证据。
+
+> 下文为维护源码接口而保留的 mutate/send、经验、帕鲁编辑、公告投递等写流程均属于历史实现或未来候选设计。除非另行明确写明，不能把“源码已实现”理解为 dev39-ro 当前 hello 会发布或执行该能力；dev39-ro 会在构建、能力协商和游戏线程三层拒绝这些写操作。
 
 ## 2. 系统结构
 
@@ -659,9 +664,11 @@ payloadLength bytes UTF-8 JSON
 - 命令队列最大 128。
 - 结果队列最大 128。
 - 每个 Engine Tick 最多处理 4 条命令。
-- Pipe DACL 只允许 Local SYSTEM、Administrators 和对象所有者。
+- Pipe DACL 固定允许 Local SYSTEM、Administrators、对象所有者和锁中批准的低权限 `NT SERVICE\PalControl.ControlApi` service SID；远程客户端拒绝。
 
-### 11.2 已实现 operation
+### 11.2 源码 operation 与当前候选可用性
+
+dev39-ro 源码的 hello 只声明只读 schema/probe/read/catalog capability；该精确制品尚未实服加载，不能把源码声明写成已观察到的运行能力。下表中的 mutate/send 行仅表示历史源码接口，当前候选在构建、hello 和游戏线程三层关闭，不能调用或作为生产能力。
 
 | Operation | 类型 | 说明 |
 | --- | --- | --- |
@@ -669,16 +676,16 @@ payloadLength bytes UTF-8 JSON
 | `players.schema` | 只读诊断 | 输出玩家反射字段和候选函数 |
 | `players.progression.schema` | 只读诊断 | 输出成长字段、科技字段和原生函数签名 |
 | `players.progression.probe` | 只读 | 读取加载中的玩家成长快照 |
-| `players.progression.mutate` | 受控写入 | 经验、目标等级、属性点、科技点和属性分配 |
+| `players.progression.mutate` | 历史受控写入（dev39-ro 关闭） | 经验、目标等级、属性点、科技点和属性分配 |
 | `inventory.probe` | 只读 | 读取已加载背包和容器 |
 | `inventory.schema` | 只读诊断 | 输出背包相关类型结构 |
-| `inventory.mutate` | 受控写入 | 修改已占用槽位数量 |
+| `inventory.mutate` | 历史受控写入（dev39-ro 关闭） | 修改已占用槽位数量 |
 | `pals.probe` | 只读 | 读取已加载帕鲁快照 |
 | `pals.schema` | 只读诊断 | 输出帕鲁相关字段和函数 |
 | `pals.skills.catalog` | 只读 | 主动/被动技能目录与 `zh-Hans` 文本 |
-| `pals.mutate` | 受控写入 | 昵称、收藏、被动替换、主动装备 |
+| `pals.mutate` | 历史受控写入（dev39-ro 关闭） | 昵称、收藏、被动替换、主动装备 |
 | `announcements.overlay.probe` | 只读诊断 | 校验唯一 authoritative GameState、函数 owner、flags 与单一 FString 参数，不调用 `ProcessEvent` |
-| `announcements.overlay.send` | 受控写入，`dev.15` | 调用 `PalGameStateInGame:BroadcastServerNotice`；返回广播尝试数但不伪造客户端 ACK |
+| `announcements.overlay.send` | 历史受控写入（dev39-ro 关闭） | 调用 `PalGameStateInGame:BroadcastServerNotice`；返回广播尝试数但不伪造客户端 ACK |
 
 ### 11.3 Command envelope
 
@@ -1018,7 +1025,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 | HTTP OpenAPI 草案 | `packages/contracts/openapi/control-api.yaml` |
 | Pipe JSON Schema | `packages/contracts/bridge/message.schema.json` |
 
-## 20. 周世界资源经济能力快照（2026-07-15）
+## 20. 周世界资源经济能力快照（2026-07-17）
 
 完整方案、接口和换档手册见 [`extraction-mode/README.md`](../extraction-mode/README.md)。当前本机实现包括：
 
@@ -1030,7 +1037,7 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 商城以逐物品结构化 receipt 归因发货；同一 `serverId + idempotencyKey` 跨重启返回同一结果，partial/`uncertain` 不重发，dead-letter 会告警并自动关闭购买。扣款/订单与 command accepted 虽在同库，仍是由持久 delivery/receipt 衔接的两个事务，不能宣称一次原子提交。
 - 资源报价在配置圆形区域连续采样两次，读取 `Items/Food/DropSlot` 的完整 Native 槽元数据，为全部白名单资源生成 30 秒整单快照。
 - Production 结算只调用 Native `inventory.consume`：同 Tick 比较完整快照、执行全成或全败扣物、逐行与聚合回读并持久化 run 结果；RCON `/delitems` 只保留为显式 Development 诊断，不能作为生产降级。
-- 当前服务器磁盘旧 dev36 曾发布 `inventory.consume.experimental`；新 dev37-ro 候选完全不发布写 capability。只有 dev37-ro 先通过当前版本只读探针、再产生独立写候选并完成真实“扣物 → 保存 → 停服 → 重启 → 重登”验收后，才可评审稳定 `inventory.consume`；生产资源兑换 Safety Gate 继续保持关闭。
+- 旧 dev36 曾发布 `inventory.consume.experimental`；dev37-ro 因把持久离线库存误判为 live inventory 已被隔离。dev38-ro 完成过 9 项非玩家只读操作和 3 项无人在线拒绝，但现已 superseded/quarantined。当前 dev39-ro 完全不发布写 capability，且只有双独立可复现制品证据；必须先完成受控运行固定套件，再由在线玩家完成玩家、成长和三容器库存探针并独立复核。之后还须产生独立写候选并完成真实“扣物 → 保存 → 停服 → 重启 → 重登”验收，才可评审稳定 `inventory.consume`；生产资源兑换 Safety Gate 继续保持关闭。
 - settlement 使用 lease/CAS、终态单调、同库唯一 credit 和保守恢复；派发后无法证明结果时进入 `uncertain`，不重扣、不入账并等待人工对账。
 - 维护闸门会同时拒绝新订单、报价和结算；readiness 会阻止存在派发中、`uncertain`、dead-letter、过期备份、版本/世界漂移或未终结 settlement 时换档。
 - [`Invoke-WeeklyRollover.ps1`](../extraction-mode/scripts/Invoke-WeeklyRollover.ps1) 默认只读生成计划；显式 `-Execute` 时由服务端持久化的 operation/step key 驱动双备份、优雅停服、冻结目标 `DedicatedServerName`、启动探针、赛季 worldId 提交和恢复。脚本结构性拒绝移动或删除旧世界。
@@ -1048,5 +1055,5 @@ Palworld、UE4SS 或 MOD 升级时按顺序执行：
 - 所有 `/api/v1/player/me/*` 身份只来自会话，不接受浏览器指定玩家；全部 POST 校验严格 Origin，业务写操作额外校验 CSRF，购买与结算继续要求幂等键。
 - 兼容路径 `GET /api/v1/player/me/extraction-zones` 返回内容定义兑换点以及当前会话玩家自己的在线位置、开放/热点状态、开放窗口、路线、风险提示、服务端有效收益倍率、逐区下一开放时间和全关时的最早 `nextOpensAt`、中心/边界距离和范围状态；离线或位置不可用时仍可查看区域，不返回其他玩家位置。
 - `apps/player-web` 只包含本人钱包、商城、活动、可靠任务、5 步引导、订单、流水、资源兑换点地图和兑换记录，不加载玩家目录或任何管理员组件。地图每 5 秒更新；处理中订单/兑换在页面可见时每 3 秒有界轮询并在终态停止，报价倒计时到期后 fail-closed。
-- 旧 dev36 可监听原生 `BroadcastChatMessage` 并私回资源兑换点情报；当前 dev37-ro 只读候选不会安装聊天 hook。只有后续写能力评审重新批准时才可启用；`/` 前缀仍属于管理员命令解析器。历史实现说明见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
+- 旧 dev36 可监听原生 `BroadcastChatMessage` 并私回资源兑换点情报；当前 dev39-ro 只读候选不会安装聊天 hook，已淘汰的 dev37-ro 与已 superseded 的 dev38-ro 也不得恢复。只有后续写能力评审重新批准时才可启用；`/` 前缀仍属于管理员命令解析器。历史实现说明见 [`extraction-chat-command.md`](runbooks/extraction-chat-command.md)。
 - 公网 Caddy 只反代 `/api/v1/player/*`；其他 `/api` 直接返回 404。`5174`、`5180`、`8212`、`17993`、`25575` 继续禁止公网映射。

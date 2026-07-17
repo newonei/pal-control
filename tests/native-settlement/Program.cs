@@ -15,13 +15,14 @@ var cancellationToken = CancellationToken.None;
 VerifyRuntimeIdentityQuarantine();
 VerifySessionFrameValidation();
 await VerifyStableCapabilityAndFullSnapshotAsync(cancellationToken);
+await VerifyOwnerOnlineSettlementBoundaryAsync(cancellationToken);
 await VerifyContentSwitchFailsBeforeNativeDispatchAsync(cancellationToken);
 await VerifyDynamicQuoteEvidenceAndWindowSemanticsAsync(cancellationToken);
 await VerifyConsumeEvidenceClassificationAsync(cancellationToken);
 await VerifyDurableIdempotencyAndReceiptAsync(cancellationToken);
 await VerifyPersistenceFaultBoundariesAsync(cancellationToken);
 VerifyProductionNeverSelectsRcon();
-Console.WriteLine("PASS: runtime-bound protocol 1.1/read-only quarantine, fail-closed session frames/results, Native quote snapshot, content/event-switch pre-dispatch rejection, dynamic event/hotspot quote grace, durable dynamic evidence, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
+Console.WriteLine("PASS: runtime-bound protocol 1.1/read-only quarantine, fail-closed session frames/results, online-owner-only Native quote/settlement, content/event-switch pre-dispatch rejection, dynamic event/hotspot quote grace, durable dynamic evidence, exact consume evidence, deterministic persistence faults, restart no-redispatch, and durable idempotency checks.");
 
 static void VerifyRuntimeIdentityQuarantine()
 {
@@ -29,7 +30,7 @@ static void VerifyRuntimeIdentityQuarantine()
     readOnly.OnHello(new NativeBridgeHello(
         "1.1",
         "v1.0.1.100619",
-        "0.3.0-dev.37-ro",
+        "0.3.0-dev.39-ro",
         ["bridge.hello", "inventory.schema", "inventory.probe", "inventory.read"],
         new Dictionary<string, bool>
         {
@@ -80,7 +81,7 @@ static void VerifyRuntimeIdentityQuarantine()
     ExpectInvalidHello(new NativeBridgeHello(
         "1.0",
         "v1.0.1.100619",
-        "0.3.0-dev.37-ro",
+        "0.3.0-dev.39-ro",
         ["inventory.probe"],
         new Dictionary<string, bool>(),
         "24181105",
@@ -91,7 +92,7 @@ static void VerifyRuntimeIdentityQuarantine()
     ExpectInvalidHello(new NativeBridgeHello(
         "1.1",
         "v1.0.1.100619",
-        "0.3.0-dev.37-ro",
+        "0.3.0-dev.39-ro",
         ["inventory.probe", "inventory.consume.experimental"],
         new Dictionary<string, bool>(),
         "24181105",
@@ -102,7 +103,7 @@ static void VerifyRuntimeIdentityQuarantine()
     ExpectInvalidHello(new NativeBridgeHello(
         "1.1",
         "v1.0.1.100619",
-        "0.3.0-dev.37-ro",
+        "0.3.0-dev.39-ro",
         ["inventory.probe"],
         new Dictionary<string, bool>(),
         "24181105",
@@ -113,7 +114,7 @@ static void VerifyRuntimeIdentityQuarantine()
     ExpectInvalidHello(new NativeBridgeHello(
         "1.1",
         "v1.0.1.100619",
-        "0.3.0-dev.37-ro",
+        "0.3.0-dev.39-ro",
         ["inventory.probe"],
         new Dictionary<string, bool>(),
         "24181105",
@@ -304,7 +305,7 @@ static Dictionary<string, object?> ValidHelloFrame()
 {
     var frame = BaseFrame("hello");
     frame["gameBuild"] = "v1.0.1.100619";
-    frame["modVersion"] = "0.3.0-dev.37-ro";
+    frame["modVersion"] = "0.3.0-dev.39-ro";
     frame["capabilities"] = new[] { "bridge.hello", "inventory.probe" };
     frame["probes"] = new Dictionary<string, bool>
     {
@@ -751,6 +752,75 @@ static async Task VerifyStableCapabilityAndFullSnapshotAsync(CancellationToken c
             "local", playerUid.ToString("N"), cancellationToken));
     Assert(corruptMetadata?.Code == "NATIVE_INVENTORY_PROBE_INVALID",
         "A human-readable corruption value that disagreed with its exact bits was accepted.");
+}
+
+static async Task VerifyOwnerOnlineSettlementBoundaryAsync(
+    CancellationToken cancellationToken)
+{
+    var playerUid = Guid.NewGuid();
+    var onlineProbe = ProbeJson(playerUid);
+    var rejectedProbes = new[]
+    {
+        (
+            Name: "offline",
+            Json: onlineProbe.Replace(
+                "\"ownerOnline\":true",
+                "\"ownerOnline\":false",
+                StringComparison.Ordinal)),
+        (
+            Name: "missing-ownerOnline",
+            Json: onlineProbe.Replace(
+                "\"ownerOnline\":true,",
+                string.Empty,
+                StringComparison.Ordinal))
+    };
+
+    foreach (var rejectedProbe in rejectedProbes)
+    {
+        var transport = new FakeNativeBridgeTransport();
+        transport.Results.Enqueue(Result("succeeded", rejectedProbe.Json));
+        var adapter = new ExtractionNativeInventoryAdapter(StableState(), transport);
+
+        var error = await CaptureExtractionErrorAsync(() =>
+            adapter.CaptureQuoteSnapshotAsync(
+                "local",
+                playerUid.ToString("N"),
+                cancellationToken));
+
+        Assert(error?.Code == "NATIVE_PLAYER_INVENTORY_NOT_UNIQUE",
+            $"The {rejectedProbe.Name} inventory was allowed to match a live-player quote.");
+        Assert(transport.Calls.Count == 1 &&
+               transport.Calls[0].Operation == "inventory.probe" &&
+               transport.Calls.All(call => call.Operation != "inventory.consume"),
+            $"The {rejectedProbe.Name} inventory crossed the quote boundary into settlement.");
+    }
+
+    var onlineTransport = new FakeNativeBridgeTransport();
+    onlineTransport.Results.Enqueue(Result("succeeded", onlineProbe));
+    onlineTransport.Results.Enqueue(Result("succeeded", SuccessJson(actualConsumed: 5)));
+    var onlineAdapter = new ExtractionNativeInventoryAdapter(StableState(), onlineTransport);
+    var onlineSnapshot = await onlineAdapter.CaptureQuoteSnapshotAsync(
+        "local",
+        playerUid.ToString("N"),
+        cancellationToken);
+    var onlinePayload = onlineAdapter.CreateConsumePayload(
+        onlineSnapshot,
+        [new ExtractionLootLine("Leather", "Leather", 5, 2, 10)]);
+    var requestHash = onlineAdapter.ComputeRequestHash(
+        Guid.NewGuid(),
+        "local",
+        onlinePayload);
+    var outcome = await onlineAdapter.ConsumeAsync(
+        "local",
+        onlinePayload,
+        requestHash,
+        "owner-online-boundary-key",
+        cancellationToken);
+
+    Assert(outcome.Receipt.Disposition == ExtractionNativeConsumeDisposition.Succeeded &&
+           onlineTransport.Calls.Select(call => call.Operation)
+               .SequenceEqual(["inventory.probe", "inventory.consume"]),
+        "An ownerOnline=true inventory did not complete the quote and settlement path.");
 }
 
 static async Task VerifyConsumeEvidenceClassificationAsync(CancellationToken cancellationToken)
@@ -1277,6 +1347,7 @@ static string ProbeJson(Guid playerUid) => $$"""
   "truncated":false,
   "inventories":[{
     "ownerPlayerUId":"{{playerUid:D}}",
+    "ownerOnline":true,
     "containers":[
       {"kind":"common","containerId":"{{Guid.NewGuid():D}}","resolved":true,"slotCount":2,"truncated":false,"slots":[
         {"slotIndex":0,"staticItemId":"Leather","stackCount":5,"dynamicCreatedWorldId":"{{Guid.Empty:D}}","dynamicLocalIdInCreatedWorld":"{{Guid.Empty:D}}","hasDynamicItemData":false,"corruptionProgress":0.0,"corruptionProgressBits":0},

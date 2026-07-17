@@ -14,7 +14,7 @@
 
 - 生产入口拒绝 dirty/未知提交、错误 ZIP hash、未声明/篡改文件、路径逃逸、reparse point 和同 releaseId 不同内容。
 - 程序文件位于不可变 `releases/<releaseId>`；配置、密钥、SQLite、日志、备份、Caddy TLS 数据与部署快照全部位于独立 `%ProgramData%` 状态树。
-- Control API 与 Caddy 使用不同的 `NT SERVICE\...` 虚拟账户，自动启动，并由 SCM 以 5/15/60 秒失败重启策略守护。当前 dev37-ro Native pipe ACL 精确固定默认 `NT SERVICE\PalControl.ControlApi` 的 service SID；如自定义服务名，必须先更新 Native 锁、ACL 编译参数和候选摘要并重新走兼容评审，不能只改部署脚本参数。
+- Control API 与 Caddy 使用不同的 `NT SERVICE\...` 虚拟账户，自动启动，并由 SCM 以 5/15/60 秒失败重启策略守护。当前 dev38-ro Native pipe ACL 精确固定默认 `NT SERVICE\PalControl.ControlApi` 的 service SID；如自定义服务名，必须先更新 Native 锁、ACL 编译参数和候选摘要并重新走兼容评审，不能只改部署脚本参数。dev38-ro 仍是 quarantined 只读候选；本段只描述服务与 ACL 结构，不授权经济写入。
 - Control API 读取 `PAL_CONTROL_CONFIG_PATH` 指向的外部配置；环境变量和命令行仍具有更高优先级。资源目录通过 `Palworld:ResourceCatalogPath` 从状态树注入，不复制进发布物。
 - Caddy 在切换期间先停止，Control API 通过 `/health/ready` 后才重新启动公网边界。失败时恢复停服冷快照、旧二进制和旧静态根；未完成迁移不会暴露给玩家。
 - 已上线后的普通回滚只允许相同 `dataContract`，并保留当前账本和未决状态；跨契约降级被拒绝，必须走 staging 恢复和人工核对。

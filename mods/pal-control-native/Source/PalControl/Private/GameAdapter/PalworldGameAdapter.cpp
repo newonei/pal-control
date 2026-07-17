@@ -499,7 +499,14 @@ namespace
         if (auto* property = playerStateClass->FindProperty(FName(STR("PlayerUId")));
             property && property->IsA<FStructProperty>())
         {
-            result.PlayerUId = static_cast<FStructProperty*>(property);
+            auto* playerUId = static_cast<FStructProperty*>(property);
+            if (playerUId->GetStruct() &&
+                playerUId->GetStruct()->GetName() == STR("Guid") &&
+                playerUId->GetArrayDim() == 1 &&
+                playerUId->GetSize() == sizeof(FGuid))
+            {
+                result.PlayerUId = playerUId;
+            }
         }
         if (auto* property = playerStateClass->FindProperty(FName(STR("AccountName")));
             property && property->IsA<FStrProperty>())
@@ -1760,6 +1767,135 @@ namespace
             }
         }
         return liveControllers;
+    }
+
+    struct LivePlayerResolution
+    {
+        RC::Unreal::UWorld* World{};
+        RC::Unreal::UClass* PlayerStateClass{};
+        IdentityProperties Identity{};
+        std::vector<RC::Unreal::UObject*> PlayerStates;
+        std::set<std::string> PlayerUIds;
+        std::string ErrorCode;
+        std::string ErrorMessage;
+
+        [[nodiscard]] bool IsReady() const
+        {
+            return World && PlayerStateClass && Identity.IsReady() &&
+                ErrorCode.empty() && !PlayerStates.empty() &&
+                PlayerStates.size() == PlayerUIds.size();
+        }
+    };
+
+    LivePlayerResolution ResolveLivePlayers()
+    {
+        using namespace RC::Unreal;
+
+        LivePlayerResolution result{};
+        auto* gameStateClass = UObjectGlobals::StaticFindObject<UClass*>(
+            nullptr, nullptr, STR("/Script/Pal.PalGameStateInGame"));
+        auto* playerControllerClass = UObjectGlobals::StaticFindObject<UClass*>(
+            nullptr, nullptr, STR("/Script/Pal.PalPlayerController"));
+        result.PlayerStateClass = UObjectGlobals::StaticFindObject<UClass*>(
+            nullptr, nullptr, STR("/Script/Pal.PalPlayerState"));
+        result.Identity = ResolveIdentityProperties(result.PlayerStateClass);
+        if (!gameStateClass || !playerControllerClass ||
+            !result.PlayerStateClass || !result.Identity.IsReady())
+        {
+            result.ErrorCode = "NATIVE_LIVE_PLAYER_SCHEMA_UNAVAILABLE";
+            result.ErrorMessage =
+                "The authoritative game-state, controller, player-state, or identity schema is unavailable.";
+            return result;
+        }
+
+        auto* playerStateProperty = FindTypedProperty<FObjectProperty>(
+            playerControllerClass, STR("PlayerState"));
+        auto* declaredPlayerStateClass = playerStateProperty
+            ? playerStateProperty->GetPropertyClass().Get()
+            : nullptr;
+        if (!playerStateProperty || !declaredPlayerStateClass ||
+            !result.PlayerStateClass->IsChildOf(declaredPlayerStateClass))
+        {
+            result.ErrorCode = "NATIVE_LIVE_PLAYER_SCHEMA_UNAVAILABLE";
+            result.ErrorMessage =
+                "PalPlayerController.PlayerState is not an object property whose declared class can hold PalPlayerState.";
+            return result;
+        }
+
+        std::vector<UObject*> gameStateObjects;
+        UObjectGlobals::FindAllOf(STR("PalGameStateInGame"), gameStateObjects);
+        std::vector<UObject*> authoritativeGameStates;
+        for (auto* gameState : gameStateObjects)
+        {
+            if (IsAuthoritativeLiveGameState(gameState, gameStateClass))
+            {
+                authoritativeGameStates.push_back(gameState);
+            }
+        }
+        if (authoritativeGameStates.size() != 1)
+        {
+            result.ErrorCode = authoritativeGameStates.empty()
+                ? "NATIVE_LIVE_GAME_STATE_UNAVAILABLE"
+                : "NATIVE_LIVE_GAME_STATE_AMBIGUOUS";
+            result.ErrorMessage = authoritativeGameStates.empty()
+                ? "No authoritative live PalGameStateInGame object is available."
+                : "More than one authoritative live PalGameStateInGame object was found.";
+            return result;
+        }
+
+        result.World = authoritativeGameStates.front()->GetWorld();
+        const auto controllers = FindLivePalPlayerControllers(
+            result.World, playerControllerClass);
+        if (controllers.empty())
+        {
+            result.ErrorCode = "NO_ONLINE_PLAYER";
+            result.ErrorMessage =
+                "The authoritative Palworld game world has no live player controller.";
+            return result;
+        }
+
+        std::set<UObject*> uniqueStates;
+        for (auto* controller : controllers)
+        {
+            auto* playerState = *playerStateProperty
+                ->ContainerPtrToValuePtr<UObject*>(controller);
+            if (!playerState || !playerState->IsA(result.PlayerStateClass) ||
+                playerState->GetWorld() != result.World ||
+                playerState->HasAnyFlags(static_cast<EObjectFlags>(
+                    RF_ClassDefaultObject |
+                    RF_ArchetypeObject |
+                    RF_BeginDestroyed |
+                    RF_FinishDestroyed)) ||
+                playerState->HasAnyInternalFlags(
+                    EInternalObjectFlags::Unreachable |
+                    EInternalObjectFlags::PendingKill |
+                    EInternalObjectFlags::PendingConstruction) ||
+                !uniqueStates.insert(playerState).second)
+            {
+                result.ErrorCode = "NATIVE_LIVE_PLAYER_STATE_INVALID";
+                result.ErrorMessage =
+                    "A live controller did not resolve to one unique live PalPlayerState in the authoritative world.";
+                result.PlayerStates.clear();
+                result.PlayerUIds.clear();
+                return result;
+            }
+
+            const auto playerUId = ReadPlayerUId(
+                result.Identity.PlayerUId, playerState);
+            if (!playerUId || playerUId->empty() ||
+                !result.PlayerUIds.insert(
+                    NormalizeIdentifier(*playerUId)).second)
+            {
+                result.ErrorCode = "NATIVE_LIVE_PLAYER_IDENTITY_INVALID";
+                result.ErrorMessage =
+                    "A live PalPlayerState did not resolve to one unique non-empty PlayerUId.";
+                result.PlayerStates.clear();
+                result.PlayerUIds.clear();
+                return result;
+            }
+            result.PlayerStates.push_back(playerState);
+        }
+        return result;
     }
 
     std::size_t CountLivePalPlayerControllers(RC::Unreal::UWorld* world)
@@ -4011,14 +4147,21 @@ namespace PalControl::Game
         using namespace RC;
         using namespace RC::Unreal;
 
-        auto* playerStateClass = UObjectGlobals::StaticFindObject<UClass*>(
-            nullptr,
-            nullptr,
-            STR("/Script/Pal.PalPlayerState"));
-
-        std::vector<UObject*> playerStates;
-        UObjectGlobals::FindAllOf(STR("PalPlayerState"), playerStates);
-        const auto identityProperties = ResolveIdentityProperties(playerStateClass);
+        const auto livePlayers = ResolveLivePlayers();
+        if (!livePlayers.IsReady())
+        {
+            return Failure(
+                command,
+                livePlayers.ErrorCode.empty()
+                    ? "NATIVE_LIVE_PLAYER_RESOLUTION_INCOMPLETE"
+                    : livePlayers.ErrorCode,
+                livePlayers.ErrorMessage.empty()
+                    ? "The live player set could not be resolved completely."
+                    : livePlayers.ErrorMessage);
+        }
+        auto* playerStateClass = livePlayers.PlayerStateClass;
+        const auto& playerStates = livePlayers.PlayerStates;
+        const auto& identityProperties = livePlayers.Identity;
         const auto uidStructName = identityProperties.PlayerUId &&
                 identityProperties.PlayerUId->GetStruct()
             ? to_string(identityProperties.PlayerUId->GetStruct()->GetName())
@@ -4091,25 +4234,26 @@ namespace PalControl::Game
         const auto mapping = ResolvePlayerProgressionProperties();
         if (!mapping.IsReady())
         {
-            return Contracts::CommandResult{
-                .CommandId = command.CommandId,
-                .State = Contracts::CommandState::Succeeded,
-                .ObservedRevision = 0,
-                .DataJson = std::string{"{"} +
-                    "\"observedAt\":\"" + UtcNow() + "\"," +
-                    "\"executionThread\":\"unreal-engine-tick\"," +
-                    "\"mappingReady\":false," +
-                    "\"parameterObjectCount\":0," +
-                    "\"playerCount\":0," +
-                    "\"players\":[]}"
-            };
+            return Failure(
+                command,
+                "PLAYER_PROGRESSION_MAPPING_UNAVAILABLE",
+                "The exact player progression reflection mapping is unavailable.");
         }
 
-        auto* playerStateClass = UObjectGlobals::StaticFindObject<UClass*>(
-            nullptr, nullptr, STR("/Script/Pal.PalPlayerState"));
-        const auto identity = ResolveIdentityProperties(playerStateClass);
-        std::vector<UObject*> playerStateObjects;
-        UObjectGlobals::FindAllOf(STR("PalPlayerState"), playerStateObjects);
+        const auto livePlayers = ResolveLivePlayers();
+        if (!livePlayers.IsReady())
+        {
+            return Failure(
+                command,
+                livePlayers.ErrorCode.empty()
+                    ? "NATIVE_LIVE_PLAYER_RESOLUTION_INCOMPLETE"
+                    : livePlayers.ErrorCode,
+                livePlayers.ErrorMessage.empty()
+                    ? "The live player set could not be resolved completely."
+                    : livePlayers.ErrorMessage);
+        }
+        const auto& identity = livePlayers.Identity;
+        const auto& playerStateObjects = livePlayers.PlayerStates;
         std::unordered_map<std::string, UObject*> playerStatesByUid;
         std::unordered_map<std::string, UObject*> playerStatesByInstanceId;
         std::unordered_map<std::string, std::string> playerUidsByInstanceId;
@@ -5514,10 +5658,30 @@ namespace PalControl::Game
         using namespace RC::Unreal;
 
         const auto mapping = ResolveInventoryProperties();
+        if (!mapping.IsReady() || !mapping.SupportsStaticSlotClear())
+        {
+            return Failure(
+                command,
+                "INVENTORY_PROBE_MAPPING_UNAVAILABLE",
+                "The exact inventory and slot metadata reflection mapping is unavailable.");
+        }
+        const auto livePlayers = ResolveLivePlayers();
+        if (!livePlayers.IsReady())
+        {
+            return Failure(
+                command,
+                livePlayers.ErrorCode.empty()
+                    ? "NATIVE_LIVE_PLAYER_RESOLUTION_INCOMPLETE"
+                    : livePlayers.ErrorCode,
+                livePlayers.ErrorMessage.empty()
+                    ? "The live player set could not be resolved completely."
+                    : livePlayers.ErrorMessage);
+        }
         std::vector<UObject*> inventoryObjects;
         std::vector<UObject*> containerObjects;
         UObjectGlobals::FindAllOf(STR("PalPlayerInventoryData"), inventoryObjects);
         UObjectGlobals::FindAllOf(STR("PalItemContainer"), containerObjects);
+        const auto& onlinePlayerUIds = livePlayers.PlayerUIds;
 
         std::unordered_map<std::string, UObject*> containersById;
         std::unordered_map<std::string, std::uint64_t> containerScores;
@@ -5574,6 +5738,7 @@ namespace PalControl::Game
         const auto returnedInventories = std::min(
             inventoryObjects.size(),
             MaxInventoryObjects);
+        std::size_t onlineInventoryCount = 0;
         for (std::size_t inventoryIndex = 0;
              inventoryIndex < returnedInventories;
              ++inventoryIndex)
@@ -5587,6 +5752,15 @@ namespace PalControl::Game
             const auto ownerPlayerUId = ReadTopLevelGuid(
                 mapping.OwnerPlayerUId,
                 inventory);
+            const auto ownerPlayerUIdText = ownerPlayerUId
+                ? GuidToString(*ownerPlayerUId)
+                : std::string{};
+            const bool ownerOnline = ownerPlayerUId && onlinePlayerUIds.contains(
+                NormalizeIdentifier(ownerPlayerUIdText));
+            if (ownerOnline)
+            {
+                ++onlineInventoryCount;
+            }
             auto* inventoryInfoMemory = mapping.InventoryInfo
                 ? mapping.InventoryInfo->ContainerPtrToValuePtr<uint8>(inventory)
                 : nullptr;
@@ -5711,8 +5885,9 @@ namespace PalControl::Game
 
             inventoriesJson += std::string{"{"} +
                 "\"ownerPlayerUId\":" + (ownerPlayerUId
-                    ? "\"" + GuidToString(*ownerPlayerUId) + "\""
+                    ? "\"" + ownerPlayerUIdText + "\""
                     : std::string{"null"}) + "," +
+                "\"ownerOnline\":" + (ownerOnline ? "true" : "false") + "," +
                 "\"objectName\":\"" + EscapeJson(to_string(inventory->GetName())) + "\"," +
                 "\"containers\":" + containersJson + "}";
         }
@@ -5725,6 +5900,8 @@ namespace PalControl::Game
             "\"slotMetadataReady\":" +
                 (mapping.SupportsStaticSlotClear() ? "true" : "false") + "," +
             "\"inventoryObjectCount\":" + std::to_string(inventoryObjects.size()) + "," +
+            "\"onlinePlayerCount\":" + std::to_string(onlinePlayerUIds.size()) + "," +
+            "\"onlineInventoryCount\":" + std::to_string(onlineInventoryCount) + "," +
             "\"containerObjectCount\":" + std::to_string(containerObjects.size()) + "," +
             "\"truncated\":" +
                 (inventoryObjects.size() > returnedInventories ? "true" : "false") + "," +

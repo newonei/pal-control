@@ -6493,7 +6493,10 @@ components:
         - observedAt
         - executionThread
         - mappingReady
+        - slotMetadataReady
         - inventoryObjectCount
+        - onlinePlayerCount
+        - onlineInventoryCount
         - containerObjectCount
         - truncated
         - inventories
@@ -6506,7 +6509,15 @@ components:
           const: unreal-engine-tick
         mappingReady:
           type: boolean
+        slotMetadataReady:
+          type: boolean
         inventoryObjectCount:
+          type: integer
+          minimum: 0
+        onlinePlayerCount:
+          type: integer
+          minimum: 0
+        onlineInventoryCount:
           type: integer
           minimum: 0
         containerObjectCount:
@@ -6520,11 +6531,13 @@ components:
             $ref: "#/components/schemas/NativeInventoryObject"
     NativeInventoryObject:
       type: object
-      required: [ownerPlayerUId, objectName, containers]
+      required: [ownerPlayerUId, ownerOnline, objectName, containers]
       properties:
         ownerPlayerUId:
           type: [string, "null"]
           format: uuid
+        ownerOnline:
+          type: boolean
         objectName:
           type: string
         containers:

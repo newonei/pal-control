@@ -458,9 +458,17 @@ try {
         "$baseUri/api/v1/admin/federation/compatibility-matrix" $null
     Assert-Status $adminMatrix 200 "viewer compatibility matrix"
     $matrixBody = Convert-JsonResponse $adminMatrix "viewer compatibility matrix"
-    if ($matrixBody.combinations.Count -ne 2 -or
-        $matrixBody.combinations[1].status -ne "quarantined") {
-        throw "Viewer matrix did not preserve quarantine evidence."
+    if ($matrixBody.combinations.Count -ne 4 -or
+        $matrixBody.combinations[1].status -ne "quarantined" -or
+        $matrixBody.combinations[1].nativeModVersion -ne "0.3.0-dev.37-ro" -or
+        $matrixBody.combinations[1].bridgeAvailability -ne "available" -or
+        $matrixBody.combinations[2].nativeModVersion -ne "0.3.0-dev.38-ro" -or
+        $matrixBody.combinations[2].status -ne "quarantined" -or
+        $matrixBody.combinations[2].bridgeAvailability -ne "available" -or
+        $matrixBody.combinations[3].nativeModVersion -ne "0.3.0-dev.39-ro" -or
+        $matrixBody.combinations[3].status -ne "quarantined" -or
+        $matrixBody.combinations[3].bridgeAvailability -ne "unknown") {
+        throw "Viewer matrix did not preserve superseded runtime evidence and the current artifact-only quarantine."
     }
 
     Write-Host (

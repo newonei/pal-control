@@ -18,9 +18,9 @@
 | 后端 | ASP.NET Core / .NET 10 |
 | 本地状态 | SQLite 经济账本与 PalDefender 发货 outbox；JSONL 仅保留非经济命令/审计 side state |
 | 原生 MOD | C++23、UE4SS、Windows Named Pipe |
-| Native 源码候选 | Palworld `v1.0.1.100619` / Steam build `24181105`、UE4SS commit `c2ac246`、协议 `1.1`、`0.3.0-dev.37-ro` |
-| 当前本机 Palworld | 与候选目标相同；dev37-ro 已绑定精确 PalServer EXE、UE4SS runtime、Native DLL 及低权限 Control API service SID，两个全新锁定构建均得到 886,272 字节 / `c91bee8f…f8a7`，但尚未部署/实服探针；旧 loader 继续隔离，Bridge/经济写入保持关闭 |
-| 发布成熟度 | 本机开发服候选；需先完成当前版本 Native 只读 ABI/schema 实服探针，再另建写候选并完成原子消费保存/重启/重新登录验收；完整周换档仍是硬门槛 |
+| Native 源码候选 | Palworld `v1.0.1.100619` / Steam build `24181105`、UE4SS commit `c2ac246`、协议 `1.1`、`0.3.0-dev.39-ro` |
+| 当前本机 Palworld | 与候选目标相同；dev39-ro 已由两个独立全新锁定构建复现为字节一致的 893,440 字节 DLL，SHA-256 `c2dab9f9…063b34`，但尚未实服加载或运行固定探针套件，Bridge 可用性仍是 unknown。最近的 9 项成功、3 项无人在线拒绝、0 项意外失败属于历史 dev38-ro；该版本现已 superseded/quarantined，不得当作 dev39-ro 运行证据。服务器当前已停止；仍缺在线玩家、PalDefender 组合、独立复核和任何真实写持久化 |
+| 发布成熟度 | 本机开发服只读候选；仍需受控在线玩家完成三项 live probe 并由独立人员复核，再另建写候选完成原子消费保存/重启/重新登录验收；完整周换档仍是硬门槛 |
 | 开源许可证 | [MIT](LICENSE) |
 
 ## 界面预览
@@ -104,7 +104,7 @@
 - **版本化内容管理**：在维护模式下从已发布版本创建草稿，保存完整 JSON、查看语义 diff、执行严格校验，并以不可变版本和 content hash 发布或回滚；高风险切换要求 TOTP、审计原因、确认短语、幂等键和结算排空。
 - **经济平衡工具**：发布前校验显式 attested 的运营经济影子 DAG，穷尽礼包拆分、至少一层转换、双币回收与费用路径，并用逐 ItemID 参考成本、类别折价目标和风险缓冲阻断发布；动态内容按“最低折扣买入 → 最高事件/限时热点倍率卖出”的跨日极值组合分析。可靠任务还必须提供 cadence/实例受限的永久商域币来源，以及至少两个正价、有限个人限购的长期消费 SKU。旧内容无 policy 时仅兼容检查并明确告警。另提供固定种子 100 玩家 × 7 业务日极值压力仿真和目标区间报告。
 - **运营分析面板**：按服务器、日期口径、赛季和内容版本，从 SQLite 权威事实重算玩法入口、商城与资源兑换两条路径、商品购买率、区域热度、双币产销/余额分位数和 `uncertain`；目录分母由服务端唯一事实记录，少于 5 个账户的非零群组隐藏，页面不接收客户端埋点或返回玩家标识。详见 [指标口径与运行手册](docs/runbooks/economy-analytics.md)。
-- **多服注册与兼容矩阵**：玩家“我的服务器”页面只读展示各节点账户、周档、双币与兼容状态；每个 Palworld 服务器仍由本地 Control API/SQLite 独占写面。聚合请求使用 `fed2_` caller/target/key 绑定 subject、逐 peer HMAC 请求签名、正文哈希、时间窗和 nonce 防重放；身份与签名 key 均可按版本轮换，单 key 或整 peer 可独立吊销。节点失败或版本漂移会显式显示 unavailable/incompatible，不会冒充 0 余额；切服只打开配置 allowlist 中的门户 URL，不附加身份或 session，也不支持跨服转币、库存或交易。版本化矩阵用 canonical SHA-256、精确 game/Steam build/PalDefender/UE4SS/Native 组合和证据 fail-closed；当前旧目标仅为 experimental，实服新版本仍为 quarantined。详见 [多服务器与兼容矩阵手册](docs/runbooks/server-federation-and-compatibility.md)。
+- **多服注册与兼容矩阵**：玩家“我的服务器”页面只读展示各节点账户、周档、双币与兼容状态；每个 Palworld 服务器仍由本地 Control API/SQLite 独占写面。聚合请求使用 `fed2_` caller/target/key 绑定 subject、逐 peer HMAC 请求签名、正文哈希、时间窗和 nonce 防重放；身份与签名 key 均可按版本轮换，单 key 或整 peer 可独立吊销。节点失败或版本漂移会显式显示 unavailable/incompatible，不会冒充 0 余额；切服只打开配置 allowlist 中的门户 URL，不附加身份或 session，也不支持跨服转币、库存或交易。版本化矩阵用 canonical SHA-256、精确 game/Steam build/PalDefender/UE4SS/Native 组合和证据 fail-closed；dev36 仅为 experimental，dev37-ro 因离线库存缺陷隔离，dev38-ro 只保留历史受控运行证据。当前 dev39-ro 只有可复现制品证据、Bridge 可用性 unknown，仍因实服固定套件、在线玩家三项、PalDefender 组合和独立复核缺失而保持 quarantined。详见 [多服务器与兼容矩阵手册](docs/runbooks/server-federation-and-compatibility.md)。
 - **接口与审计**：展示 PalDefender 白名单能力、运维命令和追加式审计记录；需要异步游戏副作用的命令使用持久化队列与最终回执。
 
 ### 玩家门户
@@ -133,9 +133,9 @@
 ### UE4SS Native 集成
 
 - **运行时绑定的本机 Named Pipe**：协议 1.1 使用长度前缀 JSON、hello/heartbeat、受限命令队列和游戏线程命令泵；注册任何 Unreal hook 前先核对宿主 PalServer EXE 与 UE4SS runtime 大小/SHA-256，hello 再上报 Steam build、实际 EXE/Native/UE4SS 身份和 write mode。Control API 还会从 pipe 句柄取得服务端 PID，以低权限查询独立解析并哈希该进程的主 EXE；模块摘要由已绑定宿主的 Native 从实际加载路径读取，并继续与锁和批准配置比较。
-- **当前只读候选**：dev37-ro 只宣传玩家、成长、背包、帕鲁和通知签名探针；CMake/构建脚本、hello capability、Control API transport 和游戏线程 adapter 四层共同禁止写入。历史写实现仍保留在源码中，但只读实服门禁通过前不可启用或部署。
+- **当前只读候选**：dev39-ro 源码只声明玩家、成长、背包、帕鲁和通知签名探针；CMake/构建脚本、hello capability、Control API transport 和游戏线程 adapter 四层共同禁止写入。库存只有在当前权威世界的有效玩家控制器引用对应 PlayerState 时才标记 `ownerOnline=true`，Control API 对缺失或 false 均 fail-closed。当前仅完成双独立可复现构建，尚未证明实服 Bridge 或任何运行探针；历史写实现仍保留在源码中，但只读实服门禁通过前不可启用或部署。
 - **原生通知**：在签名与版本门禁通过后发布顶部横幅、客户端浮层和定向 UI 通知。
-- **玩法扩展源码**：保留 `!撤离`/`!extract` 本人资源兑换点查询和实验性随机安全复活实现；dev37-ro 不安装这两个 hook，后续必须经过独立写能力评审才可重新启用。
+- **玩法扩展源码**：保留 `!撤离`/`!extract` 本人资源兑换点查询和实验性随机安全复活实现；dev39-ro 不安装这两个 hook，后续必须经过独立写能力评审才可重新启用。
 
 ### 功能启用条件
 
@@ -388,7 +388,7 @@ PalDefender 的安装、Token 文件、版本和权限边界见 [PalDefender 集
 
 ### 使用周世界资源经济模式
 
-当前闭环允许出售本周世界允许容器中的任意白名单资源：内置方案 A 内容列出 10 个商品候选和 51 个可售资源候选。启用 `ExtractionMode` 后，Control API 在启动阶段按本机授权资源目录中真实存在的 ItemID 生成并原子激活首个内容版本，完成后才接受 HTTP 流量。内容版本冻结商品、个人/全服库存、兑换区、任务、营业日、规则版本、hash，以及显式 attested 的运营经济影子 DAG。默认双点池每天确定性开放 1 点并声明风险等级，第 8–11 小时为限时热点；每天还确定性选择“资源繁荣”（回收收益 +15%）或“战备补给”（日价再乘 90%，最低有效价为基础价 81%）纯经济事件。目录、地图、报价和 run 固定同一 eventId/seed/window/multiplier 证据；事件不伪造击杀、掉落或采集。影子图按最低买价与最高事件/热点卖价穷尽跨日套利路径，并校验逐 ItemID 参考成本与类别风险缓冲；它明确不是实际 Palworld 配方数据库，也不覆盖玩家私下交易。新报价只在开放窗口内生成，不能跨事件/热点开始边界继续使用旧倍率；活动报价仅在其 `graceSeconds` 和报价自身有效期内完成，所有点关闭则返回下一开放时间。内容 A 的报价即使仍在 grace 内也不能跨 current pointer B 结算。确认后由通过稳定门禁的 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。候选点 2 明确标注“待实服校准”，因此第二个真实兑换区验收、连续两个真实周档报告和真实多人周档仍未完成。当前 dev37-ro 是尚未实服探测的只读候选，不发布任何 consume/write capability；旧 dev36 experimental 仅是历史实现。写闸门会保持关闭，直到只读探针通过、另行评审写候选，并由固定版本真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
+当前闭环允许出售本周世界允许容器中的任意白名单资源：内置方案 A 内容列出 10 个商品候选和 51 个可售资源候选。启用 `ExtractionMode` 后，Control API 在启动阶段按本机授权资源目录中真实存在的 ItemID 生成并原子激活首个内容版本，完成后才接受 HTTP 流量。内容版本冻结商品、个人/全服库存、兑换区、任务、营业日、规则版本、hash，以及显式 attested 的运营经济影子 DAG。默认双点池每天确定性开放 1 点并声明风险等级，第 8–11 小时为限时热点；每天还确定性选择“资源繁荣”（回收收益 +15%）或“战备补给”（日价再乘 90%，最低有效价为基础价 81%）纯经济事件。目录、地图、报价和 run 固定同一 eventId/seed/window/multiplier 证据；事件不伪造击杀、掉落或采集。影子图按最低买价与最高事件/热点卖价穷尽跨日套利路径，并校验逐 ItemID 参考成本与类别风险缓冲；它明确不是实际 Palworld 配方数据库，也不覆盖玩家私下交易。新报价只在开放窗口内生成，不能跨事件/热点开始边界继续使用旧倍率；活动报价仅在其 `graceSeconds` 和报价自身有效期内完成，所有点关闭则返回下一开放时间。内容 A 的报价即使仍在 grace 内也不能跨 current pointer B 结算。确认后由通过稳定门禁的 Native `inventory.consume` 扣物，再在同一 SQLite 事务中唯一增加周战备券；生产路径不再使用 RCON 模拟扣物。候选点 2 明确标注“待实服校准”，因此第二个真实兑换区验收、连续两个真实周档报告和真实多人周档仍未完成。当前 dev39-ro 仅完成 893,440 字节、SHA-256 `c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34` 的双独立可复现构建，尚未实服加载或运行固定探针套件，也不发布任何 consume/write capability。9 项非玩家成功、3 项无人在线拒绝、0 项意外失败是已 superseded/quarantined 的 dev38-ro 历史证据，不可转记给 dev39-ro；dev36 experimental 与存在 offline-inventory 边界缺陷的 dev37-ro 同样仅作历史记录。写闸门会保持关闭，直到 dev39-ro 先完成受控实服固定套件，再由受控在线玩家完成剩余只读探针、固定 PalDefender 组合、独立复核通过、另行评审写候选，并由固定版本真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”持久化验收；官方保存与优雅关服本身只证明维护流程。在此之前仅适合受控开发服。完整产品规则见 [ADR-0001](docs/architecture/decisions/0001-weekly-world-resource-economy.md)。
 
 选择出售时，浏览器只提交源报价 `revision` 与选中的 `ItemID/quantity`，玩家身份、账户和赛季只取 HttpOnly 会话。服务端原子取消源报价并创建冻结同一内容/动态事件证据的子报价；同一 `Idempotency-Key` 在响应丢失或进程重启后返回同一个子报价，同键换账户、源报价或选择内容会冲突且无副作用。Native 子报价保留完整背包快照/hash 用于乐观锁，但消费授权只包含所选行；Development RCON 诊断同样只发送所选行。详细契约、恢复与值班检查见 [选择性资源出售运行手册](docs/runbooks/selective-resource-sale.md)。
 

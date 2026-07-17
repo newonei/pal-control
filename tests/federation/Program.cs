@@ -52,7 +52,7 @@ static async Task VerifyCompatibilityMatrixAsync(string matrixPath)
     var json = await File.ReadAllTextAsync(matrixPath);
     var snapshot = CompatibilityMatrixValidator.Parse(json, matrixPath);
     Assert(snapshot.Document.SchemaVersion == 1, "Matrix schema version drifted.");
-    Assert(snapshot.Document.Combinations.Count == 2, "Matrix observations drifted.");
+    Assert(snapshot.Document.Combinations.Count == 4, "Matrix observations drifted.");
     var target = snapshot.RequireCombination("pal-1.0.0.100427-native-dev36");
     Assert(target.Status == CompatibilityStatus.Experimental &&
            target.GameVersion == "v1.0.0.100427" &&
@@ -64,8 +64,36 @@ static async Task VerifyCompatibilityMatrixAsync(string matrixPath)
     Assert(current.Status == CompatibilityStatus.Quarantined &&
            current.GameVersion == "v1.0.1.100619" &&
            current.SteamBuild == "24181105" &&
-           current.BridgeAvailability == "unavailable",
-        "Quarantined current-server observation is inaccurate.");
+           current.NativeModVersion == "0.3.0-dev.37-ro" &&
+           current.BridgeAvailability == "available" &&
+           current.Capabilities.Contains("inventory.probe") &&
+           !current.Capabilities.Any(capability =>
+               capability.Contains("consume", StringComparison.Ordinal)),
+        "Superseded dev37-ro runtime observation is inaccurate or advertises writes.");
+    var readOnlyRuntime = snapshot.RequireCombination(
+        "pal-1.0.1.100619-build-24181105-runtime-dev38-ro");
+    Assert(readOnlyRuntime.Status == CompatibilityStatus.Quarantined &&
+           readOnlyRuntime.GameVersion == "v1.0.1.100619" &&
+           readOnlyRuntime.SteamBuild == "24181105" &&
+           readOnlyRuntime.NativeModVersion == "0.3.0-dev.38-ro" &&
+           readOnlyRuntime.BridgeAvailability == "available" &&
+           !readOnlyRuntime.Capabilities.Any(capability =>
+               capability.Contains("consume", StringComparison.Ordinal)),
+        "Historical dev38-ro runtime observation is inaccurate or advertises writes.");
+    var currentSource = snapshot.RequireCombination(
+        "pal-1.0.1.100619-build-24181105-source-dev39-ro");
+    Assert(currentSource.Status == CompatibilityStatus.Quarantined &&
+           currentSource.GameVersion == "v1.0.1.100619" &&
+           currentSource.SteamBuild == "24181105" &&
+           currentSource.NativeModVersion == "0.3.0-dev.39-ro" &&
+           currentSource.BridgeAvailability == "unknown" &&
+           currentSource.Evidence.Count == 1 &&
+           currentSource.Evidence[0].Kind == "artifact" &&
+           currentSource.Evidence[0].ArtifactSha256 ==
+               "c2dab9f9bfd3c47ac1a244139fb96ce1de6f598c4bce438ebddde96185063b34" &&
+           !currentSource.Capabilities.Any(capability =>
+               capability.Contains("consume", StringComparison.Ordinal)),
+        "Current dev39-ro artifact candidate is inaccurate, claims runtime availability, or advertises writes.");
     ExpectMatrixFailure(
         () => CompatibilityMatrixValidator.RequireProductionStable(snapshot, target.Id),
         "COMPATIBILITY_COMBINATION_NOT_STABLE");

@@ -293,6 +293,8 @@ public sealed class ExtractionNativeInventoryAdapter : IExtractionNativeInventor
 
         var matches = inventories.EnumerateArray()
             .Where(inventory => inventory.ValueKind == JsonValueKind.Object &&
+                TryGetBoolean(inventory, "ownerOnline", out var ownerOnline) &&
+                ownerOnline &&
                 inventory.TryGetProperty("ownerPlayerUId", out var owner) &&
                 owner.ValueKind == JsonValueKind.String &&
                 TryNormalizeGuid(owner.GetString(), allowEmpty: false, out var candidate) &&

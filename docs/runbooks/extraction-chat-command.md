@@ -1,6 +1,6 @@
 # 游戏内撤离点查询命令
 
-> **历史实现，禁止部署到当前版本。** 本页记录旧 `v1.0.0.100427` / dev36 的人工验收方法。当前 `v1.0.1.100619` / dev37-ro 候选在编译期关闭聊天 hook；不要按本页恢复旧 loader、构建旧 DLL 或重启当前服务器。当前只读候选的加载步骤只以 [`first-server-start.md`](first-server-start.md) 为准。
+> **历史实现，禁止部署到当前版本。** 本页记录旧 `v1.0.0.100427` / dev36 的人工验收方法。当前 `v1.0.1.100619` / dev39-ro 候选在编译期关闭聊天 hook，且尚未完成实服运行验证；dev37-ro 已因离线库存边界缺陷淘汰，dev38-ro 也已 superseded/quarantined。不要按本页恢复旧 loader、构建旧 DLL 或重启当前服务器。当前只读候选的加载步骤只以 [`first-server-start.md`](first-server-start.md) 为准。
 
 基线版本：Palworld `v1.0.0.100427`、PalDefender `1.8.1`、PalControlNative
 `0.3.0-dev.36`。

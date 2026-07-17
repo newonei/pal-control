@@ -109,7 +109,7 @@ Invoke-RestMethod `
 
 `ApprovedPalServerExecutablePath` 必须填写通过文件句柄解析后的绝对 Windows `.exe` 路径，`ApprovedPalServerProcessSid` 必须填写实际承载 PalServer 的服务账户 SID；Control API 会从命名管道服务端 PID 独立取得两者，并在 hello 和每次写入派发时与配置精确核对。PalServer 安装目录应由管理员所有且不可被普通本机用户写入。两个字段留空或使用上述占位符时，Native 写入会 fail-closed；同一管理员权限下的进程注入仍属于受信主机边界，不能由此机制单独防御。
 
-不要把 `SET_AFTER_REAL_ACCEPTANCE` 替换成旧 dev36，也不要把当前 dev37-ro 的编译成功伪造成 stable capability。dev37-ro 的 `writeEnabled=false` 会被 Safety Gate 明确拒绝。只有先完成当前版本只读 ABI/schema probe，再由独立写候选和真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”并保存脱敏证据后，才能同步 stable Native hello、批准版本和配置。启用 RCON 诊断时，host 必须是 loopback，端口和 timeout 必须有效，批准版本不能为空，并且 `Password` 与绝对路径 `PasswordFile` 必须二选一；它不改变生产资源兑换的 Native-only 规则。结构错误使用 `ValidateOnStart` 阻止启动；世界、版本、能力、队列或存储的运行时漂移不会杀死只读服务。
+不要把 `SET_AFTER_REAL_ACCEPTANCE` 替换成旧 dev36、已淘汰的 dev37-ro、已 superseded 的 dev38-ro，也不要把当前 dev39-ro 的可复现制品伪造成 stable capability。dev39-ro 的源码固定 `writeEnabled=false`，且尚未实服加载或运行固定套件，会被 Safety Gate 明确拒绝。dev38-ro 曾取得 9 项非玩家操作成功、3 项 live-player probe 因无人在线拒绝、0 项意外失败，但那只是历史运行证据。只有 dev39-ro 先完成受控固定套件，再由受控在线玩家补齐三项、PalDefender 组合和独立复核通过，最后由独立写候选和真实玩家完成“扣物 → 保存 → 停服 → 重启 → 重新登录”并保存脱敏证据后，才能同步 stable Native hello、批准版本和配置。官方保存与优雅关服只证明维护流程。启用 RCON 诊断时，host 必须是 loopback，端口和 timeout 必须有效，批准版本不能为空，并且 `Password` 与绝对路径 `PasswordFile` 必须二选一；它不改变生产资源兑换的 Native-only 规则。结构错误使用 `ValidateOnStart` 阻止启动；世界、版本、能力、队列或存储的运行时漂移不会杀死只读服务。
 
 ## 验证
 
