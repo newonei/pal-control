@@ -36,6 +36,8 @@ $nativeProbeScriptPath = Join-Path $repositoryRoot "tools\native-bridge-probe.ps
 $nativeClientPath = Join-Path $repositoryRoot `
     "services\control-api\Infrastructure\NativeBridgeClient.cs"
 $bridgeSmokePath = Join-Path $repositoryRoot "tools\bridge-smoke\Program.cs"
+$testApiEnvironmentPath = Join-Path $repositoryRoot `
+    "tests\integration\helpers\test-api-environment.ps1"
 
 function Assert-Contract([bool] $condition, [string] $message) {
     if (-not $condition) {
@@ -481,5 +483,20 @@ foreach ($token in @(
     Assert-Contract ($bridgeSmoke.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
         "the fake bridge command-envelope oracle omits '$token'."
 }
+
+$testApiEnvironment = [IO.File]::ReadAllText($testApiEnvironmentPath, $utf8)
+foreach ($token in @(
+    'function Get-TestFileSha256',
+    '[Security.Cryptography.SHA256]::Create()',
+    '$sha256.ComputeHash($stream)',
+    'Get-TestFileSha256 -Path $executable.FullName'
+)) {
+    Assert-Contract ($testApiEnvironment.IndexOf($token, [StringComparison]::Ordinal) -ge 0) `
+        "the cross-runner fake bridge identity helper omits '$token'."
+}
+Assert-Contract ($testApiEnvironment.IndexOf(
+        'Get-FileHash -LiteralPath',
+        [StringComparison]::Ordinal) -lt 0) `
+    "the fake bridge identity helper depends on Get-FileHash, which is unavailable on some Windows runners."
 
 Write-Host "PASS: runtime-bound protocol 1.1/read-only Native candidate, stable consume, full snapshot, evidence, and durable idempotency contract."

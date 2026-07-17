@@ -15,6 +15,36 @@ $env:Security__AdminAuthentication__Principals__0__Roles__0 = "Owner"
 $env:Security__AdminAuthentication__Principals__0__TotpSecretBase32 =
     "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
+function Get-TestFileSha256 {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # The child Windows PowerShell used by GitHub-hosted runners does not
+    # consistently discover Get-FileHash. Keep the bridge identity fixture
+    # self-contained and stream the exact executable bytes through SHA-256.
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read)
+        try {
+            $digest = $sha256.ComputeHash($stream)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    return [BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()
+}
+
 function Set-TestNativeBridgeApprovedIdentity {
     [CmdletBinding()]
     param(
@@ -30,8 +60,7 @@ function Set-TestNativeBridgeApprovedIdentity {
     if ($executable.PSIsContainer -or $executable.Length -le 0) {
         throw "Fake Native Bridge executable is missing or empty: $ExecutablePath"
     }
-    $sha256 = (Get-FileHash -LiteralPath $executable.FullName -Algorithm SHA256).Hash.
-        ToLowerInvariant()
+    $sha256 = Get-TestFileSha256 -Path $executable.FullName
     $processSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
     $env:ExtractionMode__Safety__ApprovedNativeProtocolVersion = "1.1"
