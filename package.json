@@ -22,6 +22,6 @@
     "test:integration": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/run-tests.ps1 -Suite Integration"
   },
   "devDependencies": {
-    "@redocly/cli": "2.39.0"
+    "@redocly/cli": "2.40.0"
   }
 }
